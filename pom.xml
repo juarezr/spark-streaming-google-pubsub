@@ -224,14 +224,31 @@
                 <filter>
                   <artifact>*:*</artifact>
                   <excludes>
+                    <!-- signatures -->
                     <exclude>META-INF/*.SF</exclude>
                     <exclude>META-INF/*.DSA</exclude>
                     <exclude>META-INF/*.RSA</exclude>
+                    <!-- overlapping license/notice/manifest noise from transitive jars -->
+                    <exclude>META-INF/MANIFEST.MF</exclude>
+                    <exclude>META-INF/LICENSE</exclude>
+                    <exclude>META-INF/LICENSE.txt</exclude>
+                    <exclude>META-INF/NOTICE</exclude>
+                    <exclude>META-INF/NOTICE.txt</exclude>
+                    <exclude>META-INF/DEPENDENCIES</exclude>
+                    <exclude>META-INF/licenses/**</exclude>
+                    <!-- JPMS descriptors break under shading and trigger overlap warnings -->
+                    <exclude>module-info.class</exclude>
+                    <exclude>META-INF/versions/**</exclude>
                   </excludes>
                 </filter>
               </filters>
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <manifestEntries>
+                    <Automatic-Module-Name>io.github.juarezr.spark.pubsub</Automatic-Module-Name>
+                  </manifestEntries>
+                </transformer>
               </transformers>
               <artifactSet>
                 <excludes>
