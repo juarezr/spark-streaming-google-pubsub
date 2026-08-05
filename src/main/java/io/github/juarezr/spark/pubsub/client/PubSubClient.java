@@ -2,6 +2,7 @@ package io.github.juarezr.spark.pubsub.client;
 
 import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.api.gax.core.NoCredentialsProvider;
+import com.google.api.gax.grpc.GrpcCallContext;
 import com.google.api.gax.grpc.GrpcTransportChannel;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
@@ -33,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.threeten.bp.Duration;
 
 /**
  * Thin wrapper around the Pub/Sub subscriber stub with pull/ack/nack, retries, and optional seek.
@@ -111,29 +113,38 @@ public final class PubSubClient implements Closeable, Serializable {
       default:
         return;
     }
-    try (SubscriptionAdminClient admin = createAdminClient()) {
-      admin.seek(seek.build());
-      LOG.warn(
-          "Applied seek={} on subscription {} (explicit rewind requested)",
-          config.seekMode(),
-          config.subscriptionPath());
+
+    ManagedChannel adminChannel = null;
+    try {
+      SubscriptionAdminSettings.Builder builder = SubscriptionAdminSettings.newBuilder();
+      if (config.emulatorHost().isPresent()) {
+        String host = config.emulatorHost().get();
+        adminChannel = ManagedChannelBuilder.forTarget(host).usePlaintext().build();
+        builder.setTransportChannelProvider(
+            FixedTransportChannelProvider.create(GrpcTransportChannel.create(adminChannel)));
+        builder.setCredentialsProvider(NoCredentialsProvider.create());
+      } else {
+        builder.setCredentialsProvider(
+            FixedCredentialsProvider.create(credentialsProvider.getCredentials()));
+      }
+      try (SubscriptionAdminClient admin = SubscriptionAdminClient.create(builder.build())) {
+        admin.seek(seek.build());
+        LOG.warn(
+            "Applied seek={} on subscription {} (explicit rewind requested)",
+            config.seekMode(),
+            config.subscriptionPath());
+      }
+    } finally {
+      if (adminChannel != null) {
+        adminChannel.shutdownNow();
+        try {
+          adminChannel.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }
     }
     seekApplied = true;
-  }
-
-  private SubscriptionAdminClient createAdminClient() throws IOException {
-    SubscriptionAdminSettings.Builder builder = SubscriptionAdminSettings.newBuilder();
-    if (config.emulatorHost().isPresent()) {
-      String host = config.emulatorHost().get();
-      ManagedChannel adminChannel = ManagedChannelBuilder.forTarget(host).usePlaintext().build();
-      builder.setTransportChannelProvider(
-          FixedTransportChannelProvider.create(GrpcTransportChannel.create(adminChannel)));
-      builder.setCredentialsProvider(NoCredentialsProvider.create());
-    } else {
-      builder.setCredentialsProvider(
-          FixedCredentialsProvider.create(credentialsProvider.getCredentials()));
-    }
-    return SubscriptionAdminClient.create(builder.build());
   }
 
   private static Instant parseSeekTime(String seekTime) {
@@ -167,7 +178,10 @@ public final class PubSubClient implements Closeable, Serializable {
                   .setMaxMessages(config.maxMessagesPerPull())
                   .setReturnImmediately(config.returnImmediately())
                   .build();
-          PullResponse response = subscriberStub.pullCallable().call(request);
+          GrpcCallContext callContext =
+              GrpcCallContext.createDefault()
+                  .withTimeout(Duration.ofSeconds(config.pullTimeoutSeconds()));
+          PullResponse response = subscriberStub.pullCallable().call(request, callContext);
           List<PulledMessage> messages = new ArrayList<>(response.getReceivedMessagesCount());
           for (ReceivedMessage received : response.getReceivedMessagesList()) {
             byte[] data = received.getMessage().getData().toByteArray();
@@ -245,6 +259,30 @@ public final class PubSubClient implements Closeable, Serializable {
     if (outstandingBytes != null && bytes > 0) {
       outstandingBytes.addAndGet(-bytes);
     }
+  }
+
+  /** Releases flow-control byte accounting for the given messages without acknowledging them. */
+  public void releaseMessages(List<PulledMessage> messages) {
+    if (messages == null || messages.isEmpty()) {
+      return;
+    }
+    long bytes = 0L;
+    for (PulledMessage message : messages) {
+      bytes += message.data().length;
+    }
+    releaseBytes(bytes);
+  }
+
+  /** Clears outstanding byte accounting (e.g. on receiver shutdown). */
+  public void resetOutstandingBytes() {
+    if (outstandingBytes != null) {
+      outstandingBytes.set(0);
+    }
+  }
+
+  /** Visible for tests. */
+  public long outstandingBytes() {
+    return outstandingBytes == null ? 0L : outstandingBytes.get();
   }
 
   public PubSubConfig config() {
