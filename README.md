@@ -1,2 +1,204 @@
 # spark-streaming-google-pubsub
-Enables Apache Spark streaming applications to consume messages from Google Pubsub from Java and Python
+
+Apache Spark connector for **Google Cloud Pub/Sub** (standard). Read messages from a subscription into:
+
+- **Structured Streaming** (primary) via `.format("google-pubsub")`
+- **Classic Spark Streaming (DStreams)** via a thin Legacy-compatible Java API
+
+Designed for Spark **3.5** (Scala 2.12) and Spark **4.0** (Scala 2.13), including GCP Dataproc **2.3** and **3.0**.
+Authentication defaults to **Application Default Credentials (ADC)**.
+
+## Why this connector
+
+This project aims to deliver:
+
+- Structured Streaming Data Source V2 (`MicroBatchStream`)
+- Configurable ack semantics (`afterCommit` default, optional `early`)
+- No subscription rewind on restart unless you set `seek`
+- Retries/backoff and bounded outstanding bytes for 24×7 jobs
+- A DStreams shim for gradual migration from Legacy style streaming
+- Support for newer/modern Dataproc images
+
+## Coordinates
+
+| Spark | Scala | Artifact                                                     |
+|-------|-------|--------------------------------------------------------------|
+| 3.5.x | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.1.0` |
+| 4.0.x | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.1.0` |
+
+Fat JAR (Google client deps bundled): classifier `all`.
+
+## Schema (Structured Streaming)
+
+| Column        | Type                 | Description                                 |
+|---------------|:---------------------|:--------------------------------------------|
+| `messageId`   | string               | Pub/Sub message id                          |
+| `data`        | binary               | Payload bytes                               |
+| `attributes`  | `map<string,string>` | Attributes                                  |
+| `publishTime` | timestamp            | Publish time                                |
+| `orderingKey` | string               | Ordering key (may be empty)                 |
+| `ackId`       | string               | Ack id (useful when managing acks manually) |
+
+## Options
+
+| Option                | Default       | Description                                 |
+|:----------------------|:--------------|:--------------------------------------------|
+| `projectId`           | required      | GCP project id                              |
+| `subscription`        | required      | Subscription id or full resource name       |
+| `topic`               |               | Optional topic (reserved for admin helpers) |
+| `ackMode`             | `afterCommit` | `afterCommit` or `early`                    |
+| `maxMessagesPerPull`  | `1000`        | Max messages per pull                       |
+| `maxBytesOutstanding` | `104857600`   | Soft cap on in-flight payload bytes         |
+| `ackDeadlineSeconds`  | `60`          | Extend deadline while a batch is in flight  |
+| `pullTimeoutSeconds`  | `20`          | Client pull timeout guidance                |
+| `seek`                | `none`        | `none`, `beginning`, `timestamp`, `snapshot`|
+| `seekTime`            |               | Epoch millis/RFC-3339 (if `seek=timestamp`) |
+| `seekSnapshot`        |               | Snapshot resource (when `seek=snapshot`)    |
+| `credentialsFile`     | ADC           | Path to service-account JSON (optional)     |
+| `emulatorHost`        |               | e.g. `localhost:8085` for the emulator      |
+| `returnImmediately`   | `false`       | Pub/Sub pull `returnImmediately`            |
+
+**Restart behavior:** with `seek=none` (default), the subscription cursor is **not** rewound.
+Unacked messages redeliver after a crash/watchdog restart — matching typical Dataproc workflow recovery.
+
+## Structured Streaming (Java)
+
+```java
+Dataset<Row> messages = spark.readStream()
+    .format("google-pubsub")
+    .option("projectId", "my-project")
+    .option("subscription", "my-subscription")
+    .option("ackMode", "afterCommit")
+    .load();
+
+messages
+    .selectExpr("messageId", "CAST(data AS STRING) AS payload", "publishTime")
+    .writeStream()
+    .format("parquet")
+    .option("path", "gs://bucket/tables/event")
+    .option("checkpointLocation", "gs://bucket/checkpoints/event")
+    .start()
+    .awaitTermination();
+```
+
+## Structured Streaming (Scala)
+
+See [`examples/scala/StructuredStreamingExample.scala`](examples/scala/StructuredStreamingExample.scala).
+
+## Structured Streaming (PySpark)
+
+```python
+messages = (
+    spark.readStream.format("google-pubsub")
+    .option("projectId", "my-project")
+    .option("subscription", "my-subscription")
+    .option("ackMode", "afterCommit")
+    .load()
+)
+```
+
+Full script: [`examples/python/structured_streaming_example.py`](examples/python/structured_streaming_example.py).
+
+## DStreams shim (Legacy-compatible Java API)
+
+```java
+import io.github.juarezr.spark.pubsub.dstream.PubsubUtils;
+import io.github.juarezr.spark.pubsub.dstream.SparkGCPCredentials;
+import io.github.juarezr.spark.pubsub.dstream.SparkPubsubMessage;
+
+SparkGCPCredentials credentials = SparkGCPCredentials.builder().build(); // ADC
+JavaReceiverInputDStream<SparkPubsubMessage> stream = PubsubUtils.createStream(
+    jssc, projectId, topic, subscription, credentials, StorageLevel.MEMORY_AND_DISK_SER());
+```
+
+Migration from Legacy: change the Maven/Gradle dependency and imports from
+`org.apache.spark.streaming.pubsub.*` to `io.github.juarezr.spark.pubsub.dstream.*`.
+
+> DStreams remain available on Spark 4.0 but are **deprecated**. Prefer Structured Streaming for new work.
+
+## Google Dataproc
+
+1. Build or download the `all` classifier JAR (or use `--packages` once published).
+2. Submit with Dataproc 2.3 (Spark 3.5 / Scala 2.12) or 3.0 (Spark 4.0 / Scala 2.13).
+3. Grant the cluster service account `roles/pubsub.subscriber` (and publisher if needed).
+4. Rely on the metadata server for ADC — do not ship JSON keys.
+
+```bash
+gcloud dataproc jobs submit spark \
+  --cluster=my-cluster \
+  --region=us-east4 \
+  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.1.0-all.jar \
+  --class=com.example.MyApp \
+  -- gs://my-bucket/apps/my-app.jar
+```
+
+## Databricks
+
+Add the Maven coordinate as a library on the cluster (`_2.12` or `_2.13` matching the runtime).
+Configure a Databricks secret or instance profile / GCP service account so ADC works, then use the
+same `.format("google-pubsub")` options as above. Use a durable `checkpointLocation` on cloud storage.
+
+## Build and test locally
+
+Requirements: JDK 11+ (17 recommended), Maven 3.9+.
+
+```bash
+# Spark 3.5 / Scala 2.12 (default)
+mvn -Pspark35 clean verify
+
+# Spark 4.0 / Scala 2.13
+mvn -Pspark40 clean verify
+
+# Format check
+mvn -Pspark35 spotless:check
+```
+
+### Unit tests
+
+```bash
+mvn -Pspark35 test
+```
+
+### Integration tests (Pub/Sub emulator)
+
+```bash
+docker run --rm -p 8085:8085 \
+  gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
+  gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
+
+export PUBSUB_EMULATOR_HOST=localhost:8085
+mvn -Pspark35 verify
+```
+
+### Manual test against real GCP (ADC)
+
+```bash
+gcloud auth application-default login
+# or: export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+
+mvn -Pspark35 -DskipTests package
+
+spark-submit \
+  --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
+  --jars target/spark-streaming-google-pubsub_2.12-0.1.0-SNAPSHOT-all.jar \
+  examples/java/JavaStructuredStreamingExample.java \
+  YOUR_PROJECT YOUR_SUBSCRIPTION /tmp/pubsub-cp /tmp/pubsub-out
+```
+
+(Use a compiled example JAR or paste the example into your application module.)
+
+## Publishing
+
+See [`docs/publishing-maven-central.md`](docs/publishing-maven-central.md).
+
+## Reliability notes
+
+- **`ackMode=afterCommit` (default):** messages are acknowledged after Spark commits the micro-batch.
+  Failures before commit lead to redelivery (at-least-once).
+- **`ackMode=early`:** ack soon after pull/store (Legacy-like). Faster ack release, higher loss risk on crash.
+- Outstanding byte accounting prevents unbounded memory growth under backpressure.
+- Transient Pub/Sub errors are retried with exponential backoff.
+
+## License
+
+GPL-3.0 — see [`LICENSE`](LICENSE).
