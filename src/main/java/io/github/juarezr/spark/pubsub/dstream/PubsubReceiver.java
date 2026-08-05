@@ -7,6 +7,7 @@ import io.github.juarezr.spark.pubsub.config.AckMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
@@ -19,6 +20,9 @@ import org.slf4j.LoggerFactory;
 public final class PubsubReceiver extends Receiver<SparkPubsubMessage> {
   private static final long serialVersionUID = 1L;
   private static final Logger LOG = LoggerFactory.getLogger(PubsubReceiver.class);
+
+  private static final long EMPTY_BACKOFF_INITIAL_MS = 100L;
+  private static final long EMPTY_BACKOFF_MAX_MS = 1_000L;
 
   private final PubSubConfig config;
   private final boolean autoAcknowledge;
@@ -73,20 +77,28 @@ public final class PubsubReceiver extends Receiver<SparkPubsubMessage> {
   }
 
   private void receiveLoop() {
+    long emptyBackoffMs = EMPTY_BACKOFF_INITIAL_MS;
     try {
       while (running.get() && !isStopped()) {
         List<PulledMessage> pulled = client.pull();
         if (pulled.isEmpty()) {
+          LOG.debug(
+              "Empty Pub/Sub pull for {}; backing off {} ms",
+              config.subscriptionPath(),
+              emptyBackoffMs);
+          sleepQuietly(emptyBackoffMs);
+          emptyBackoffMs = Math.min(emptyBackoffMs * 2, EMPTY_BACKOFF_MAX_MS);
           continue;
         }
-        String batchId = Long.toString(batchCounter.getAndIncrement());
-        ackCoordinator.registerBatch(batchId, pulled);
+        emptyBackoffMs = EMPTY_BACKOFF_INITIAL_MS;
 
         List<SparkPubsubMessage> sparkMessages =
             pulled.stream().map(this::toSparkMessage).collect(Collectors.toList());
         store(sparkMessages.iterator());
 
         if (autoAcknowledge) {
+          String batchId = Long.toString(batchCounter.getAndIncrement());
+          ackCoordinator.registerBatch(batchId, pulled);
           if (config.ackMode() == AckMode.EARLY) {
             ackCoordinator.onPulled(client, batchId);
           } else {
@@ -94,14 +106,22 @@ public final class PubsubReceiver extends Receiver<SparkPubsubMessage> {
             ackCoordinator.commit(client, batchId);
           }
         } else {
-          // Leave ack ids on messages for manual handling; release tracking only
-          ackCoordinator.clear();
+          // Leave ack ids on messages for manual handling; free flow-control accounting.
+          client.releaseMessages(pulled);
         }
       }
     } catch (Throwable t) {
       if (running.get() && !isStopped()) {
         restart("Error receiving Pub/Sub messages", t);
       }
+    }
+  }
+
+  private static void sleepQuietly(long millis) {
+    try {
+      TimeUnit.MILLISECONDS.sleep(millis);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
     }
   }
 
@@ -127,11 +147,13 @@ public final class PubsubReceiver extends Receiver<SparkPubsubMessage> {
         Thread.currentThread().interrupt();
       }
     }
-    if (client != null) {
-      client.close();
-    }
     if (ackCoordinator != null) {
       ackCoordinator.clear();
+    }
+    if (client != null) {
+      // Drop any remaining outstanding accounting; unacked messages redeliver via Pub/Sub.
+      client.resetOutstandingBytes();
+      client.close();
     }
     LOG.info("Pub/Sub receiver stopped for {}", config.subscriptionPath());
   }
