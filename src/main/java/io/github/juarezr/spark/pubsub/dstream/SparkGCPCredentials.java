@@ -7,7 +7,7 @@ import java.util.Objects;
 
 /**
  * Legacy-compatible credentials builder. Defaults to Application Default Credentials when {@link
- * #build()} is called without other configuration.
+ * #builder()}.build() is called without other configuration.
  */
 public final class SparkGCPCredentials implements Serializable {
   private static final long serialVersionUID = 1L;
