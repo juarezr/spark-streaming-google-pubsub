@@ -50,7 +50,7 @@ Fat JAR (Google client deps bundled): classifier `all`.
 | `maxMessagesPerPull`  | `1000`        | Max messages per pull                       |
 | `maxBytesOutstanding` | `104857600`   | Soft cap on in-flight payload bytes         |
 | `ackDeadlineSeconds`  | `60`          | Extend deadline while a batch is in flight  |
-| `pullTimeoutSeconds`  | `20`          | Client pull timeout guidance                |
+| `pullTimeoutSeconds`  | `20`          | RPC deadline (seconds) for each pull call   |
 | `seek`                | `none`        | `none`, `beginning`, `timestamp`, `snapshot`|
 | `seekTime`            |               | Epoch millis/RFC-3339 (if `seek=timestamp`) |
 | `seekSnapshot`        |               | Snapshot resource (when `seek=snapshot`)    |
