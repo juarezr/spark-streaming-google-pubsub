@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    name: Build and test (Spark ${{ matrix.spark }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - spark: "3.5"
+            profile: spark35
+            java: "11"
+          - spark: "4.0"
+            profile: spark40
+            java: "17"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      - name: Spotless
+        run: mvn -B -P${{ matrix.profile }} spotless:check
+
+      - name: Unit tests
+        run: mvn -B -P${{ matrix.profile }} -Dspotless.check.skip=true test
+
+      - name: Start Pub/Sub emulator
+        run: |
+          docker run -d --name pubsub-emulator -p 8085:8085 \
+            gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
+            gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/8085) >/dev/null 2>&1; then
+              echo "Emulator is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Emulator failed to start"
+          docker logs pubsub-emulator || true
+          exit 1
+
+      - name: Integration tests + package
+        env:
+          PUBSUB_EMULATOR_HOST: localhost:8085
+        run: mvn -B -P${{ matrix.profile }} -Dspotless.check.skip=true verify
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jars-spark-${{ matrix.spark }}
+          path: target/*.jar
+          if-no-files-found: error
