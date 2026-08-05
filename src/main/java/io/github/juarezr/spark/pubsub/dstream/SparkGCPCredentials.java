@@ -1,7 +1,7 @@
 package io.github.juarezr.spark.pubsub.dstream;
 
-import io.github.juarezr.spark.pubsub.auth.PubSubCredentialsProvider;
 import com.google.auth.Credentials;
+import io.github.juarezr.spark.pubsub.auth.PubSubCredentialsProvider;
 import java.io.Serializable;
 import java.util.Objects;
 

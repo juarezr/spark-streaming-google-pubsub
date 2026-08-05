@@ -8,8 +8,8 @@ public enum AckMode {
    */
   AFTER_COMMIT,
   /**
-   * Acknowledge soon after a successful pull/store (Legacy-like). Higher risk of loss if the process
-   * crashes before Spark finishes processing.
+   * Acknowledge soon after a successful pull/store (Legacy-like). Higher risk of loss if the
+   * process crashes before Spark finishes processing.
    */
   EARLY;
 

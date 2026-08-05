@@ -2,8 +2,6 @@ package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-import io.github.juarezr.spark.pubsub.config.AckMode;
-import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
@@ -17,6 +15,8 @@ import com.google.pubsub.v1.ProjectSubscriptionName;
 import com.google.pubsub.v1.ProjectTopicName;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.PushConfig;
+import io.github.juarezr.spark.pubsub.config.AckMode;
+import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import java.nio.file.Files;

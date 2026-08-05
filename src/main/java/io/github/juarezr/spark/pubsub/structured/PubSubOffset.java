@@ -1,8 +1,8 @@
 package io.github.juarezr.spark.pubsub.structured;
 
-import io.github.juarezr.spark.pubsub.client.PulledMessage;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import io.github.juarezr.spark.pubsub.client.PulledMessage;
 import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;

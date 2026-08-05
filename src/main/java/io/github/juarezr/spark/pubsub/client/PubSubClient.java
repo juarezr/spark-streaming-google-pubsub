@@ -1,8 +1,5 @@
 package io.github.juarezr.spark.pubsub.client;
 
-import io.github.juarezr.spark.pubsub.auth.PubSubCredentialsProvider;
-import io.github.juarezr.spark.pubsub.config.PubSubConfig;
-import io.github.juarezr.spark.pubsub.config.SeekMode;
 import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;
@@ -20,6 +17,9 @@ import com.google.pubsub.v1.PullResponse;
 import com.google.pubsub.v1.ReceivedMessage;
 import com.google.pubsub.v1.SeekRequest;
 import com.google.pubsub.v1.SubscriptionName;
+import io.github.juarezr.spark.pubsub.auth.PubSubCredentialsProvider;
+import io.github.juarezr.spark.pubsub.config.PubSubConfig;
+import io.github.juarezr.spark.pubsub.config.SeekMode;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import java.io.Closeable;
