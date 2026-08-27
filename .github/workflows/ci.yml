@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build and test (Spark ${{ matrix.spark }})
+    name: test-spark-${{ matrix.spark }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -20,22 +20,28 @@ jobs:
             profile: spark40
             java: "17"
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source code at commit ${{ github.sha }}
+        id: checkout-source-code
+        uses: actions/checkout@v7
 
       - name: Set up JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
+        id: setup-java
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
           cache: maven
 
-      - name: Spotless
+      - name: Spotless Check
+        id: spotless-check
         run: mvn -B -P${{ matrix.profile }} spotless:check
 
       - name: Unit tests
+        id: unit-tests
         run: mvn -B -P${{ matrix.profile }} -Dspotless.check.skip=true test
 
       - name: Start Pub/Sub emulator
+        id: start-pubsub-emulator
         run: |
           docker run -d --name pubsub-emulator -p 8085:8085 \
             gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
@@ -52,12 +58,14 @@ jobs:
           exit 1
 
       - name: Integration tests + package
+        id: integration-tests-package
         env:
           PUBSUB_EMULATOR_HOST: localhost:8085
         run: mvn -B -P${{ matrix.profile }} -Dspotless.check.skip=true verify
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        id: upload-artifact
+        uses: actions/upload-artifact@v7
         with:
           name: jars-spark-${{ matrix.spark }}
           path: target/*.jar
