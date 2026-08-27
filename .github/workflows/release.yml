@@ -7,7 +7,7 @@ on:
 
 jobs:
   release:
-    name: Publish ${{ matrix.profile }}
+    name: release-spark-${{ matrix.spark }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -18,15 +18,19 @@ jobs:
           - profile: spark40
             java: "17"
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source code at commit ${{ github.sha }}
+        id: checkout-source-code
+        uses: actions/checkout@v7
 
       - name: Set version from tag
+        id: set-version
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           mvn -B -P${{ matrix.profile }} versions:set -DnewVersion="$TAG" -DgenerateBackupPoms=false
 
       - name: Set up JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
+        id: setup-java
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
@@ -38,6 +42,7 @@ jobs:
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
       - name: Publish to Maven Central
+        id: publish-to-maven-central
         env:
           MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
           MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
