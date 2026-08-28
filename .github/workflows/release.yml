@@ -7,7 +7,7 @@ on:
 
 jobs:
   release:
-    name: release-spark-${{ matrix.spark }}
+    name: release-spark-${{ matrix.profile }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
