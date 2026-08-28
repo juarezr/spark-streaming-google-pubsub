@@ -10,7 +10,7 @@ import org.apache.spark.sql.streaming.StreamingQuery;
  *
  * <pre>
  * spark-submit --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
- *   --packages io.github.juarezr:spark-streaming-google-pubsub_2.12:0.1.0 \
+ *   --packages io.github.juarezr:spark-streaming-google-pubsub_2.12:0.2.0 \
  *   your-app.jar project-id subscription-id /tmp/checkpoint /tmp/out
  * </pre>
  */

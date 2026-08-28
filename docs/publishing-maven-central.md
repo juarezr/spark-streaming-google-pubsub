@@ -83,8 +83,8 @@ Ensure `~/.m2/settings.xml` contains:
 Push a version tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The [`release.yml`](../.github/workflows/release.yml) workflow builds both Spark profiles, signs artifacts, and publishes to Central.
@@ -94,11 +94,11 @@ The [`release.yml`](../.github/workflows/release.yml) workflow builds both Spark
 After the Portal shows **Published**, the coordinates appear on Maven Central within minutes to a few hours:
 
 ```text
-io.github.juarezr:spark-streaming-google-pubsub_2.12:0.1.0
-io.github.juarezr:spark-streaming-google-pubsub_2.13:0.1.0
+io.github.juarezr:spark-streaming-google-pubsub_2.12:0.2.0
+io.github.juarezr:spark-streaming-google-pubsub_2.13:0.2.0
 ```
 
 ## Snapshot builds
 
-Snapshots are useful internally (`0.1.0-SNAPSHOT`) but are **not** published to Maven Central.
+Snapshots are useful internally (`0.2.0-SNAPSHOT`) but are **not** published to Maven Central.
 Use GitHub Packages or GCS for snapshot distribution if needed.

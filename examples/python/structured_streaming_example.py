@@ -1,6 +1,6 @@
 # Minimal PySpark Structured Streaming example.
 # Requires the connector JAR on the driver/executor classpath, e.g.:
-#   pyspark --packages io.github.juarezr:spark-streaming-google-pubsub_2.12:0.1.0
+#   pyspark --packages io.github.juarezr:spark-streaming-google-pubsub_2.12:0.2.0
 # or:
 #   spark-submit --packages ... examples/python/structured_streaming_example.py
 
