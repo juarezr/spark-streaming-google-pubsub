@@ -27,7 +27,6 @@ gpg --list-secret-keys
 gpg --full-generate-key
 gpg --list-secret-keys --keyid-format LONG
 gpg --export-secret-keys -a YOUR_KEY_ID > secring.asc
-gpg --keyserver keyserver.ubuntu.com --send-keys YOUR_KEY_ID
 ```
 
 GitHub secrets:
@@ -39,7 +38,23 @@ GitHub secrets:
 | `MAVEN_USERNAME`  | Portal token username     |
 | `MAVEN_PASSWORD`  | Portal token password     |
 
-## 5. Local dry-run
+## 5. Publish public GPG key is not on a keyserver Central can use
+
+1. From the machine that created the key used in GPG_PRIVATE_KEY:
+
+```bash
+gpg --list-secret-keys --keyid-format LONG
+gpg --keyserver keyserver.ubuntu.com --send-keys YOUR_KEY_ID
+gpg --keyserver keys.openpgp.org --send-keys YOUR_KEY_ID
+```
+
+2. Confirm it is searchable (wait a few minutes, then):
+
+```bash
+gpg --keyserver keyserver.ubuntu.com --recv-keys YOUR_KEY_ID
+```
+
+## 6. Local dry-run
 
 ```bash
 # Spark 3.5 artifact
@@ -63,7 +78,7 @@ Ensure `~/.m2/settings.xml` contains:
 </settings>
 ```
 
-## 6. GitHub Actions release
+## 7. GitHub Actions release
 
 Push a version tag:
 
