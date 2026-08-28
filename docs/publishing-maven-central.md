@@ -27,7 +27,6 @@ gpg --list-secret-keys
 gpg --full-generate-key
 gpg --list-secret-keys --keyid-format LONG
 gpg --export-secret-keys -a YOUR_KEY_ID > secring.asc
-gpg --keyserver keyserver.ubuntu.com --send-keys YOUR_KEY_ID
 ```
 
 GitHub secrets:
@@ -39,7 +38,23 @@ GitHub secrets:
 | `MAVEN_USERNAME`  | Portal token username     |
 | `MAVEN_PASSWORD`  | Portal token password     |
 
-## 5. Local dry-run
+## 5. Publish public GPG key is not on a keyserver Central can use
+
+1. From the machine that created the key used in GPG_PRIVATE_KEY:
+
+```bash
+gpg --list-secret-keys --keyid-format LONG
+gpg --keyserver keyserver.ubuntu.com --send-keys YOUR_KEY_ID
+gpg --keyserver keys.openpgp.org --send-keys YOUR_KEY_ID
+```
+
+2. Confirm it is searchable (wait a few minutes, then):
+
+```bash
+gpg --keyserver keyserver.ubuntu.com --recv-keys YOUR_KEY_ID
+```
+
+## 6. Local dry-run
 
 ```bash
 # Spark 3.5 artifact
@@ -63,13 +78,13 @@ Ensure `~/.m2/settings.xml` contains:
 </settings>
 ```
 
-## 6. GitHub Actions release
+## 7. GitHub Actions release
 
 Push a version tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The [`release.yml`](../.github/workflows/release.yml) workflow builds both Spark profiles, signs artifacts, and publishes to Central.
@@ -79,11 +94,11 @@ The [`release.yml`](../.github/workflows/release.yml) workflow builds both Spark
 After the Portal shows **Published**, the coordinates appear on Maven Central within minutes to a few hours:
 
 ```text
-io.github.juarezr:spark-streaming-google-pubsub_2.12:0.1.0
-io.github.juarezr:spark-streaming-google-pubsub_2.13:0.1.0
+io.github.juarezr:spark-streaming-google-pubsub_2.12:0.2.0
+io.github.juarezr:spark-streaming-google-pubsub_2.13:0.2.0
 ```
 
 ## Snapshot builds
 
-Snapshots are useful internally (`0.1.0-SNAPSHOT`) but are **not** published to Maven Central.
+Snapshots are useful internally (`0.2.0-SNAPSHOT`) but are **not** published to Maven Central.
 Use GitHub Packages or GCS for snapshot distribution if needed.
