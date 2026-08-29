@@ -64,6 +64,10 @@ The same tag’s GitHub Release should list `spark-streaming-google-pubsub_2.12-
 
 Do not republish an already-released version without the fat JAR (or with a different set of files). Central is immutable; the next cut must be a new version.
 
+### Thin JAR dependencies
+
+The published POM pins `google-cloud-pubsub`, `google-auth-library-oauth2-http`, and `gson` to versions that stay compatible with Spark 3.5 / Dataproc 2.3. Those pins are not version ranges: a range would float consumers onto newer GAX/gRPC/Guava. Override the Google clients in your own POM or BOM if you need a newer stack.
+
 ### Snapshot builds
 
 Snapshots are useful internally (`0.3.0-SNAPSHOT`) but are **not** published to Maven Central.
