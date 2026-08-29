@@ -5,7 +5,7 @@ Apache Spark connector for **Google Cloud Pub/Sub** (standard). Read messages fr
 - **Structured Streaming** (primary) via `.format("google-pubsub")`
 - **Classic Spark Streaming (DStreams)** via a thin Legacy-compatible Java API
 
-Designed for Spark **3.5** (Scala 2.12) and Spark **4.0** (Scala 2.13), including GCP Dataproc **2.3** and **3.0**.
+Designed for Spark **3.5** (Scala 2.12) and Spark **4.0–4.2** (Scala 2.13; built against 4.1), including GCP Dataproc **2.3** (Spark 3.5) and **3.0** (Spark 4.1).
 Authentication defaults to **Application Default Credentials (ADC)**.
 
 ## Why this connector
@@ -21,12 +21,14 @@ This project aims to deliver:
 
 ## Coordinates
 
-| Spark | Scala | Artifact                                                     |
-|-------|-------|--------------------------------------------------------------|
-| 3.5.x | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.2.0` |
-| 4.0.x | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.2.0` |
+| Spark   | Scala | Artifact                                                     |
+|---------|-------|--------------------------------------------------------------|
+| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.3.0` |
+| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.3.0` |
 
-Fat JAR (Google client deps bundled): classifier `all`.
+Prefer `--packages` (or a Maven/Gradle dependency) so Google client libraries resolve as transitives.
+
+Fat JAR (`*-all.jar`, Google client deps bundled): built locally with `mvn package`, and attached to [GitHub Releases](https://github.com/juarezr/spark-streaming-google-pubsub/releases) — **not** published to Maven Central.
 
 ## Schema (Structured Streaming)
 
@@ -114,20 +116,30 @@ JavaReceiverInputDStream<SparkPubsubMessage> stream = PubsubUtils.createStream(
 Migration from Legacy: change the Maven/Gradle dependency and imports from
 `org.apache.spark.streaming.pubsub.*` to `io.github.juarezr.spark.pubsub.dstream.*`.
 
-> DStreams remain available on Spark 4.0 but are **deprecated**. Prefer Structured Streaming for new work.
+> DStreams remain available on Spark 4.x but are **deprecated**. Prefer Structured Streaming for new work.
 
 ## Google Dataproc
 
-1. Build or download the `all` classifier JAR (or use `--packages` once published).
-2. Submit with Dataproc 2.3 (Spark 3.5 / Scala 2.12) or 3.0 (Spark 4.0 / Scala 2.13).
+1. Prefer `--packages` with the Maven coordinate so Google client dependencies resolve from Central.
+   Alternatively, copy `*-all.jar` from a [GitHub Release](https://github.com/juarezr/spark-streaming-google-pubsub/releases) (or `mvn package`) to GCS and pass `--jars`.
+2. Submit with Dataproc 2.3 (Spark 3.5 / Scala 2.12) or 3.0 (Spark 4.1 / Scala 2.13). Spark 4.2 is supported via the same `_2.13` coordinate on Apache Spark / other platforms until Dataproc ships it.
 3. Grant the cluster service account `roles/pubsub.subscriber` (and publisher if needed).
 4. Rely on the metadata server for ADC — do not ship JSON keys.
 
 ```bash
+# Preferred: resolve the thin JAR and its Google client transitives
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.2.0-all.jar \
+  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.3.0 \
+  --class=com.example.MyApp \
+  -- gs://my-bucket/apps/my-app.jar
+
+# Alternative: single shaded JAR from GitHub Releases (or a local `mvn package`)
+gcloud dataproc jobs submit spark \
+  --cluster=my-cluster \
+  --region=us-east4 \
+  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.3.0-all.jar \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -146,8 +158,12 @@ Requirements: JDK 11+ (17 recommended), Maven 3.9+.
 # Spark 3.5 / Scala 2.12 (default)
 mvn -Pspark35 clean verify
 
-# Spark 4.0 / Scala 2.13
+# Spark 4.1 / Scala 2.13 (published _2.13 baseline)
+mvn -Pspark41 clean verify
+
+# Spark 4.0 / 4.2 (same artifactId; CI-only profiles)
 mvn -Pspark40 clean verify
+mvn -Pspark42 clean verify
 
 # Format check
 mvn -Pspark35 spotless:check
@@ -180,7 +196,7 @@ mvn -Pspark35 -DskipTests package
 
 spark-submit \
   --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
-  --jars target/spark-streaming-google-pubsub_2.12-0.2.0-SNAPSHOT-all.jar \
+  --jars target/spark-streaming-google-pubsub_2.12-0.3.0-SNAPSHOT-all.jar \
   examples/java/JavaStructuredStreamingExample.java \
   YOUR_PROJECT YOUR_SUBSCRIPTION /tmp/pubsub-cp /tmp/pubsub-out
 ```

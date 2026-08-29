@@ -6,7 +6,7 @@
 
   <groupId>io.github.juarezr</groupId>
   <artifactId>spark-streaming-google-pubsub_${scala.binary.version}</artifactId>
-  <version>0.2.0-SNAPSHOT</version>
+  <version>0.3.0-SNAPSHOT</version>
   <packaging>jar</packaging>
 
   <name>spark-streaming-google-pubsub</name>
@@ -39,14 +39,14 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>11</maven.compiler.release>
     <scala.binary.version>2.12</scala.binary.version>
-    <spark.version>3.5.3</spark.version>
+    <spark.version>3.5.9</spark.version>
     <google-cloud-pubsub.version>1.137.1</google-cloud-pubsub.version>
     <google-auth.version>1.30.0</google-auth.version>
-    <slf4j.version>2.0.16</slf4j.version>
+    <slf4j.version>2.0.17</slf4j.version>
     <junit.version>5.11.4</junit.version>
     <mockito.version>5.14.2</mockito.version>
     <spotless.version>2.43.0</spotless.version>
-    <central.publishing.version>0.7.0</central.publishing.version>
+    <central.publishing.version>0.11.0</central.publishing.version>
     <gpg.skip>true</gpg.skip>
     <!-- Spark 3.5/4.x on JDK 17+ needs these; harmless on JDK 11. -->
     <spark.jvm.args>--add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED</spark.jvm.args>
@@ -304,14 +304,30 @@
       </activation>
       <properties>
         <scala.binary.version>2.12</scala.binary.version>
-        <spark.version>3.5.3</spark.version>
+        <spark.version>3.5.9</spark.version>
       </properties>
     </profile>
     <profile>
       <id>spark40</id>
       <properties>
         <scala.binary.version>2.13</scala.binary.version>
-        <spark.version>4.0.0</spark.version>
+        <spark.version>4.0.4</spark.version>
+        <maven.compiler.release>17</maven.compiler.release>
+      </properties>
+    </profile>
+    <profile>
+      <id>spark41</id>
+      <properties>
+        <scala.binary.version>2.13</scala.binary.version>
+        <spark.version>4.1.3</spark.version>
+        <maven.compiler.release>17</maven.compiler.release>
+      </properties>
+    </profile>
+    <profile>
+      <id>spark42</id>
+      <properties>
+        <scala.binary.version>2.13</scala.binary.version>
+        <spark.version>4.2.0</spark.version>
         <maven.compiler.release>17</maven.compiler.release>
       </properties>
     </profile>
@@ -322,6 +338,17 @@
       </properties>
       <build>
         <plugins>
+          <!-- Do not attach the shaded -all classifier to Central deployments. -->
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-shade-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>fat-jar</id>
+                <phase>none</phase>
+              </execution>
+            </executions>
+          </plugin>
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-gpg-plugin</artifactId>
