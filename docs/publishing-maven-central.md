@@ -2,6 +2,8 @@
 
 This project publishes via the [Sonatype Central Publisher Portal](https://central.sonatype.com/) using the `central-publishing-maven-plugin` (OSSRH is retired).
 
+See also how to [register a Maven Central Account](register-maven-account.md)
+
 ## What is published where
 
 Maven Central receives only the **thin** artifacts (main JAR, sources, javadoc, POM, signatures). The shaded `*-all.jar` (Google client libraries bundled) is **not** uploaded to Central — it would blow the monthly release-size limit. Fat JARs are built in the same workflow and attached to the GitHub Release for that tag.
@@ -17,85 +19,23 @@ flowchart LR
   fatBuild --> ghRel["GitHub Release: both -all.jar files"]
 ```
 
-## Registering a Central account
-
-### 1. Create a Central Portal account
-
-1. Register at <https://central.sonatype.com/>
-2. Prefer signing in with GitHub so namespaces can be verified automatically.
-
-### 2. Namespace
-
-Published groupId: **`io.github.juarezr`**.
-
-This namespace is already verified in the [Central Portal Namespaces](https://central.sonatype.com/publishing/namespaces) page for this publisher account.
-
-### 3. Generate a portal user token
-
-Account → **Generate User Token**. Store:
-
-- username → GitHub secret `MAVEN_USERNAME`
-- password/token → GitHub secret `MAVEN_PASSWORD`
-
-### 4. Create a GPG signing key
-
-```bash
-gpg --list-secret-keys
-gpg --full-generate-key
-gpg --list-secret-keys --keyid-format LONG
-gpg --export-secret-keys -a YOUR_KEY_ID > secring.asc
-```
-
-GitHub secrets:
-
-| Secret            | Value                     |
-|-------------------|---------------------------|
-| `GPG_PRIVATE_KEY` | Contents of `secring.asc` |
-| `GPG_PASSPHRASE`  | Key passphrase            |
-| `MAVEN_USERNAME`  | Portal token username     |
-| `MAVEN_PASSWORD`  | Portal token password     |
-
-### 5. Publish public GPG key is not on a keyserver Central can use
-
-1. From the machine that created the key used in GPG_PRIVATE_KEY:
-
-```bash
-gpg --list-secret-keys --keyid-format LONG
-gpg --keyserver keyserver.ubuntu.com --send-keys YOUR_KEY_ID
-gpg --keyserver keys.openpgp.org --send-keys YOUR_KEY_ID
-```
-
-1. Confirm it is searchable (wait a few minutes, then):
-
-```bash
-gpg --keyserver keyserver.ubuntu.com --recv-keys YOUR_KEY_ID
-```
-
-### 6. Local dry-run
-
-```bash
-# Thin artifacts only (shade is skipped). Do not use this to produce *-all.jar.
-mvn -Pspark35,release clean deploy -DskipTests
-mvn -Pspark40,release clean deploy -DskipTests
-```
-
-Fat JAR for local use: `mvn -Pspark35 -DskipTests package` (no `release` profile).
-
-Ensure `~/.m2/settings.xml` contains:
-
-```xml
-<settings>
-  <servers>
-    <server>
-      <id>central</id>
-      <username>${env.MAVEN_USERNAME}</username>
-      <password>${env.MAVEN_PASSWORD}</password>
-    </server>
-  </servers>
-</settings>
-```
-
 ## GitHub Actions Release
+
+### Release Workflow
+
+```mermaid
+flowchart TB
+  src[Java DSV2 + DStreams shim]
+  src --> p35["profile spark35 Scala 2.12"]
+  src --> p4x["profile Scala 2.13"]
+  p35 --> c35["Central _2.12"]
+  p4x --> c413["Central _2.13"]
+  p4x --> t40["CI Spark 4.0"]
+  p4x --> t41["CI Spark 4.1"]
+  p4x --> t42["CI Spark 4.2"]
+```
+
+### How to make a release
 
 Push a version tag:
 
