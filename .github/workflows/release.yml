@@ -14,8 +14,10 @@ jobs:
       matrix:
         include:
           - profile: spark35
+            spark: "3.5"
             java: "11"
           - profile: spark40
+            spark: "4.0"
             java: "17"
     steps:
       - name: Checkout source code at commit ${{ github.sha }}
@@ -48,3 +50,45 @@ jobs:
           MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: mvn -B -P${{ matrix.profile }},release -DskipTests deploy
+
+      - name: Build fat JAR for GitHub Release
+        id: build-fat-jar
+        run: mvn -B -P${{ matrix.profile }} -DskipTests package
+
+      - name: Upload fat JAR artifact
+        id: upload-fat-jar-artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: fatjar-spark-${{ matrix.spark }}
+          path: target/*-all.jar
+          if-no-files-found: error
+
+  github-release:
+    name: github-release
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout source code at commit ${{ github.sha }}
+        id: checkout-source-code
+        uses: actions/checkout@v7
+
+      - name: Download fat JARs
+        id: download-fat-jars
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          pattern: fatjar-spark-*
+          merge-multiple: true
+
+      - name: Create GitHub Release and upload fat JARs
+        id: create-github-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/*-all.jar \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag

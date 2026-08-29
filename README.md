@@ -26,8 +26,9 @@ This project aims to deliver:
 | 3.5.x | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.3.0` |
 | 4.0.x | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.3.0` |
 
+Prefer `--packages` (or a Maven/Gradle dependency) so Google client libraries resolve as transitives.
 
-Fat JAR (Google client deps bundled): classifier `all`.
+Fat JAR (`*-all.jar`, Google client deps bundled): built locally with `mvn package`, and attached to [GitHub Releases](https://github.com/juarezr/spark-streaming-google-pubsub/releases) — **not** published to Maven Central.
 
 ## Schema (Structured Streaming)
 
@@ -119,12 +120,22 @@ Migration from Legacy: change the Maven/Gradle dependency and imports from
 
 ## Google Dataproc
 
-1. Build or download the `all` classifier JAR (or use `--packages` once published).
+1. Prefer `--packages` with the Maven coordinate so Google client dependencies resolve from Central.
+   Alternatively, copy `*-all.jar` from a [GitHub Release](https://github.com/juarezr/spark-streaming-google-pubsub/releases) (or `mvn package`) to GCS and pass `--jars`.
 2. Submit with Dataproc 2.3 (Spark 3.5 / Scala 2.12) or 3.0 (Spark 4.0 / Scala 2.13).
 3. Grant the cluster service account `roles/pubsub.subscriber` (and publisher if needed).
 4. Rely on the metadata server for ADC — do not ship JSON keys.
 
 ```bash
+# Preferred: resolve the thin JAR and its Google client transitives
+gcloud dataproc jobs submit spark \
+  --cluster=my-cluster \
+  --region=us-east4 \
+  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.3.0 \
+  --class=com.example.MyApp \
+  -- gs://my-bucket/apps/my-app.jar
+
+# Alternative: single shaded JAR from GitHub Releases (or a local `mvn package`)
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \

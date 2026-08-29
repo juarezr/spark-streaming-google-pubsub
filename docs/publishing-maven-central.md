@@ -2,6 +2,20 @@
 
 This project publishes via the [Sonatype Central Publisher Portal](https://central.sonatype.com/) using the `central-publishing-maven-plugin` (OSSRH is retired).
 
+## What is published where
+
+Maven Central receives only the **thin** artifacts (main JAR, sources, javadoc, POM, signatures). The shaded `*-all.jar` (Google client libraries bundled) is **not** uploaded to Central — it would blow the monthly release-size limit. Fat JARs are built in the same workflow and attached to the GitHub Release for that tag.
+
+```mermaid
+flowchart LR
+  tag["git tag vX"] --> ga["release.yml matrix"]
+  ga --> s35["deploy _2.12"]
+  ga --> s40["deploy _2.13"]
+  s35 --> thin["Central: main + sources + javadoc"]
+  s40 --> thin2["Central: main + sources + javadoc"]
+  ga --> fatBuild["package without release profile"]
+  fatBuild --> ghRel["GitHub Release: both -all.jar files"]
+```
 
 ## Registering a Central account
 
@@ -51,7 +65,7 @@ gpg --keyserver keyserver.ubuntu.com --send-keys YOUR_KEY_ID
 gpg --keyserver keys.openpgp.org --send-keys YOUR_KEY_ID
 ```
 
-2. Confirm it is searchable (wait a few minutes, then):
+1. Confirm it is searchable (wait a few minutes, then):
 
 ```bash
 gpg --keyserver keyserver.ubuntu.com --recv-keys YOUR_KEY_ID
@@ -60,12 +74,12 @@ gpg --keyserver keyserver.ubuntu.com --recv-keys YOUR_KEY_ID
 ### 6. Local dry-run
 
 ```bash
-# Spark 3.5 artifact
+# Thin artifacts only (shade is skipped). Do not use this to produce *-all.jar.
 mvn -Pspark35,release clean deploy -DskipTests
-
-# Spark 4.0 artifact
 mvn -Pspark40,release clean deploy -DskipTests
 ```
+
+Fat JAR for local use: `mvn -Pspark35 -DskipTests package` (no `release` profile).
 
 Ensure `~/.m2/settings.xml` contains:
 
@@ -90,9 +104,14 @@ git tag v0.3.0
 git push origin v0.3.0
 ```
 
-The [`release.yml`](../.github/workflows/release.yml) workflow builds both Spark profiles, signs artifacts, and publishes to Central.
+The [`release.yml`](../.github/workflows/release.yml) workflow:
 
-## 7. Verify
+1. Deploys thin artifacts for both Spark profiles to Central (`-Prelease` skips the shade plugin).
+2. Rebuilds with shade enabled and attaches `*-all.jar` to the GitHub Release for the tag.
+
+Consumers should use `--packages` / a Maven dependency against Central. Use the GitHub Release fat JAR only when a single `--jars` file is required (for example Dataproc without Maven resolution).
+
+### Verification
 
 After the Portal shows **Published**, the coordinates appear on Maven Central within minutes to a few hours:
 
@@ -101,7 +120,11 @@ io.github.juarezr:spark-streaming-google-pubsub_2.12:0.3.0
 io.github.juarezr:spark-streaming-google-pubsub_2.13:0.3.0
 ```
 
-## Snapshot builds
+The same tag’s GitHub Release should list `spark-streaming-google-pubsub_2.12-0.3.0-all.jar` and `spark-streaming-google-pubsub_2.13-0.3.0-all.jar`.
 
-Snapshots are useful internally (`0.2.0-SNAPSHOT`) but are **not** published to Maven Central.
+Do not republish an already-released version without the fat JAR (or with a different set of files). Central is immutable; the next cut must be a new version.
+
+### Snapshot builds
+
+Snapshots are useful internally (`0.3.0-SNAPSHOT`) but are **not** published to Maven Central.
 Use GitHub Packages or GCS for snapshot distribution if needed.
