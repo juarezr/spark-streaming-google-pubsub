@@ -16,8 +16,8 @@ jobs:
           - profile: spark35
             spark: "3.5"
             java: "11"
-          - profile: spark40
-            spark: "4.0"
+          - profile: spark41
+            spark: "4.1"
             java: "17"
     steps:
       - name: Checkout source code at commit ${{ github.sha }}

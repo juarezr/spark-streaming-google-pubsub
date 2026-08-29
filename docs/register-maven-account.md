@@ -57,7 +57,7 @@ gpg --keyserver keyserver.ubuntu.com --recv-keys YOUR_KEY_ID
 ```bash
 # Thin artifacts only (shade is skipped). Do not use this to produce *-all.jar.
 mvn -Pspark35,release clean deploy -DskipTests
-mvn -Pspark40,release clean deploy -DskipTests
+mvn -Pspark41,release clean deploy -DskipTests
 ```
 
 Fat JAR for local use: `mvn -Pspark35 -DskipTests package` (no `release` profile).

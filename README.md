@@ -5,7 +5,7 @@ Apache Spark connector for **Google Cloud Pub/Sub** (standard). Read messages fr
 - **Structured Streaming** (primary) via `.format("google-pubsub")`
 - **Classic Spark Streaming (DStreams)** via a thin Legacy-compatible Java API
 
-Designed for Spark **3.5** (Scala 2.12) and Spark **4.0** (Scala 2.13), including GCP Dataproc **2.3** and **3.0**.
+Designed for Spark **3.5** (Scala 2.12) and Spark **4.0–4.2** (Scala 2.13; built against 4.1), including GCP Dataproc **2.3** (Spark 3.5) and **3.0** (Spark 4.1).
 Authentication defaults to **Application Default Credentials (ADC)**.
 
 ## Why this connector
@@ -21,10 +21,10 @@ This project aims to deliver:
 
 ## Coordinates
 
-| Spark | Scala | Artifact                                                     |
-|-------|-------|--------------------------------------------------------------|
-| 3.5.x | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.3.0` |
-| 4.0.x | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.3.0` |
+| Spark   | Scala | Artifact                                                     |
+|---------|-------|--------------------------------------------------------------|
+| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.3.0` |
+| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.3.0` |
 
 Prefer `--packages` (or a Maven/Gradle dependency) so Google client libraries resolve as transitives.
 
@@ -116,13 +116,13 @@ JavaReceiverInputDStream<SparkPubsubMessage> stream = PubsubUtils.createStream(
 Migration from Legacy: change the Maven/Gradle dependency and imports from
 `org.apache.spark.streaming.pubsub.*` to `io.github.juarezr.spark.pubsub.dstream.*`.
 
-> DStreams remain available on Spark 4.0 but are **deprecated**. Prefer Structured Streaming for new work.
+> DStreams remain available on Spark 4.x but are **deprecated**. Prefer Structured Streaming for new work.
 
 ## Google Dataproc
 
 1. Prefer `--packages` with the Maven coordinate so Google client dependencies resolve from Central.
    Alternatively, copy `*-all.jar` from a [GitHub Release](https://github.com/juarezr/spark-streaming-google-pubsub/releases) (or `mvn package`) to GCS and pass `--jars`.
-2. Submit with Dataproc 2.3 (Spark 3.5 / Scala 2.12) or 3.0 (Spark 4.0 / Scala 2.13).
+2. Submit with Dataproc 2.3 (Spark 3.5 / Scala 2.12) or 3.0 (Spark 4.1 / Scala 2.13). Spark 4.2 is supported via the same `_2.13` coordinate on Apache Spark / other platforms until Dataproc ships it.
 3. Grant the cluster service account `roles/pubsub.subscriber` (and publisher if needed).
 4. Rely on the metadata server for ADC — do not ship JSON keys.
 
@@ -158,8 +158,12 @@ Requirements: JDK 11+ (17 recommended), Maven 3.9+.
 # Spark 3.5 / Scala 2.12 (default)
 mvn -Pspark35 clean verify
 
-# Spark 4.0 / Scala 2.13
+# Spark 4.1 / Scala 2.13 (published _2.13 baseline)
+mvn -Pspark41 clean verify
+
+# Spark 4.0 / 4.2 (same artifactId; CI-only profiles)
 mvn -Pspark40 clean verify
+mvn -Pspark42 clean verify
 
 # Format check
 mvn -Pspark35 spotless:check

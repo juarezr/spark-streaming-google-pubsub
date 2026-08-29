@@ -12,9 +12,9 @@ Maven Central receives only the **thin** artifacts (main JAR, sources, javadoc, 
 flowchart LR
   tag["git tag vX"] --> ga["release.yml matrix"]
   ga --> s35["deploy _2.12"]
-  ga --> s40["deploy _2.13"]
+  ga --> s41["deploy _2.13 (built with Spark 4.1)"]
   s35 --> thin["Central: main + sources + javadoc"]
-  s40 --> thin2["Central: main + sources + javadoc"]
+  s41 --> thin2["Central: main + sources + javadoc"]
   ga --> fatBuild["package without release profile"]
   fatBuild --> ghRel["GitHub Release: both -all.jar files"]
 ```
@@ -27,12 +27,12 @@ flowchart LR
 flowchart TB
   src[Java DSV2 + DStreams shim]
   src --> p35["profile spark35 Scala 2.12"]
-  src --> p4x["profile Scala 2.13"]
+  src --> p41["profile spark41 Scala 2.13 (release)"]
   p35 --> c35["Central _2.12"]
-  p4x --> c413["Central _2.13"]
-  p4x --> t40["CI Spark 4.0"]
-  p4x --> t41["CI Spark 4.1"]
-  p4x --> t42["CI Spark 4.2"]
+  p41 --> c413["Central _2.13"]
+  p41 --> t40["CI Spark 4.0"]
+  p41 --> t41["CI Spark 4.1"]
+  p41 --> t42["CI Spark 4.2"]
 ```
 
 ### How to make a release
@@ -46,7 +46,7 @@ git push origin v0.3.0
 
 The [`release.yml`](../.github/workflows/release.yml) workflow:
 
-1. Deploys thin artifacts for both Spark profiles to Central (`-Prelease` skips the shade plugin).
+1. Deploys thin artifacts for Spark 3.5 (`_2.12`) and Spark 4.1 (`_2.13`) to Central (`-Prelease` skips the shade plugin). The `_2.13` JAR is tested in CI against Spark 4.0, 4.1, and 4.2.
 2. Rebuilds with shade enabled and attaches `*-all.jar` to the GitHub Release for the tag.
 
 Consumers should use `--packages` / a Maven dependency against Central. Use the GitHub Release fat JAR only when a single `--jars` file is required (for example Dataproc without Maven resolution).
