@@ -23,8 +23,9 @@ This project aims to deliver:
 
 | Spark | Scala | Artifact                                                     |
 |-------|-------|--------------------------------------------------------------|
-| 3.5.x | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.2.0` |
-| 4.0.x | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.2.0` |
+| 3.5.x | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.3.0` |
+| 4.0.x | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.3.0` |
+
 
 Fat JAR (Google client deps bundled): classifier `all`.
 
@@ -127,7 +128,7 @@ Migration from Legacy: change the Maven/Gradle dependency and imports from
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.2.0-all.jar \
+  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.3.0-all.jar \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -180,7 +181,7 @@ mvn -Pspark35 -DskipTests package
 
 spark-submit \
   --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
-  --jars target/spark-streaming-google-pubsub_2.12-0.2.0-SNAPSHOT-all.jar \
+  --jars target/spark-streaming-google-pubsub_2.12-0.3.0-SNAPSHOT-all.jar \
   examples/java/JavaStructuredStreamingExample.java \
   YOUR_PROJECT YOUR_SUBSCRIPTION /tmp/pubsub-cp /tmp/pubsub-out
 ```
