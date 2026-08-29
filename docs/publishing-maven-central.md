@@ -2,25 +2,28 @@
 
 This project publishes via the [Sonatype Central Publisher Portal](https://central.sonatype.com/) using the `central-publishing-maven-plugin` (OSSRH is retired).
 
-## 1. Create a Central Portal account
+
+## Registering a Central account
+
+### 1. Create a Central Portal account
 
 1. Register at <https://central.sonatype.com/>
 2. Prefer signing in with GitHub so namespaces can be verified automatically.
 
-## 2. Namespace
+### 2. Namespace
 
 Published groupId: **`io.github.juarezr`**.
 
 This namespace is already verified in the [Central Portal Namespaces](https://central.sonatype.com/publishing/namespaces) page for this publisher account.
 
-## 3. Generate a portal user token
+### 3. Generate a portal user token
 
 Account → **Generate User Token**. Store:
 
 - username → GitHub secret `MAVEN_USERNAME`
 - password/token → GitHub secret `MAVEN_PASSWORD`
 
-## 4. Create a GPG signing key
+### 4. Create a GPG signing key
 
 ```bash
 gpg --list-secret-keys
@@ -38,7 +41,7 @@ GitHub secrets:
 | `MAVEN_USERNAME`  | Portal token username     |
 | `MAVEN_PASSWORD`  | Portal token password     |
 
-## 5. Publish public GPG key is not on a keyserver Central can use
+### 5. Publish public GPG key is not on a keyserver Central can use
 
 1. From the machine that created the key used in GPG_PRIVATE_KEY:
 
@@ -54,7 +57,7 @@ gpg --keyserver keys.openpgp.org --send-keys YOUR_KEY_ID
 gpg --keyserver keyserver.ubuntu.com --recv-keys YOUR_KEY_ID
 ```
 
-## 6. Local dry-run
+### 6. Local dry-run
 
 ```bash
 # Spark 3.5 artifact
@@ -78,7 +81,7 @@ Ensure `~/.m2/settings.xml` contains:
 </settings>
 ```
 
-## 7. GitHub Actions release
+## GitHub Actions Release
 
 Push a version tag:
 
