@@ -213,6 +213,11 @@ See [`docs/publishing-maven-central.md`](docs/publishing-maven-central.md).
   Failures before commit lead to redelivery (at-least-once).
 - **`ackMode=early`:** ack soon after pull/store (Legacy-like). Faster ack release, higher loss risk on crash.
 - Outstanding byte accounting prevents unbounded memory growth under backpressure.
+  If Spark requests a new micro-batch without committing the previous one (`ackMode=afterCommit`),
+  the connector nacks that pull and releases the byte charge so `maxBytesOutstanding` cannot stall
+  empty pulls. Ack failures also release the charge (and nack best-effort) before Spark fails the batch.
+- With `ackMode=afterCommit`, ack deadlines are extended periodically on the driver (about every
+  `ackDeadlineSeconds / 3`) while the micro-batch is in flight, not only once at pull.
 - Transient Pub/Sub errors are retried with exponential backoff.
 
 You can monitor these with custom metrics on `StreamingQueryProgress` (Spark UI): last-pull size, payload bytes, outstanding payload bytes, batch ids, `pubsubRetryAttempts` (retries in this micro-batch), and `pubsubRetryAttemptsTotal` (retries since the stream started). They are **not** the Pub/Sub subscription backlog.
