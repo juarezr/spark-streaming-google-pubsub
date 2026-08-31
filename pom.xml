@@ -198,6 +198,9 @@
         </configuration>
         <executions>
           <execution>
+            <!-- m2e/vscode-java would run this on every incremental build and surface the whole
+                 reformat diff as a single editor error; CI still runs it via `mvn verify`. -->
+            <?m2e ignore?>
             <goals>
               <goal>check</goal>
             </goals>
