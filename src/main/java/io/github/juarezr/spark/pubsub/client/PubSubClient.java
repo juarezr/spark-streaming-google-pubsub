@@ -285,6 +285,10 @@ public final class PubSubClient implements Closeable, Serializable {
     return outstandingBytes == null ? 0L : outstandingBytes.get();
   }
 
+  public long retryAttempts() {
+    return retryPolicy.retryAttempts();
+  }
+
   public PubSubConfig config() {
     return config;
   }

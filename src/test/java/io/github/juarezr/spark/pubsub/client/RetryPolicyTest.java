@@ -24,6 +24,7 @@ class RetryPolicyTest {
             });
     assertEquals("ok", result);
     assertEquals(3, attempts.get());
+    assertEquals(2, policy.retryAttempts());
   }
 
   @Test
@@ -40,6 +41,7 @@ class RetryPolicyTest {
                   throw new RuntimeException("PERMISSION_DENIED");
                 }));
     assertEquals(1, attempts.get());
+    assertEquals(0, policy.retryAttempts());
   }
 
   @Test

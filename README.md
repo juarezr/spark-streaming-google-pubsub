@@ -215,6 +215,19 @@ See [`docs/publishing-maven-central.md`](docs/publishing-maven-central.md).
 - Outstanding byte accounting prevents unbounded memory growth under backpressure.
 - Transient Pub/Sub errors are retried with exponential backoff.
 
+You can monitor these with custom metrics on `StreamingQueryProgress` (Spark UI): last-pull size, payload bytes, outstanding payload bytes, batch ids, `pubsubRetryAttempts` (retries in this micro-batch), and `pubsubRetryAttemptsTotal` (retries since the stream started). They are **not** the Pub/Sub subscription backlog.
+
+## Limitations
+
+This connector is a **read-only Structured Streaming (micro-batch)** source. The following Spark features are not implemented:
+
+- **Spark 4.1 Real-time Mode** — does not fit Pub/Sub’s lease/ack model (driver pull and payload-in-offset vs long-running executor `nextWithTimeout`). That API is built around log sources such as Kafka.
+- **Trigger.AvailableNow** (“drain then stop”) — a subscription has no durable log-end offset.
+- **Continuous Processing** — experimental; Spark recommends Real-time Mode instead. Same lease-model mismatch.
+- **Streaming sink and batch `spark.read`** — a subscription is a queue, not a table. Rewind/replay uses explicit `seek` / snapshot **options**, not a batch scan.
+- **SQL filter pushdown that seeks** — a `WHERE publishTime >= …` must not rewind a **shared** subscription. Filter on attributes with a GCP subscription filter; rewind with explicit `seek`.
+- **Spark admission control (`ReadLimit`)** — not implemented; `maxMessagesPerPull` and `maxBytesOutstanding` already bound each pull.
+
 ## License
 
 GPL-3.0 — see [`LICENSE`](LICENSE).
