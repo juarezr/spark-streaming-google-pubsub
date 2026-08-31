@@ -52,13 +52,12 @@ Fat JAR (`*-all.jar`, Google client deps bundled): built locally with `mvn packa
 | `maxMessagesPerPull`  | `1000`        | Max messages per pull                       |
 | `maxBytesOutstanding` | `104857600`   | Soft cap on in-flight payload bytes         |
 | `ackDeadlineSeconds`  | `60`          | Extend deadline while a batch is in flight  |
-| `pullTimeoutSeconds`  | `20`          | RPC deadline (seconds) for each pull call   |
+| `pullTimeoutSeconds`  | `20`          | RPC deadline for each pull (long-poll wait) |
 | `seek`                | `none`        | `none`, `beginning`, `timestamp`, `snapshot`|
 | `seekTime`            |               | Epoch millis/RFC-3339 (if `seek=timestamp`) |
 | `seekSnapshot`        |               | Snapshot resource (when `seek=snapshot`)    |
 | `credentialsFile`     | ADC           | Path to service-account JSON (optional)     |
 | `emulatorHost`        |               | e.g. `localhost:8085` for the emulator      |
-| `returnImmediately`   | `false`       | Pub/Sub pull `returnImmediately`            |
 
 **Restart behavior:** with `seek=none` (default), the subscription cursor is **not** rewound.
 Unacked messages redeliver after a crash/watchdog restart — matching typical Dataproc workflow recovery.

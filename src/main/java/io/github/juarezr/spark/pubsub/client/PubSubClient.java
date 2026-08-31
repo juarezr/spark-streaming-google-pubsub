@@ -176,7 +176,6 @@ public final class PubSubClient implements Closeable, Serializable {
               PullRequest.newBuilder()
                   .setSubscription(config.subscriptionPath())
                   .setMaxMessages(config.maxMessagesPerPull())
-                  .setReturnImmediately(config.returnImmediately())
                   .build();
           GrpcCallContext callContext =
               GrpcCallContext.createDefault()

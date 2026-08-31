@@ -27,7 +27,6 @@ public final class PubSubConfig implements Serializable {
   public static final String SEEK_SNAPSHOT = "seekSnapshot";
   public static final String CREDENTIALS_FILE = "credentialsFile";
   public static final String EMULATOR_HOST = "emulatorHost";
-  public static final String RETURN_IMMEDIATELY = "returnImmediately";
 
   public static final int DEFAULT_MAX_MESSAGES_PER_PULL = 1000;
   public static final long DEFAULT_MAX_BYTES_OUTSTANDING = 100L * 1024 * 1024;
@@ -47,7 +46,6 @@ public final class PubSubConfig implements Serializable {
   private final String seekSnapshot;
   private final String credentialsFile;
   private final String emulatorHost;
-  private final boolean returnImmediately;
 
   private PubSubConfig(Builder builder) {
     this.projectId = Objects.requireNonNull(builder.projectId, "projectId is required");
@@ -63,7 +61,6 @@ public final class PubSubConfig implements Serializable {
     this.seekSnapshot = builder.seekSnapshot;
     this.credentialsFile = builder.credentialsFile;
     this.emulatorHost = builder.emulatorHost;
-    this.returnImmediately = builder.returnImmediately;
     validate();
   }
 
@@ -131,10 +128,6 @@ public final class PubSubConfig implements Serializable {
     b.seekSnapshot(first(normalized, "seeksnapshot"));
     b.credentialsFile(first(normalized, "credentialsfile", "credentials"));
     b.emulatorHost(first(normalized, "emulatorhost"));
-    String returnImm = first(normalized, "returnimmediately");
-    if (returnImm != null) {
-      b.returnImmediately(Boolean.parseBoolean(returnImm));
-    }
     return b.build();
   }
 
@@ -199,10 +192,6 @@ public final class PubSubConfig implements Serializable {
     return Optional.ofNullable(emulatorHost).filter(t -> !t.isBlank());
   }
 
-  public boolean returnImmediately() {
-    return returnImmediately;
-  }
-
   public String subscriptionPath() {
     if (subscription.startsWith("projects/")) {
       return subscription;
@@ -234,7 +223,6 @@ public final class PubSubConfig implements Serializable {
     seekSnapshot().ifPresent(t -> map.put(SEEK_SNAPSHOT, t));
     credentialsFile().ifPresent(t -> map.put(CREDENTIALS_FILE, t));
     emulatorHost().ifPresent(t -> map.put(EMULATOR_HOST, t));
-    map.put(RETURN_IMMEDIATELY, Boolean.toString(returnImmediately));
     return map;
   }
 
@@ -256,7 +244,6 @@ public final class PubSubConfig implements Serializable {
     private String seekSnapshot;
     private String credentialsFile;
     private String emulatorHost;
-    private boolean returnImmediately = false;
 
     public Builder projectId(String projectId) {
       this.projectId = projectId;
@@ -320,11 +307,6 @@ public final class PubSubConfig implements Serializable {
 
     public Builder emulatorHost(String emulatorHost) {
       this.emulatorHost = emulatorHost;
-      return this;
-    }
-
-    public Builder returnImmediately(boolean returnImmediately) {
-      this.returnImmediately = returnImmediately;
       return this;
     }
 

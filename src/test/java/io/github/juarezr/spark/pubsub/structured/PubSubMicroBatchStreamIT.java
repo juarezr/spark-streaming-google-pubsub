@@ -148,7 +148,7 @@ class PubSubMicroBatchStreamIT {
             .option(PubSubConfig.SUBSCRIPTION, SUBSCRIPTION)
             .option(PubSubConfig.EMULATOR_HOST, emulatorHost)
             .option(PubSubConfig.ACK_MODE, AckMode.AFTER_COMMIT.name())
-            .option(PubSubConfig.RETURN_IMMEDIATELY, "true")
+            .option(PubSubConfig.PULL_TIMEOUT_SECONDS, "2")
             .option(PubSubConfig.MAX_MESSAGES_PER_PULL, "10")
             .load();
 
