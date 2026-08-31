@@ -48,24 +48,23 @@ public final class AckCoordinator implements Serializable {
     if (ackMode != AckMode.EARLY) {
       return;
     }
-    List<PulledMessage> messages = pendingByBatch.get(batchId);
+    final List<PulledMessage> messages = pendingByBatch.get(batchId);
     if (messages == null || messages.isEmpty()) {
       return;
     }
-    List<String> ackIds = messages.stream().map(PulledMessage::ackId).collect(Collectors.toList());
+    final List<String> ackIds = collectAckIds(messages);
     client.acknowledge(ackIds);
     release(client, batchId);
     LOG.debug("Early-acked {} messages for batch {}", ackIds.size(), batchId);
   }
 
   public void commit(PubSubClient client, String batchId) {
-    List<PulledMessage> messages = pendingByBatch.get(batchId);
+    final List<PulledMessage> messages = pendingByBatch.get(batchId);
     if (messages == null) {
       return;
     }
     if (ackMode == AckMode.AFTER_COMMIT && !messages.isEmpty()) {
-      List<String> ackIds =
-          messages.stream().map(PulledMessage::ackId).collect(Collectors.toList());
+      final List<String> ackIds = collectAckIds(messages);
       client.acknowledge(ackIds);
       LOG.debug("Committed (acked) {} messages for batch {}", ackIds.size(), batchId);
     }
@@ -73,13 +72,12 @@ public final class AckCoordinator implements Serializable {
   }
 
   public void abort(PubSubClient client, String batchId) {
-    List<PulledMessage> messages = pendingByBatch.get(batchId);
+    final List<PulledMessage> messages = pendingByBatch.get(batchId);
     if (messages == null) {
       return;
     }
     if (ackMode == AckMode.AFTER_COMMIT && !messages.isEmpty()) {
-      List<String> ackIds =
-          messages.stream().map(PulledMessage::ackId).collect(Collectors.toList());
+      final List<String> ackIds = collectAckIds(messages);
       try {
         client.nack(ackIds);
         LOG.warn("Aborted batch {}; nacked {} messages", batchId, ackIds.size());
@@ -92,6 +90,12 @@ public final class AckCoordinator implements Serializable {
       }
     }
     release(client, batchId);
+  }
+
+  @SuppressWarnings("null")
+  private static List<String> collectAckIds(final List<PulledMessage> messages) {
+
+    return messages.stream().map(PulledMessage::ackId).collect(Collectors.toList());
   }
 
   private void release(PubSubClient client, String batchId) {
