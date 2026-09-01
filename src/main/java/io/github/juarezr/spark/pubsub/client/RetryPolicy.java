@@ -2,6 +2,7 @@ package io.github.juarezr.spark.pubsub.client;
 
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -12,6 +13,7 @@ public final class RetryPolicy {
   private final long initialBackoffMs;
   private final long maxBackoffMs;
   private final int maxAttempts;
+  private final AtomicLong retryAttempts = new AtomicLong(0);
 
   public RetryPolicy(long initialBackoffMs, long maxBackoffMs, int maxAttempts) {
     this.initialBackoffMs = initialBackoffMs;
@@ -21,6 +23,11 @@ public final class RetryPolicy {
 
   public static RetryPolicy defaults() {
     return new RetryPolicy(100L, 10_000L, 8);
+  }
+
+  /** Lifetime count of retryable failures that slept and retried. Resets with this instance. */
+  public long retryAttempts() {
+    return retryAttempts.get();
   }
 
   public <T> T execute(String operation, RetryableCallable<T> callable) {
@@ -34,6 +41,7 @@ public final class RetryPolicy {
         if (attempt == maxAttempts || !isRetryable(e)) {
           throw e;
         }
+        retryAttempts.incrementAndGet();
         long sleep = backoff + ThreadLocalRandom.current().nextLong(0, Math.max(1, backoff / 4));
         sleep = Math.min(sleep, maxBackoffMs);
         LOG.warn(

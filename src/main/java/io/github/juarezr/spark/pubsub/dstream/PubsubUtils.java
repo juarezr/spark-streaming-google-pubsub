@@ -13,6 +13,7 @@ import org.apache.spark.streaming.api.java.JavaStreamingContext;
  * org.apache.spark.streaming.pubsub}); method signatures match for an easy migration from Java
  * applications such as spark-event.
  */
+@SuppressWarnings("deprecation")
 public final class PubsubUtils {
   private PubsubUtils() {}
 
@@ -54,13 +55,16 @@ public final class PubsubUtils {
       SparkGCPCredentials credentials,
       StorageLevel storageLevel,
       boolean autoAcknowledge) {
+    final String credentialsFile =
+        credentials == null ? null : credentials.provider().credentialsFile();
+
     PubSubConfig.Builder builder =
         PubSubConfig.builder()
             .projectId(project)
             .subscription(subscription)
             .topic(topic)
             .ackMode(autoAcknowledge ? AckMode.EARLY : AckMode.AFTER_COMMIT)
-            .credentialsFile(credentials == null ? null : credentials.provider().credentialsFile());
+            .credentialsFile(credentialsFile);
     PubsubReceiver receiver = new PubsubReceiver(builder.build(), autoAcknowledge, storageLevel);
     return jssc.receiverStream(receiver);
   }

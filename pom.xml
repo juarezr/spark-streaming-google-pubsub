@@ -198,6 +198,9 @@
         </configuration>
         <executions>
           <execution>
+            <!-- m2e/vscode-java would run this on every incremental build and surface the whole
+                 reformat diff as a single editor error; CI still runs it via `mvn verify`. -->
+            <?m2e ignore?>
             <goals>
               <goal>check</goal>
             </goals>
@@ -330,6 +333,16 @@
         <spark.version>4.2.0</spark.version>
         <maven.compiler.release>17</maven.compiler.release>
       </properties>
+    </profile>
+    <profile>
+      <id>github-packages</id>
+      <distributionManagement>
+        <repository>
+          <id>github</id>
+          <name>GitHub Packages</name>
+          <url>https://maven.pkg.github.com/juarezr/spark-streaming-google-pubsub</url>
+        </repository>
+      </distributionManagement>
     </profile>
     <profile>
       <id>release</id>

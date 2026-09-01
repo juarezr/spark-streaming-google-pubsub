@@ -19,7 +19,9 @@ This project aims to deliver:
 - A DStreams shim for gradual migration from Legacy style streaming
 - Support for newer/modern Dataproc images
 
-## Coordinates
+## Using this connector
+
+### Coordinates
 
 | Spark   | Scala | Artifact                                                     |
 |---------|-------|--------------------------------------------------------------|
@@ -30,7 +32,7 @@ Prefer `--packages` (or a Maven/Gradle dependency) so Google client libraries re
 
 Fat JAR (`*-all.jar`, Google client deps bundled): built locally with `mvn package`, and attached to [GitHub Releases](https://github.com/juarezr/spark-streaming-google-pubsub/releases) — **not** published to Maven Central.
 
-## Schema (Structured Streaming)
+### Schema (Structured Streaming)
 
 | Column        | Type                 | Description                                 |
 |---------------|:---------------------|:--------------------------------------------|
@@ -41,7 +43,7 @@ Fat JAR (`*-all.jar`, Google client deps bundled): built locally with `mvn packa
 | `orderingKey` | string               | Ordering key (may be empty)                 |
 | `ackId`       | string               | Ack id (useful when managing acks manually) |
 
-## Options
+### Options
 
 | Option                | Default       | Description                                 |
 |:----------------------|:--------------|:--------------------------------------------|
@@ -52,18 +54,19 @@ Fat JAR (`*-all.jar`, Google client deps bundled): built locally with `mvn packa
 | `maxMessagesPerPull`  | `1000`        | Max messages per pull                       |
 | `maxBytesOutstanding` | `104857600`   | Soft cap on in-flight payload bytes         |
 | `ackDeadlineSeconds`  | `60`          | Extend deadline while a batch is in flight  |
-| `pullTimeoutSeconds`  | `20`          | RPC deadline (seconds) for each pull call   |
+| `pullTimeoutSeconds`  | `20`          | RPC deadline for each pull (long-poll wait) |
 | `seek`                | `none`        | `none`, `beginning`, `timestamp`, `snapshot`|
 | `seekTime`            |               | Epoch millis/RFC-3339 (if `seek=timestamp`) |
 | `seekSnapshot`        |               | Snapshot resource (when `seek=snapshot`)    |
 | `credentialsFile`     | ADC           | Path to service-account JSON (optional)     |
 | `emulatorHost`        |               | e.g. `localhost:8085` for the emulator      |
-| `returnImmediately`   | `false`       | Pub/Sub pull `returnImmediately`            |
 
 **Restart behavior:** with `seek=none` (default), the subscription cursor is **not** rewound.
 Unacked messages redeliver after a crash/watchdog restart — matching typical Dataproc workflow recovery.
 
-## Structured Streaming (Java)
+## Examples
+
+### Structured Streaming (Java)
 
 ```java
 Dataset<Row> messages = spark.readStream()
@@ -83,11 +86,11 @@ messages
     .awaitTermination();
 ```
 
-## Structured Streaming (Scala)
+### Structured Streaming (Scala)
 
 See [`examples/scala/StructuredStreamingExample.scala`](examples/scala/StructuredStreamingExample.scala).
 
-## Structured Streaming (PySpark)
+### Structured Streaming (PySpark)
 
 ```python
 messages = (
@@ -101,7 +104,7 @@ messages = (
 
 Full script: [`examples/python/structured_streaming_example.py`](examples/python/structured_streaming_example.py).
 
-## DStreams shim (Legacy-compatible Java API)
+### DStreams shim (Legacy-compatible Java API)
 
 ```java
 import io.github.juarezr.spark.pubsub.dstream.PubsubUtils;
@@ -118,7 +121,9 @@ Migration from Legacy: change the Maven/Gradle dependency and imports from
 
 > DStreams remain available on Spark 4.x but are **deprecated**. Prefer Structured Streaming for new work.
 
-## Google Dataproc
+## Platform Usage
+
+### Google Dataproc
 
 1. Prefer `--packages` with the Maven coordinate so Google client dependencies resolve from Central.
    Alternatively, copy `*-all.jar` from a [GitHub Release](https://github.com/juarezr/spark-streaming-google-pubsub/releases) (or `mvn package`) to GCS and pass `--jars`.
@@ -144,11 +149,39 @@ gcloud dataproc jobs submit spark \
   -- gs://my-bucket/apps/my-app.jar
 ```
 
-## Databricks
+### Databricks
 
 Add the Maven coordinate as a library on the cluster (`_2.12` or `_2.13` matching the runtime).
 Configure a Databricks secret or instance profile / GCP service account so ADC works, then use the
 same `.format("google-pubsub")` options as above. Use a durable `checkpointLocation` on cloud storage.
+
+## Reliability notes
+
+## Behavior
+
+- **`ackMode=afterCommit` (default):** messages are acknowledged after Spark commits the micro-batch.
+  Failures before commit lead to redelivery (at-least-once).
+- **`ackMode=early`:** ack soon after pull/store (Legacy-like). Faster ack release, higher loss risk on crash.
+- Outstanding byte accounting prevents unbounded memory growth under backpressure.
+  If Spark requests a new micro-batch without committing the previous one (`ackMode=afterCommit`),
+  the connector nacks that pull and releases the byte charge so `maxBytesOutstanding` cannot stall
+  empty pulls. Ack failures also release the charge (and nack best-effort) before Spark fails the batch.
+- With `ackMode=afterCommit`, ack deadlines are extended periodically on the driver (about every
+  `ackDeadlineSeconds / 3`) while the micro-batch is in flight, not only once at pull.
+- Transient Pub/Sub errors are retried with exponential backoff.
+
+You can monitor these with custom metrics on `StreamingQueryProgress` (Spark UI): last-pull size, payload bytes, outstanding payload bytes, batch ids, `pubsubRetryAttempts` (retries in this micro-batch), and `pubsubRetryAttemptsTotal` (retries since the stream started). They are **not** the Pub/Sub subscription backlog.
+
+### Limitations
+
+This connector is a **read-only Structured Streaming (micro-batch)** source. The following Spark features are not implemented:
+
+- **Spark 4.1 Real-time Mode** — does not fit Pub/Sub’s lease/ack model (driver pull and payload-in-offset vs long-running executor `nextWithTimeout`). That API is built around log sources such as Kafka.
+- **Trigger.AvailableNow** (“drain then stop”) — a subscription has no durable log-end offset.
+- **Continuous Processing** — experimental; Spark recommends Real-time Mode instead. Same lease-model mismatch.
+- **Streaming sink and batch `spark.read`** — a subscription is a queue, not a table. Rewind/replay uses explicit `seek` / snapshot **options**, not a batch scan.
+- **SQL filter pushdown that seeks** — a `WHERE publishTime >= …` must not rewind a **shared** subscription. Filter on attributes with a GCP subscription filter; rewind with explicit `seek`.
+- **Spark admission control (`ReadLimit`)** — not implemented; `maxMessagesPerPull` and `maxBytesOutstanding` already bound each pull.
 
 ## Build and test locally
 
@@ -167,6 +200,9 @@ mvn -Pspark42 clean verify
 
 # Format check
 mvn -Pspark35 spotless:check
+
+# Apply formatting
+mvn -Pspark35 spotless:apply
 ```
 
 ### Unit tests
@@ -207,14 +243,6 @@ spark-submit \
 
 See [`docs/publishing-maven-central.md`](docs/publishing-maven-central.md).
 
-## Reliability notes
-
-- **`ackMode=afterCommit` (default):** messages are acknowledged after Spark commits the micro-batch.
-  Failures before commit lead to redelivery (at-least-once).
-- **`ackMode=early`:** ack soon after pull/store (Legacy-like). Faster ack release, higher loss risk on crash.
-- Outstanding byte accounting prevents unbounded memory growth under backpressure.
-- Transient Pub/Sub errors are retried with exponential backoff.
-
-## License
+### License
 
 GPL-3.0 — see [`LICENSE`](LICENSE).

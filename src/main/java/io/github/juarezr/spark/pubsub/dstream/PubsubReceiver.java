@@ -59,7 +59,6 @@ public final class PubsubReceiver extends Receiver<SparkPubsubMessage> {
             .seekSnapshot(config.seekSnapshot().orElse(null))
             .credentialsFile(config.credentialsFile().orElse(null))
             .emulatorHost(config.emulatorHost().orElse(null))
-            .returnImmediately(config.returnImmediately())
             .build();
 
     client = new PubSubClient(effective);

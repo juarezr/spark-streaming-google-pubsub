@@ -176,7 +176,6 @@ public final class PubSubClient implements Closeable, Serializable {
               PullRequest.newBuilder()
                   .setSubscription(config.subscriptionPath())
                   .setMaxMessages(config.maxMessagesPerPull())
-                  .setReturnImmediately(config.returnImmediately())
                   .build();
           GrpcCallContext callContext =
               GrpcCallContext.createDefault()
@@ -283,6 +282,10 @@ public final class PubSubClient implements Closeable, Serializable {
   /** Visible for tests. */
   public long outstandingBytes() {
     return outstandingBytes == null ? 0L : outstandingBytes.get();
+  }
+
+  public long retryAttempts() {
+    return retryPolicy.retryAttempts();
   }
 
   public PubSubConfig config() {
