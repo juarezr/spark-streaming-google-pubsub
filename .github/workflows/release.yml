@@ -34,9 +34,9 @@ jobs:
           distribution: temurin
           java-version: ${{ matrix.java }}
           cache: maven
-          server-id: central
-          server-username: MAVEN_USERNAME
-          server-password: MAVEN_PASSWORD
+          mvn-server-credentials: |
+            central:MAVEN_USERNAME:MAVEN_PASSWORD
+            github:GITHUB_ACTOR:GITHUB_TOKEN
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
@@ -66,6 +66,12 @@ jobs:
           MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: mvn -B -P${{ matrix.profile }},release -DskipTests deploy
+
+      - name: Publish to GitHub Packages
+        id: publish-to-github-packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: mvn -B -P${{ matrix.profile }},github-packages -DskipTests deploy
 
   github-release:
     name: github-release
