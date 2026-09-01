@@ -9,6 +9,9 @@ jobs:
   release:
     name: release-spark-${{ matrix.profile }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -24,12 +27,6 @@ jobs:
         id: checkout-source-code
         uses: actions/checkout@v7
 
-      - name: Set version from tag
-        id: set-version
-        run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          mvn -B -P${{ matrix.profile }} versions:set -DnewVersion="$TAG" -DgenerateBackupPoms=false
-
       - name: Set up JDK ${{ matrix.java }}
         id: setup-java
         uses: actions/setup-java@v6
@@ -43,6 +40,25 @@ jobs:
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
+      - name: Set version from tag
+        id: set-version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          mvn -B -P${{ matrix.profile }} versions:set -DnewVersion="$TAG" -DgenerateBackupPoms=false
+
+      - name: Build thin/fat JARs for GitHub Release
+        id: build-jar-packages
+        run: mvn -B -P${{ matrix.profile }} -DskipTests package
+
+      - name: Upload fat JAR artifacts
+        id: upload-workflow-artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: spark-packages-${{ matrix.spark }}
+          path: target/*-all.jar
+          if-no-files-found: error
+          overwrite: true
+
       - name: Publish to Maven Central
         id: publish-to-maven-central
         env:
@@ -50,18 +66,6 @@ jobs:
           MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: mvn -B -P${{ matrix.profile }},release -DskipTests deploy
-
-      - name: Build fat JAR for GitHub Release
-        id: build-fat-jar
-        run: mvn -B -P${{ matrix.profile }} -DskipTests package
-
-      - name: Upload fat JAR artifact
-        id: upload-fat-jar-artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: fatjar-spark-${{ matrix.spark }}
-          path: target/*-all.jar
-          if-no-files-found: error
 
   github-release:
     name: github-release
@@ -79,16 +83,21 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           path: dist
-          pattern: fatjar-spark-*
+          pattern: spark-packages-*
           merge-multiple: true
 
-      - name: Create GitHub Release and upload fat JARs
-        id: create-github-release
+      - name: Upload fat JARs to GitHub Release
+        id: upload-release-artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/*-all.jar \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --verify-tag
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/*-all.jar --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${TAG}" dist/*-all.jar \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${TAG}" \
+              --generate-notes \
+              --verify-tag
+          fi

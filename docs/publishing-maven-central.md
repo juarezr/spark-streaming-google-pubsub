@@ -1,6 +1,6 @@
 # Publishing to Maven Central
 
-This project publishes via the [Sonatype Central Publisher Portal](https://central.sonatype.com/) using the `central-publishing-maven-plugin` (OSSRH is retired).
+Releases are cut from a `v*` tag (GitHub Portal or `git push`). The workflow publishes thin artifacts to Maven Central, the same coordinates (including `*-all`) to GitHub Packages, and attaches fat JARs to the GitHub Release.
 
 See also how to [register a Maven Central Account](register-maven-account.md)
 
@@ -37,15 +37,19 @@ flowchart TB
 
 ### How to make a release
 
-Push a version tag:
+Create a version tag (and optionally a GitHub Release) in the GitHub Portal, or push a `v*` tag:
 
 ```bash
 git tag v0.3.0
 git push origin v0.3.0
 ```
 
-The [`release.yml`](../.github/workflows/release.yml) workflow:
+Creating a Release in the GitHub UI with a new `v*` tag pushes the tag and starts [`release.yml`](../.github/workflows/release.yml). Prefer that Portal-first path: the workflow then **uploads** `*-all.jar` onto the existing Release. If only the tag is pushed and no Release exists yet, the workflow creates one.
 
+The workflow:
+
+1. Sets the Maven version from the tag (`v` prefix stripped).
+2. Deploys thin artifacts for Spark 3.5 (`_2.12`) and Spark 4.1 (`_2.13`) to **Maven Central** (`-Prelease` skips the shade plugin and signs). The `_2.13` JAR is tested in CI against Spark 4.0, 4.1, and 4.2.
 1. Deploys thin artifacts for Spark 3.5 (`_2.12`) and Spark 4.1 (`_2.13`) to Central (`-Prelease` skips the shade plugin). The `_2.13` JAR is tested in CI against Spark 4.0, 4.1, and 4.2.
 2. Rebuilds with shade enabled and attaches `*-all.jar` to the GitHub Release for the tag.
 
