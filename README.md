@@ -200,6 +200,9 @@ mvn -Pspark42 clean verify
 
 # Format check
 mvn -Pspark35 spotless:check
+
+# Apply formatting
+mvn -Pspark35 spotless:apply
 ```
 
 ### Unit tests
