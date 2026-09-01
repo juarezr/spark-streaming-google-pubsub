@@ -55,7 +55,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: spark-packages-${{ matrix.spark }}
-          path: target/*-all.jar
+          path: target/*.jar
           if-no-files-found: error
           overwrite: true
 
@@ -99,9 +99,9 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${TAG}" dist/*-all.jar --clobber --repo "${GITHUB_REPOSITORY}"
+            gh release upload "${TAG}" dist/*.jar --clobber --repo "${GITHUB_REPOSITORY}"
           else
-            gh release create "${TAG}" dist/*-all.jar \
+            gh release create "${TAG}" dist/*.jar \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${TAG}" \
               --generate-notes \
