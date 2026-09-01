@@ -6,13 +6,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Periodically extends Pub/Sub ack deadlines on the driver while a micro-batch
- * is in flight. {@link
+ * Periodically extends Pub/Sub ack deadlines on the driver while a micro-batch is in flight. {@link
  * #stop()} is idempotent.
  */
 public final class AckLeaseWatchdog implements AutoCloseable {
@@ -34,23 +32,25 @@ public final class AckLeaseWatchdog implements AutoCloseable {
     List<String> snapshot = new ArrayList<>(ackIds);
     int intervalSeconds = extendIntervalSeconds(ackDeadlineSeconds);
     synchronized (lock) {
-      executor = Executors.newSingleThreadScheduledExecutor(
-          r -> {
-            Thread t = new Thread(r, "pubsub-ack-lease");
-            t.setDaemon(true);
-            return t;
-          });
-      future = executor.scheduleAtFixedRate(
-          () -> {
-            try {
-              client.extendAckDeadline(snapshot, ackDeadlineSeconds);
-            } catch (RuntimeException e) {
-              LOG.warn("Failed to extend ack deadline for {} messages", snapshot.size(), e);
-            }
-          },
-          intervalSeconds,
-          intervalSeconds,
-          TimeUnit.SECONDS);
+      executor =
+          Executors.newSingleThreadScheduledExecutor(
+              r -> {
+                Thread t = new Thread(r, "pubsub-ack-lease");
+                t.setDaemon(true);
+                return t;
+              });
+      future =
+          executor.scheduleAtFixedRate(
+              () -> {
+                try {
+                  client.extendAckDeadline(snapshot, ackDeadlineSeconds);
+                } catch (RuntimeException e) {
+                  LOG.warn("Failed to extend ack deadline for {} messages", snapshot.size(), e);
+                }
+              },
+              intervalSeconds,
+              intervalSeconds,
+              TimeUnit.SECONDS);
     }
   }
 

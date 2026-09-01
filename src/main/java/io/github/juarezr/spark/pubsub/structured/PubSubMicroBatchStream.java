@@ -1,5 +1,11 @@
 package io.github.juarezr.spark.pubsub.structured;
 
+import io.github.juarezr.spark.pubsub.client.AckCoordinator;
+import io.github.juarezr.spark.pubsub.client.AckLeaseWatchdog;
+import io.github.juarezr.spark.pubsub.client.PubSubClient;
+import io.github.juarezr.spark.pubsub.client.PulledMessage;
+import io.github.juarezr.spark.pubsub.config.AckMode;
+import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -7,7 +13,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
@@ -16,18 +21,9 @@ import org.apache.spark.sql.connector.read.streaming.ReportsSourceMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.github.juarezr.spark.pubsub.client.AckCoordinator;
-import io.github.juarezr.spark.pubsub.client.AckLeaseWatchdog;
-import io.github.juarezr.spark.pubsub.client.PubSubClient;
-import io.github.juarezr.spark.pubsub.client.PulledMessage;
-import io.github.juarezr.spark.pubsub.config.AckMode;
-import io.github.juarezr.spark.pubsub.config.PubSubConfig;
-
 /**
- * Pull-based micro-batch stream. Progress is tracked with synthetic offsets;
- * the Pub/Sub
- * subscription cursor remains the durable source of truth across process
- * restarts (no rewind unless
+ * Pull-based micro-batch stream. Progress is tracked with synthetic offsets; the Pub/Sub
+ * subscription cursor remains the durable source of truth across process restarts (no rewind unless
  * configured).
  */
 public final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMetrics {
@@ -93,7 +89,8 @@ public final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSo
     final Long producedBatchId = produced == null ? null : produced.batchId();
     final long retryTotal = client.retryAttempts();
     final long reportedTotal = lastReportedRetryAttempts.getAndSet(retryTotal);
-    final long retryThisBatch = PubSubSourceMetrics.retryAttemptsThisBatch(retryTotal, reportedTotal);
+    final long retryThisBatch =
+        PubSubSourceMetrics.retryAttemptsThisBatch(retryTotal, reportedTotal);
     return PubSubSourceMetrics.snapshot(
         lastPullMessageCount.get(),
         lastPullPayloadBytes.get(),
@@ -109,7 +106,7 @@ public final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSo
     PubSubOffset endOffset = (PubSubOffset) end;
     List<PulledMessage> messages = endOffset.messages();
     if (messages.isEmpty()) {
-      return new InputPartition[] { new PubSubInputPartition(messages) };
+      return new InputPartition[] {new PubSubInputPartition(messages)};
     }
     int parts = Math.min(numPartitions, messages.size());
     List<List<PulledMessage>> slices = new ArrayList<>(parts);
