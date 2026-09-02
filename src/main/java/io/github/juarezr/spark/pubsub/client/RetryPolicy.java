@@ -7,7 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** Exponential backoff with jitter for transient Pub/Sub failures. */
-public final class RetryPolicy {
+final class RetryPolicy {
 
   private static final Logger LOG = LoggerFactory.getLogger(RetryPolicy.class);
 
@@ -19,23 +19,23 @@ public final class RetryPolicy {
   private final int maxAttempts;
   private final AtomicLong retryAttempts;
 
-  public RetryPolicy(long initialBackoffMs, long maxBackoffMs, int maxAttempts) {
+  RetryPolicy(long initialBackoffMs, long maxBackoffMs, int maxAttempts) {
     this.initialBackoffMs = initialBackoffMs;
     this.maxBackoffMs = maxBackoffMs;
     this.maxAttempts = maxAttempts;
     this.retryAttempts = new AtomicLong(0);
   }
 
-  public static RetryPolicy defaults() {
+  static RetryPolicy defaults() {
     return new RetryPolicy(100L, 10_000L, 8);
   }
 
   /** Lifetime count of retryable failures that slept and retried. Resets with this instance. */
-  public long retryAttempts() {
+  long retryAttempts() {
     return retryAttempts.get();
   }
 
-  public <T> T execute(String operation, RetryableCallable<T> callable) {
+  <T> T execute(String operation, RetryableCallable<T> callable) {
     RuntimeException last = null;
     long backoff = this.initialBackoffMs;
 
@@ -67,7 +67,7 @@ public final class RetryPolicy {
     throw last == null ? new RuntimeException("Retry exhausted for " + operation) : last;
   }
 
-  public void executeVoid(String operation, RetryableRunnable runnable) {
+  void executeVoid(String operation, RetryableRunnable runnable) {
     execute(
         operation,
         () -> {
@@ -92,12 +92,12 @@ public final class RetryPolicy {
   }
 
   @FunctionalInterface
-  public interface RetryableCallable<T> {
+  interface RetryableCallable<T> {
     T call() throws Exception;
   }
 
   @FunctionalInterface
-  public interface RetryableRunnable {
+  interface RetryableRunnable {
     void run() throws Exception;
   }
 }

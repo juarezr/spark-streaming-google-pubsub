@@ -13,11 +13,11 @@ import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.unsafe.types.UTF8String;
 
 /** Reads {@link PulledMessage} values into Spark {@link InternalRow}s. */
-public final class PubSubPartitionReader implements PartitionReader<InternalRow> {
+final class PubSubPartitionReader implements PartitionReader<InternalRow> {
   private final Iterator<PulledMessage> iterator;
   private PulledMessage current;
 
-  public PubSubPartitionReader(PubSubInputPartition partition) {
+  PubSubPartitionReader(PubSubInputPartition partition) {
     this.iterator = partition.messages().iterator();
   }
 

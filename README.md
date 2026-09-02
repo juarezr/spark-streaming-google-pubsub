@@ -1,9 +1,6 @@
 # spark-streaming-google-pubsub
 
-Apache Spark connector for **Google Cloud Pub/Sub** (standard). Read messages from a subscription into:
-
-- **Structured Streaming** (primary) via `.format("google-pubsub")`
-- **Classic Spark Streaming (DStreams)** via a thin Legacy-compatible Java API
+Apache Spark connector for **Google Cloud Pub/Sub** (standard). Read messages from a subscription into **Structured Streaming** via `.format("google-pubsub")`.
 
 Designed for Spark **3.5** (Scala 2.12) and Spark **4.0–4.2** (Scala 2.13; built against 4.1), including GCP Dataproc **2.3** (Spark 3.5) and **3.0** (Spark 4.1).
 Authentication defaults to **Application Default Credentials (ADC)**.
@@ -16,7 +13,6 @@ This project aims to deliver:
 - Configurable ack semantics (`afterCommit` default, optional `early`)
 - No subscription rewind on restart unless you set `seek`
 - Retries/backoff and bounded outstanding bytes for 24×7 jobs
-- A DStreams shim for gradual migration from Legacy style streaming
 - Support for newer/modern Dataproc images
 
 ## Using this connector
@@ -104,23 +100,6 @@ messages = (
 
 Full script: [`examples/python/structured_streaming_example.py`](examples/python/structured_streaming_example.py).
 
-### DStreams shim (Legacy-compatible Java API)
-
-```java
-import io.github.juarezr.spark.pubsub.dstream.PubsubUtils;
-import io.github.juarezr.spark.pubsub.dstream.SparkGCPCredentials;
-import io.github.juarezr.spark.pubsub.dstream.SparkPubsubMessage;
-
-SparkGCPCredentials credentials = SparkGCPCredentials.builder().build(); // ADC
-JavaReceiverInputDStream<SparkPubsubMessage> stream = PubsubUtils.createStream(
-    jssc, projectId, topic, subscription, credentials, StorageLevel.MEMORY_AND_DISK_SER());
-```
-
-Migration from Legacy: change the Maven/Gradle dependency and imports from
-`org.apache.spark.streaming.pubsub.*` to `io.github.juarezr.spark.pubsub.dstream.*`.
-
-> DStreams remain available on Spark 4.x but are **deprecated**. Prefer Structured Streaming for new work.
-
 ## Platform Usage
 
 ### Google Dataproc
@@ -161,7 +140,7 @@ same `.format("google-pubsub")` options as above. Use a durable `checkpointLocat
 
 - **`ackMode=afterCommit` (default):** messages are acknowledged after Spark commits the micro-batch.
   Failures before commit lead to redelivery (at-least-once).
-- **`ackMode=early`:** ack soon after pull/store (Legacy-like). Faster ack release, higher loss risk on crash.
+- **`ackMode=early`:** ack soon after pull. Faster ack release, higher loss risk on crash.
 - Outstanding byte accounting prevents unbounded memory growth under backpressure.
   If Spark requests a new micro-batch without committing the previous one (`ackMode=afterCommit`),
   the connector nacks that pull and releases the byte charge so `maxBytesOutstanding` cannot stall

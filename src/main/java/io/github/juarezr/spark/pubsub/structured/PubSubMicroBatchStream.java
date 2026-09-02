@@ -26,7 +26,7 @@ import org.slf4j.LoggerFactory;
  * subscription cursor remains the durable source of truth across process restarts (no rewind unless
  * configured).
  */
-public final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMetrics {
+final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMetrics {
   private static final Logger LOG = LoggerFactory.getLogger(PubSubMicroBatchStream.class);
 
   private final PubSubConfig config;
@@ -40,7 +40,7 @@ public final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSo
   private final int numPartitions;
   private volatile PubSubOffset lastProduced;
 
-  public PubSubMicroBatchStream(PubSubConfig config, int numPartitions) {
+  PubSubMicroBatchStream(PubSubConfig config, int numPartitions) {
     this.config = config;
     this.client = new PubSubClient(config);
     this.ackCoordinator = new AckCoordinator(config.ackMode());

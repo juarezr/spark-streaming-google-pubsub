@@ -6,11 +6,11 @@ import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns;
 import org.apache.spark.sql.types.StructType;
 
 /** Builds a {@link PubSubScan}. */
-public final class PubSubScanBuilder implements SupportsPushDownRequiredColumns {
+final class PubSubScanBuilder implements SupportsPushDownRequiredColumns {
   private final PubSubConfig config;
   private StructType requiredSchema = PubSubSchema.SCHEMA;
 
-  public PubSubScanBuilder(PubSubConfig config) {
+  PubSubScanBuilder(PubSubConfig config) {
     this.config = config;
   }
 

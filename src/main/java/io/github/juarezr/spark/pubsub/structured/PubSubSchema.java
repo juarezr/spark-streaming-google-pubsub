@@ -6,7 +6,7 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
 /** Fixed schema for Pub/Sub messages exposed via Structured Streaming. */
-public final class PubSubSchema {
+final class PubSubSchema {
   private PubSubSchema() {}
 
   public static final StructType SCHEMA =

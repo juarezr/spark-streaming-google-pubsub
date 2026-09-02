@@ -32,7 +32,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  src[Java DSV2 + DStreams shim]
+  src[Java Data Source V2]
   src --> p35["profile spark35 Scala 2.12"]
   src --> p41["profile spark41 Scala 2.13 (release)"]
   p35 --> c35["Central _2.12"]

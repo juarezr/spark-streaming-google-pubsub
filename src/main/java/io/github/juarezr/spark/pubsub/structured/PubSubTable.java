@@ -10,10 +10,10 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 /** Spark catalog table for Google Pub/Sub streaming reads. */
-public final class PubSubTable implements SupportsRead {
+final class PubSubTable implements SupportsRead {
   private final PubSubConfig config;
 
-  public PubSubTable(PubSubConfig config) {
+  PubSubTable(PubSubConfig config) {
     this.config = config;
   }
 

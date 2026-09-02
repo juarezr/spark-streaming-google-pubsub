@@ -18,14 +18,14 @@ import org.apache.spark.sql.connector.read.streaming.Offset;
  * Synthetic micro-batch offset. Message payloads are embedded so batches can be reconstructed after
  * a driver restart from checkpoint (Pub/Sub cannot re-read by ack id).
  */
-public final class PubSubOffset extends Offset implements Serializable {
+final class PubSubOffset extends Offset implements Serializable {
   private static final long serialVersionUID = 1L;
   private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
   private final long batchId;
   private final List<SerializedMessage> messages;
 
-  public PubSubOffset(long batchId, List<PulledMessage> pulled) {
+  PubSubOffset(long batchId, List<PulledMessage> pulled) {
     this.batchId = batchId;
     if (pulled == null || pulled.isEmpty()) {
       this.messages = Collections.emptyList();

@@ -7,7 +7,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Validated connector configuration shared by Structured Streaming and DStreams. */
+/** Validated connector configuration for Structured Streaming. */
 public final class PubSubConfig implements Serializable {
   private static final long serialVersionUID = 1L;
 

@@ -1,4 +1,4 @@
-package io.github.juarezr.spark.pubsub.auth;
+package io.github.juarezr.spark.pubsub.client;
 
 import com.google.auth.Credentials;
 import com.google.auth.oauth2.GoogleCredentials;
@@ -11,22 +11,22 @@ import java.util.Collections;
 import java.util.Objects;
 
 /** Resolves Google credentials, defaulting to Application Default Credentials (ADC). */
-public final class PubSubCredentialsProvider implements Serializable {
+final class PubSubCredentialsProvider implements Serializable {
   private static final long serialVersionUID = 1L;
 
   private static final String PUBSUB_SCOPE = "https://www.googleapis.com/auth/pubsub";
 
   private final String credentialsFile;
 
-  public PubSubCredentialsProvider() {
+  PubSubCredentialsProvider() {
     this(null);
   }
 
-  public PubSubCredentialsProvider(String credentialsFile) {
+  PubSubCredentialsProvider(String credentialsFile) {
     this.credentialsFile = credentialsFile;
   }
 
-  public Credentials getCredentials() {
+  Credentials getCredentials() {
     try {
       if (credentialsFile != null && !credentialsFile.isBlank()) {
         try (FileInputStream in = new FileInputStream(credentialsFile)) {
@@ -41,7 +41,7 @@ public final class PubSubCredentialsProvider implements Serializable {
     }
   }
 
-  public String credentialsFile() {
+  String credentialsFile() {
     return credentialsFile;
   }
 

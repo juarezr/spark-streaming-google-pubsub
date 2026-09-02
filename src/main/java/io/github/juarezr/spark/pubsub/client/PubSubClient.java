@@ -16,7 +16,6 @@ import com.google.pubsub.v1.PullResponse;
 import com.google.pubsub.v1.ReceivedMessage;
 import com.google.pubsub.v1.SeekRequest;
 import com.google.pubsub.v1.SubscriptionName;
-import io.github.juarezr.spark.pubsub.auth.PubSubCredentialsProvider;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import io.github.juarezr.spark.pubsub.config.SeekMode;
 import java.io.Closeable;
@@ -56,7 +55,7 @@ public final class PubSubClient implements Closeable, Serializable {
         RetryPolicy.defaults());
   }
 
-  public PubSubClient(
+  PubSubClient(
       PubSubConfig config, PubSubCredentialsProvider credentialsProvider, RetryPolicy retryPolicy) {
     this.config = config;
     this.credentialsProvider = credentialsProvider;

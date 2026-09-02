@@ -7,12 +7,12 @@ import java.util.List;
 import org.apache.spark.sql.connector.read.InputPartition;
 
 /** One Spark task partition holding a slice of pulled Pub/Sub messages. */
-public final class PubSubInputPartition implements InputPartition {
+final class PubSubInputPartition implements InputPartition {
   private static final long serialVersionUID = 1L;
 
   private final List<PulledMessage> messages;
 
-  public PubSubInputPartition(List<PulledMessage> messages) {
+  PubSubInputPartition(List<PulledMessage> messages) {
     this.messages =
         messages == null
             ? Collections.emptyList()
