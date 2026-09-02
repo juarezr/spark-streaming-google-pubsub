@@ -13,6 +13,7 @@ import com.google.cloud.pubsub.v1.stub.SubscriberStubSettings;
 import com.google.protobuf.Timestamp;
 import com.google.pubsub.v1.AcknowledgeRequest;
 import com.google.pubsub.v1.ModifyAckDeadlineRequest;
+import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.PullRequest;
 import com.google.pubsub.v1.PullResponse;
 import com.google.pubsub.v1.ReceivedMessage;
@@ -30,6 +31,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
@@ -67,84 +69,107 @@ public final class PubSubClient implements Closeable, Serializable {
   }
 
   public synchronized void start() throws IOException {
-    if (subscriberStub != null) {
+    if (this.subscriberStub != null) {
       return;
     }
-    outstandingBytes = new AtomicLong(0);
-    seekApplied = false;
+    this.outstandingBytes = new AtomicLong(0);
+    this.seekApplied = false;
 
-    SubscriberStubSettings.Builder settingsBuilder = SubscriberStubSettings.newBuilder();
-    if (config.emulatorHost().isPresent()) {
-      String host = config.emulatorHost().get();
-      channel = ManagedChannelBuilder.forTarget(host).usePlaintext().build();
-      settingsBuilder.setTransportChannelProvider(
-          FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel)));
-      settingsBuilder.setCredentialsProvider(NoCredentialsProvider.create());
-      LOG.info("Connecting Pub/Sub client to emulator at {}", host);
+    final SubscriberStubSettings.Builder builder = SubscriberStubSettings.newBuilder();
+    final boolean emulated = this.config.emulatorHost().isPresent();
+    if (emulated) {
+      startEmulatorHost(builder);
+      builder.setCredentialsProvider(NoCredentialsProvider.create());
     } else {
-      settingsBuilder.setCredentialsProvider(
-          FixedCredentialsProvider.create(credentialsProvider.getCredentials()));
+      builder.setCredentialsProvider(
+          FixedCredentialsProvider.create(this.credentialsProvider.getCredentials()));
     }
-    subscriberStub = GrpcSubscriberStub.create(settingsBuilder.build());
+    this.subscriberStub = GrpcSubscriberStub.create(builder.build());
     applySeekIfNeeded();
   }
 
   private void applySeekIfNeeded() throws IOException {
-    if (seekApplied || config.seekMode() == SeekMode.NONE) {
+    if (seekApplied || this.config.seekMode() == SeekMode.NONE) {
       return;
     }
-    SeekRequest.Builder seek = SeekRequest.newBuilder().setSubscription(config.subscriptionPath());
-    switch (config.seekMode()) {
-      case BEGINNING:
-        seek.setTime(Timestamp.newBuilder().setSeconds(0).setNanos(0).build());
-        break;
-      case TIMESTAMP:
-        Instant instant = parseSeekTime(config.seekTime().orElseThrow());
-        seek.setTime(
-            Timestamp.newBuilder()
-                .setSeconds(instant.getEpochSecond())
-                .setNanos(instant.getNano())
-                .build());
-        break;
-      case SNAPSHOT:
-        seek.setSnapshot(config.seekSnapshot().orElseThrow());
-        break;
-      case NONE:
-      default:
-        return;
-    }
+    final SeekRequest.Builder seek = getSeekRequestBuilder();
 
     ManagedChannel adminChannel = null;
     try {
-      SubscriptionAdminSettings.Builder builder = SubscriptionAdminSettings.newBuilder();
-      if (config.emulatorHost().isPresent()) {
-        String host = config.emulatorHost().get();
-        adminChannel = ManagedChannelBuilder.forTarget(host).usePlaintext().build();
-        builder.setTransportChannelProvider(
-            FixedTransportChannelProvider.create(GrpcTransportChannel.create(adminChannel)));
-        builder.setCredentialsProvider(NoCredentialsProvider.create());
+      final SubscriptionAdminSettings.Builder builder = SubscriptionAdminSettings.newBuilder();
+      if (this.config.emulatorHost().isPresent()) {
+        adminChannel = createAdminChannel(builder);
       } else {
         builder.setCredentialsProvider(
             FixedCredentialsProvider.create(credentialsProvider.getCredentials()));
       }
       try (SubscriptionAdminClient admin = SubscriptionAdminClient.create(builder.build())) {
-        admin.seek(seek.build());
         LOG.warn(
-            "Applied seek={} on subscription {} (explicit rewind requested)",
-            config.seekMode(),
-            config.subscriptionPath());
+            "Applying seek={} on subscription {} (explicit rewind requested)",
+            this.config.seekMode(),
+            this.config.subscriptionPath());
+        admin.seek(seek.build());
       }
     } finally {
-      if (adminChannel != null) {
-        adminChannel.shutdownNow();
-        try {
-          adminChannel.awaitTermination(5, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-        }
-      }
+      shutdownAdminChannel(adminChannel);
     }
     seekApplied = true;
+  }
+
+  private SeekRequest.Builder getSeekRequestBuilder() {
+    final SeekRequest.Builder seek =
+        SeekRequest.newBuilder().setSubscription(this.config.subscriptionPath());
+
+    switch (this.config.seekMode()) {
+      case BEGINNING:
+        seek.setTime(Timestamp.newBuilder().setSeconds(0).setNanos(0).build());
+        break;
+      case TIMESTAMP:
+        final Instant instant = parseSeekTime(this.config.seekTime().orElseThrow());
+        final Timestamp seekTime =
+            Timestamp.newBuilder()
+                .setSeconds(instant.getEpochSecond())
+                .setNanos(instant.getNano())
+                .build();
+        seek.setTime(seekTime);
+        break;
+      case SNAPSHOT:
+        seek.setSnapshot(this.config.seekSnapshot().orElseThrow());
+        break;
+      case NONE:
+      default:
+    }
+    return seek;
+  }
+
+  private void startEmulatorHost(final SubscriberStubSettings.Builder builder) {
+    final String host = this.config.emulatorHost().get();
+    this.channel = ManagedChannelBuilder.forTarget(host).usePlaintext().build();
+    final FixedTransportChannelProvider transportChannelProvider =
+        FixedTransportChannelProvider.create(GrpcTransportChannel.create(this.channel));
+    builder.setTransportChannelProvider(transportChannelProvider);
+    LOG.info("Connecting Pub/Sub client to emulator at {}", host);
+  }
+
+  private ManagedChannel createAdminChannel(final SubscriptionAdminSettings.Builder builder) {
+    final String host = this.config.emulatorHost().get();
+    final ManagedChannel adminChannel =
+        ManagedChannelBuilder.forTarget(host).usePlaintext().build();
+    builder.setTransportChannelProvider(
+        FixedTransportChannelProvider.create(GrpcTransportChannel.create(adminChannel)));
+    builder.setCredentialsProvider(NoCredentialsProvider.create());
+    return adminChannel;
+  }
+
+  private void shutdownAdminChannel(ManagedChannel adminChannel) {
+    if (adminChannel != null) {
+      adminChannel.shutdownNow();
+      try {
+        adminChannel.awaitTermination(5, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
   }
 
   private static Instant parseSeekTime(String seekTime) {
@@ -160,45 +185,74 @@ public final class PubSubClient implements Closeable, Serializable {
     }
   }
 
+  private void ensureStarted() {
+    if (this.subscriberStub == null) {
+      try {
+        start();
+      } catch (IOException e) {
+        throw new IllegalStateException("Failed to start Pub/Sub client", e);
+      }
+    }
+  }
+
+  @Override
+  public synchronized void close() {
+    if (this.subscriberStub != null) {
+      try {
+        this.subscriberStub.shutdown();
+        this.subscriberStub.awaitTermination(5, TimeUnit.SECONDS);
+      } catch (Exception e) {
+        LOG.warn("Error shutting down subscriber stub", e);
+      } finally {
+        subscriberStub = null;
+      }
+    }
+    if (channel != null) {
+      channel.shutdownNow();
+      channel = null;
+    }
+  }
+
   public List<PulledMessage> pull() {
     ensureStarted();
-    if (outstandingBytes.get() >= config.maxBytesOutstanding()) {
-      LOG.debug(
-          "Skipping pull; outstanding bytes {} >= limit {}",
-          outstandingBytes.get(),
-          config.maxBytesOutstanding());
+    final long currentBytes = this.outstandingBytes.get();
+    long maxBytes = this.config.maxBytesOutstanding();
+    if (currentBytes >= maxBytes) {
+      LOG.debug("Skipping pull; outstanding bytes {} >= limit {}", currentBytes, maxBytes);
       return Collections.emptyList();
     }
-    return retryPolicy.execute(
-        "pull",
-        () -> {
-          PullRequest request =
-              PullRequest.newBuilder()
-                  .setSubscription(config.subscriptionPath())
-                  .setMaxMessages(config.maxMessagesPerPull())
-                  .build();
-          GrpcCallContext callContext =
-              GrpcCallContext.createDefault()
-                  .withTimeout(Duration.ofSeconds(config.pullTimeoutSeconds()));
-          PullResponse response = subscriberStub.pullCallable().call(request, callContext);
-          List<PulledMessage> messages = new ArrayList<>(response.getReceivedMessagesCount());
-          for (ReceivedMessage received : response.getReceivedMessagesList()) {
-            byte[] data = received.getMessage().getData().toByteArray();
-            outstandingBytes.addAndGet(data.length);
-            long publishMillis =
-                received.getMessage().getPublishTime().getSeconds() * 1000L
-                    + received.getMessage().getPublishTime().getNanos() / 1_000_000L;
-            messages.add(
-                new PulledMessage(
-                    received.getMessage().getMessageId(),
-                    data,
-                    received.getMessage().getAttributesMap(),
-                    publishMillis,
-                    received.getMessage().getOrderingKey(),
-                    received.getAckId()));
-          }
-          return messages;
-        });
+    return retryPolicy.execute("pull", this::pullMessagesFromSubscription);
+  }
+
+  private List<PulledMessage> pullMessagesFromSubscription() {
+    final PullRequest request =
+        PullRequest.newBuilder()
+            .setSubscription(this.config.subscriptionPath())
+            .setMaxMessages(this.config.maxMessagesPerPull())
+            .build();
+    final GrpcCallContext callContext =
+        GrpcCallContext.createDefault()
+            .withTimeout(Duration.ofSeconds(this.config.pullTimeoutSeconds()));
+    final PullResponse response = subscriberStub.pullCallable().call(request, callContext);
+    final int receivedCount = response.getReceivedMessagesCount();
+    final List<PulledMessage> messages = new ArrayList<>(receivedCount);
+
+    for (ReceivedMessage received : response.getReceivedMessagesList()) {
+      final PubsubMessage message = received.getMessage();
+      final byte[] data = message.getData().toByteArray();
+      this.outstandingBytes.addAndGet(data.length);
+      final long publishMillis =
+          message.getPublishTime().getSeconds() * 1000L
+              + message.getPublishTime().getNanos() / 1_000_000L;
+      final String messageId = message.getMessageId();
+      final Map<String, String> attributes = message.getAttributesMap();
+      final String orderingKey = message.getOrderingKey();
+      final String ackId = received.getAckId();
+      final PulledMessage converted =
+          new PulledMessage(messageId, data, attributes, publishMillis, orderingKey, ackId);
+      messages.add(converted);
+    }
+    return messages;
   }
 
   public void acknowledge(List<String> ackIds) {
@@ -206,16 +260,16 @@ public final class PubSubClient implements Closeable, Serializable {
       return;
     }
     ensureStarted();
-    retryPolicy.executeVoid(
-        "acknowledge",
-        () -> {
-          AcknowledgeRequest request =
-              AcknowledgeRequest.newBuilder()
-                  .setSubscription(config.subscriptionPath())
-                  .addAllAckIds(ackIds)
-                  .build();
-          subscriberStub.acknowledgeCallable().call(request);
-        });
+    retryPolicy.executeVoid("acknowledge", () -> acknowledgeRequest(ackIds));
+  }
+
+  private void acknowledgeRequest(List<String> ackIds) {
+    final AcknowledgeRequest request =
+        AcknowledgeRequest.newBuilder()
+            .setSubscription(this.config.subscriptionPath())
+            .addAllAckIds(ackIds)
+            .build();
+    this.subscriberStub.acknowledgeCallable().call(request);
   }
 
   public void nack(List<String> ackIds) {
@@ -223,17 +277,17 @@ public final class PubSubClient implements Closeable, Serializable {
       return;
     }
     ensureStarted();
-    retryPolicy.executeVoid(
-        "nack",
-        () -> {
-          ModifyAckDeadlineRequest request =
-              ModifyAckDeadlineRequest.newBuilder()
-                  .setSubscription(config.subscriptionPath())
-                  .addAllAckIds(ackIds)
-                  .setAckDeadlineSeconds(0)
-                  .build();
-          subscriberStub.modifyAckDeadlineCallable().call(request);
-        });
+    retryPolicy.executeVoid("nack", () -> nackRequest(ackIds));
+  }
+
+  private void nackRequest(List<String> ackIds) {
+    ModifyAckDeadlineRequest request =
+        ModifyAckDeadlineRequest.newBuilder()
+            .setSubscription(this.config.subscriptionPath())
+            .addAllAckIds(ackIds)
+            .setAckDeadlineSeconds(0)
+            .build();
+    this.subscriberStub.modifyAckDeadlineCallable().call(request);
   }
 
   public void extendAckDeadline(List<String> ackIds, int deadlineSeconds) {
@@ -242,21 +296,22 @@ public final class PubSubClient implements Closeable, Serializable {
     }
     ensureStarted();
     retryPolicy.executeVoid(
-        "modifyAckDeadline",
-        () -> {
-          ModifyAckDeadlineRequest request =
-              ModifyAckDeadlineRequest.newBuilder()
-                  .setSubscription(config.subscriptionPath())
-                  .addAllAckIds(ackIds)
-                  .setAckDeadlineSeconds(deadlineSeconds)
-                  .build();
-          subscriberStub.modifyAckDeadlineCallable().call(request);
-        });
+        "modifyAckDeadline", () -> extendDeadlineRequest(ackIds, deadlineSeconds));
+  }
+
+  private void extendDeadlineRequest(List<String> ackIds, int deadlineSeconds) {
+    ModifyAckDeadlineRequest request =
+        ModifyAckDeadlineRequest.newBuilder()
+            .setSubscription(this.config.subscriptionPath())
+            .addAllAckIds(ackIds)
+            .setAckDeadlineSeconds(deadlineSeconds)
+            .build();
+    this.subscriberStub.modifyAckDeadlineCallable().call(request);
   }
 
   public void releaseBytes(long bytes) {
-    if (outstandingBytes != null && bytes > 0) {
-      outstandingBytes.addAndGet(-bytes);
+    if (this.outstandingBytes != null && bytes > 0) {
+      this.outstandingBytes.addAndGet(-bytes);
     }
   }
 
@@ -274,14 +329,14 @@ public final class PubSubClient implements Closeable, Serializable {
 
   /** Clears outstanding byte accounting (e.g. on receiver shutdown). */
   public void resetOutstandingBytes() {
-    if (outstandingBytes != null) {
-      outstandingBytes.set(0);
+    if (this.outstandingBytes != null) {
+      this.outstandingBytes.set(0);
     }
   }
 
   /** Visible for tests. */
   public long outstandingBytes() {
-    return outstandingBytes == null ? 0L : outstandingBytes.get();
+    return this.outstandingBytes == null ? 0L : this.outstandingBytes.get();
   }
 
   public long retryAttempts() {
@@ -293,38 +348,10 @@ public final class PubSubClient implements Closeable, Serializable {
   }
 
   public String subscriptionPath() {
-    return config.subscriptionPath();
+    return this.config.subscriptionPath();
   }
 
   public SubscriptionName subscriptionName() {
-    return SubscriptionName.parse(config.subscriptionPath());
-  }
-
-  private void ensureStarted() {
-    if (subscriberStub == null) {
-      try {
-        start();
-      } catch (IOException e) {
-        throw new IllegalStateException("Failed to start Pub/Sub client", e);
-      }
-    }
-  }
-
-  @Override
-  public synchronized void close() {
-    if (subscriberStub != null) {
-      try {
-        subscriberStub.shutdown();
-        subscriberStub.awaitTermination(5, TimeUnit.SECONDS);
-      } catch (Exception e) {
-        LOG.warn("Error shutting down subscriber stub", e);
-      } finally {
-        subscriberStub = null;
-      }
-    }
-    if (channel != null) {
-      channel.shutdownNow();
-      channel = null;
-    }
+    return SubscriptionName.parse(this.config.subscriptionPath());
   }
 }

@@ -49,8 +49,8 @@ public final class RetryPolicy {
           throw e;
         }
         retryAttempts.incrementAndGet();
-        final long backoff4 = Math.max(1, backoff / 4);
-        final long nextBackoffMs = backoff + ThreadLocalRandom.current().nextLong(0, backoff4);
+        final long jitterBound = Math.max(1, backoff / 4);
+        final long nextBackoffMs = backoff + ThreadLocalRandom.current().nextLong(0, jitterBound);
         final long sleep = Math.min(nextBackoffMs, this.maxBackoffMs);
         backoff = Math.min(backoff * 2, this.maxBackoffMs);
         LOG.warn(FAILURE_ON_ATTEMPT_MSG, operation, attempt, this.maxAttempts, e.toString(), sleep);
