@@ -8,17 +8,22 @@ import org.slf4j.LoggerFactory;
 
 /** Exponential backoff with jitter for transient Pub/Sub failures. */
 public final class RetryPolicy {
+
   private static final Logger LOG = LoggerFactory.getLogger(RetryPolicy.class);
+
+  private static final String FAILURE_ON_ATTEMPT_MSG =
+      "Transient failure on {} (attempt {}/{}): {}. Retrying in {} ms";
 
   private final long initialBackoffMs;
   private final long maxBackoffMs;
   private final int maxAttempts;
-  private final AtomicLong retryAttempts = new AtomicLong(0);
+  private final AtomicLong retryAttempts;
 
   public RetryPolicy(long initialBackoffMs, long maxBackoffMs, int maxAttempts) {
     this.initialBackoffMs = initialBackoffMs;
     this.maxBackoffMs = maxBackoffMs;
     this.maxAttempts = maxAttempts;
+    this.retryAttempts = new AtomicLong(0);
   }
 
   public static RetryPolicy defaults() {
@@ -31,33 +36,30 @@ public final class RetryPolicy {
   }
 
   public <T> T execute(String operation, RetryableCallable<T> callable) {
-    long backoff = initialBackoffMs;
     RuntimeException last = null;
-    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+    long backoff = this.initialBackoffMs;
+
+    for (int attempt = 1; attempt <= this.maxAttempts; attempt++) {
       try {
         return callable.call();
       } catch (RuntimeException e) {
         last = e;
-        if (attempt == maxAttempts || !isRetryable(e)) {
+        final boolean retryable = isRetryable(e);
+        if (attempt == this.maxAttempts || !retryable) {
           throw e;
         }
         retryAttempts.incrementAndGet();
-        long sleep = backoff + ThreadLocalRandom.current().nextLong(0, Math.max(1, backoff / 4));
-        sleep = Math.min(sleep, maxBackoffMs);
-        LOG.warn(
-            "Transient failure on {} (attempt {}/{}): {}. Retrying in {} ms",
-            operation,
-            attempt,
-            maxAttempts,
-            e.toString(),
-            sleep);
+        final long backoff4 = Math.max(1, backoff / 4);
+        final long nextBackoffMs = backoff + ThreadLocalRandom.current().nextLong(0, backoff4);
+        final long sleep = Math.min(nextBackoffMs, this.maxBackoffMs);
+        backoff = Math.min(backoff * 2, this.maxBackoffMs);
+        LOG.warn(FAILURE_ON_ATTEMPT_MSG, operation, attempt, this.maxAttempts, e.toString(), sleep);
         try {
           TimeUnit.MILLISECONDS.sleep(sleep);
         } catch (InterruptedException ie) {
           Thread.currentThread().interrupt();
           throw e;
         }
-        backoff = Math.min(backoff * 2, maxBackoffMs);
       } catch (Exception e) {
         throw new RuntimeException("Unexpected failure during " + operation, e);
       }
