@@ -1,10 +1,7 @@
 package io.github.juarezr.spark.pubsub.client;
 
 import com.google.api.gax.core.FixedCredentialsProvider;
-import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.GrpcCallContext;
-import com.google.api.gax.grpc.GrpcTransportChannel;
-import com.google.api.gax.rpc.FixedTransportChannelProvider;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
 import com.google.cloud.pubsub.v1.stub.GrpcSubscriberStub;
@@ -22,8 +19,6 @@ import com.google.pubsub.v1.SubscriptionName;
 import io.github.juarezr.spark.pubsub.auth.PubSubCredentialsProvider;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import io.github.juarezr.spark.pubsub.config.SeekMode;
-import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.Serializable;
@@ -45,12 +40,12 @@ public final class PubSubClient implements Closeable, Serializable {
   private static final long serialVersionUID = 1L;
   private static final Logger LOG = LoggerFactory.getLogger(PubSubClient.class);
 
+  private final RetryPolicy retryPolicy;
+  private transient PubSubEmulator emulator;
+
   private final PubSubConfig config;
   private final PubSubCredentialsProvider credentialsProvider;
-  private final RetryPolicy retryPolicy;
-
   private transient SubscriberStub subscriberStub;
-  private transient ManagedChannel channel;
   private transient AtomicLong outstandingBytes;
   private transient boolean seekApplied;
 
@@ -73,19 +68,22 @@ public final class PubSubClient implements Closeable, Serializable {
       return;
     }
     this.outstandingBytes = new AtomicLong(0);
-    this.seekApplied = false;
 
     final SubscriberStubSettings.Builder builder = SubscriberStubSettings.newBuilder();
-    final boolean emulated = this.config.emulatorHost().isPresent();
-    if (emulated) {
-      startEmulatorHost(builder);
-      builder.setCredentialsProvider(NoCredentialsProvider.create());
+    this.emulator = this.config.emulatorHost().map(PubSubEmulator::new).orElse(null);
+    if (this.emulator != null) {
+      this.emulator.configureSubscriber(builder);
     } else {
       builder.setCredentialsProvider(
           FixedCredentialsProvider.create(this.credentialsProvider.getCredentials()));
     }
-    this.subscriberStub = GrpcSubscriberStub.create(builder.build());
-    applySeekIfNeeded();
+    try {
+      this.subscriberStub = GrpcSubscriberStub.create(builder.build());
+      applySeekIfNeeded();
+    } catch (Exception e) {
+      this.close();
+      throw e;
+    }
   }
 
   private void applySeekIfNeeded() throws IOException {
@@ -93,15 +91,14 @@ public final class PubSubClient implements Closeable, Serializable {
       return;
     }
     final SeekRequest.Builder seek = getSeekRequestBuilder();
-
-    ManagedChannel adminChannel = null;
-    try {
-      final SubscriptionAdminSettings.Builder builder = SubscriptionAdminSettings.newBuilder();
-      if (this.config.emulatorHost().isPresent()) {
-        adminChannel = createAdminChannel(builder);
+    final SubscriptionAdminSettings.Builder builder = SubscriptionAdminSettings.newBuilder();
+    try (PubSubEmulator adminEmulator =
+        this.config.emulatorHost().map(PubSubEmulator::new).orElse(null)) {
+      if (adminEmulator != null) {
+        adminEmulator.configureAdmin(builder);
       } else {
         builder.setCredentialsProvider(
-            FixedCredentialsProvider.create(credentialsProvider.getCredentials()));
+            FixedCredentialsProvider.create(this.credentialsProvider.getCredentials()));
       }
       try (SubscriptionAdminClient admin = SubscriptionAdminClient.create(builder.build())) {
         LOG.warn(
@@ -110,8 +107,6 @@ public final class PubSubClient implements Closeable, Serializable {
             this.config.subscriptionPath());
         admin.seek(seek.build());
       }
-    } finally {
-      shutdownAdminChannel(adminChannel);
     }
     seekApplied = true;
   }
@@ -140,36 +135,6 @@ public final class PubSubClient implements Closeable, Serializable {
       default:
     }
     return seek;
-  }
-
-  private void startEmulatorHost(final SubscriberStubSettings.Builder builder) {
-    final String host = this.config.emulatorHost().get();
-    this.channel = ManagedChannelBuilder.forTarget(host).usePlaintext().build();
-    final FixedTransportChannelProvider transportChannelProvider =
-        FixedTransportChannelProvider.create(GrpcTransportChannel.create(this.channel));
-    builder.setTransportChannelProvider(transportChannelProvider);
-    LOG.info("Connecting Pub/Sub client to emulator at {}", host);
-  }
-
-  private ManagedChannel createAdminChannel(final SubscriptionAdminSettings.Builder builder) {
-    final String host = this.config.emulatorHost().get();
-    final ManagedChannel adminChannel =
-        ManagedChannelBuilder.forTarget(host).usePlaintext().build();
-    builder.setTransportChannelProvider(
-        FixedTransportChannelProvider.create(GrpcTransportChannel.create(adminChannel)));
-    builder.setCredentialsProvider(NoCredentialsProvider.create());
-    return adminChannel;
-  }
-
-  private void shutdownAdminChannel(ManagedChannel adminChannel) {
-    if (adminChannel != null) {
-      adminChannel.shutdownNow();
-      try {
-        adminChannel.awaitTermination(5, TimeUnit.SECONDS);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    }
   }
 
   private static Instant parseSeekTime(String seekTime) {
@@ -201,15 +166,18 @@ public final class PubSubClient implements Closeable, Serializable {
       try {
         this.subscriberStub.shutdown();
         this.subscriberStub.awaitTermination(5, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        LOG.warn("Interrupted while shutting down subscriber stub", e);
+        Thread.currentThread().interrupt();
       } catch (Exception e) {
         LOG.warn("Error shutting down subscriber stub", e);
       } finally {
-        subscriberStub = null;
+        this.subscriberStub = null;
       }
     }
-    if (channel != null) {
-      channel.shutdownNow();
-      channel = null;
+    if (this.emulator != null) {
+      this.emulator.close();
+      this.emulator = null;
     }
   }
 
