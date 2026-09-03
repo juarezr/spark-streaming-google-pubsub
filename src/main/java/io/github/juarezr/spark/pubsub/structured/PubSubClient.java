@@ -167,15 +167,21 @@ final class PubSubClient implements Closeable, Serializable {
   }
 
   List<PulledMessage> pull(java.time.Duration deadline) {
-    ensureStarted();
-    return retryPolicy.execute("pull", () -> pullMessagesFromSubscription(deadline));
+    return pull(deadline, config.pullMaxMessages());
   }
 
-  private List<PulledMessage> pullMessagesFromSubscription(java.time.Duration deadline) {
+  List<PulledMessage> pull(java.time.Duration deadline, int maxMessages) {
+    ensureStarted();
+    final int capped = Math.max(1, Math.min(this.config.pullMaxMessages(), maxMessages));
+    return retryPolicy.execute("pull", () -> pullMessagesFromSubscription(deadline, capped));
+  }
+
+  private List<PulledMessage> pullMessagesFromSubscription(
+      java.time.Duration deadline, int maxMessages) {
     final PullRequest request =
         PullRequest.newBuilder()
             .setSubscription(this.config.subscriptionPath())
-            .setMaxMessages(this.config.pullMaxMessages())
+            .setMaxMessages(maxMessages)
             .build();
     final GrpcCallContext callContext =
         GrpcCallContext.createDefault()

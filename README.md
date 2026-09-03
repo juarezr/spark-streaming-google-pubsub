@@ -83,6 +83,7 @@ The timing controls apply at different points:
 | Control | What it bounds |
 |:--------|:---------------|
 | Spark trigger | When Spark asks for the next offset after the previous micro-batch finishes |
+| Spark `ReadLimit` | `maxRowsPerTrigger` / `maxBytesPerTrigger` (Spark 4+) composed with `batchCount` / `batchSize` |
 | `batchTime` | How long one `latestOffset` gathers Pull responses |
 | `pullDeadline` | How long one healthy Pull RPC waits for messages |
 | `ackDeadline` | How long Pub/Sub leases a delivered message; renewed until Spark commits |
@@ -118,8 +119,8 @@ and `g` use multiples of 1024.
 | `ackDeadline` | `60s` | Message lease, renewed about every third of this duration |
 | `gatherMode` | `batch` | `batch` gathers Pulls; `pull` emits one Pull per micro-batch |
 | `batchTime` | `10s` | Maximum gather time in `batch` mode |
-| `batchSize` | `128m` | Maximum gathered payload bytes; blank/0 disables |
-| `batchCount` | | Maximum gathered message count; blank/0 disables |
+| `batchSize` | `128m` | Maximum gathered payload bytes; blank/0 disables. Effective cap is the min of this and Spark `maxBytesPerTrigger` (Spark 4+) |
+| `batchCount` | | Maximum gathered message count; blank/0 disables. Effective cap is the min of this and Spark `maxRowsPerTrigger` |
 | `numWriters` | `1` | Spark task slices; integer ≥1 or `auto` for driver CPU count |
 | `emulatorHost` | | Emulator address such as `localhost:8085` |
 
@@ -242,11 +243,11 @@ This connector is a **read-only Structured Streaming (micro-batch)** source. The
 
 - **Spark 4.1 Real-time Mode** — does not fit this source's driver-side Pull and lease/ack model.
 - **Trigger.AvailableNow** (“drain then stop”) — a subscription has no durable log-end offset.
+  Rate limits via `SupportsAdmissionControl` (`maxRowsPerTrigger`, `maxBytesPerTrigger` on Spark 4+)
+  are implemented; AvailableNow still is not.
 - **Continuous Processing** — experimental; Spark recommends Real-time Mode instead. Same lease-model mismatch.
 - **Streaming sink and batch `spark.read`** — a subscription is a queue, not a table. Rewind/replay uses explicit `seek` / snapshot **options**, not a batch scan.
 - **SQL filter pushdown that seeks** — a `WHERE publishTime >= …` must not rewind a **shared** subscription. Filter on attributes with a GCP subscription filter; rewind with explicit `seek`.
-- **Spark admission control (`ReadLimit`)** — not implemented; use `pullMaxMessages`,
-  `batchSize`, and `batchCount`.
 
 ## Build and test locally
 
