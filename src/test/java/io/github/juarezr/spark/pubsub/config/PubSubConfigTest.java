@@ -131,9 +131,9 @@ class PubSubConfigTest {
   void parseSeekTimeAcceptsEpochMillisAndRfc3339() {
     assertEquals(
         Instant.ofEpochMilli(1_723_050_029_028L), PubSubConfig.parseSeekTime("1723050029028"));
-    assertEquals(
-        Instant.parse("2024-08-07T15:00:29.028Z"),
-        PubSubConfig.parseSeekTime("2024-08-07T12:00:29.028-03:00"));
+    Instant rfc3339 = Instant.parse("2024-08-07T15:00:29.028Z");
+    assertEquals(rfc3339, PubSubConfig.parseSeekTime("2024-08-07T15:00:29.028Z"));
+    assertEquals(rfc3339, PubSubConfig.parseSeekTime("2024-08-07T12:00:29.028-03:00"));
   }
 
   @Test

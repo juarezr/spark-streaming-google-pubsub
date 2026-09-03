@@ -3,6 +3,7 @@ package io.github.juarezr.spark.pubsub.config;
 import java.io.Serializable;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -246,7 +247,7 @@ public final class PubSubConfig implements Serializable {
       if (!value.isEmpty() && value.chars().allMatch(Character::isDigit)) {
         return Instant.ofEpochMilli(Long.parseLong(value));
       }
-      return Instant.parse(value);
+      return OffsetDateTime.parse(value).toInstant();
     } catch (Exception e) {
       throw new IllegalArgumentException(
           "Invalid seekTime '" + raw + "'. Use epoch milliseconds or RFC-3339 with Z/offset.", e);
