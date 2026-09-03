@@ -7,7 +7,8 @@ import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 
 /** Factory that creates {@link PubSubPartitionReader} instances. */
 final class PubSubPartitionReaderFactory implements PartitionReaderFactory {
-  private static final long serialVersionUID = 1L;
+
+  private static final long serialVersionUID = -629855020L;
 
   @Override
   public PartitionReader<InternalRow> createReader(InputPartition partition) {

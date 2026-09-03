@@ -7,7 +7,8 @@ import org.apache.spark.sql.connector.read.InputPartition;
 
 /** One Spark task partition holding a slice of pulled Pub/Sub messages. */
 final class PubSubInputPartition implements InputPartition {
-  private static final long serialVersionUID = 1L;
+
+  private static final long serialVersionUID = -190057786L;
 
   private final List<PulledMessage> messages;
 

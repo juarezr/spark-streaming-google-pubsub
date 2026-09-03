@@ -34,7 +34,8 @@ import org.threeten.bp.Duration;
  * Thin wrapper around the Pub/Sub subscriber stub with pull/ack/nack, retries, and optional seek.
  */
 final class PubSubClient implements Closeable, Serializable {
-  private static final long serialVersionUID = 1L;
+
+  private static final long serialVersionUID = -3861530485L;
   private static final Logger LOG = LoggerFactory.getLogger(PubSubClient.class);
 
   private final RetryPolicy retryPolicy;

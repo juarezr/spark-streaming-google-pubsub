@@ -12,7 +12,8 @@ import java.util.Optional;
 
 /** Validated connector configuration for Structured Streaming. */
 public final class PubSubConfig implements Serializable {
-  private static final long serialVersionUID = 1L;
+
+  private static final long serialVersionUID = 75047261L;
 
   public static final String SHORT_NAME = "google-pubsub";
 
