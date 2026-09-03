@@ -11,7 +11,8 @@ import java.util.Collections;
 
 /** Resolves Google credentials, defaulting to Application Default Credentials (ADC). */
 final class PubSubCredentialsProvider implements Serializable {
-  private static final long serialVersionUID = 1L;
+
+  private static final long serialVersionUID = 8759814691L;
 
   private static final String PUBSUB_SCOPE = "https://www.googleapis.com/auth/pubsub";
 

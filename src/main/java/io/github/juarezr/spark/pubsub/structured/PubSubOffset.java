@@ -11,7 +11,9 @@ import org.apache.spark.sql.connector.read.streaming.Offset;
  * after a driver restart Pub/Sub redelivers unacknowledged messages.
  */
 final class PubSubOffset extends Offset implements Serializable {
-  private static final long serialVersionUID = 1L;
+
+  private static final long serialVersionUID = 1417614803L;
+
   private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
   private final long batchId;

@@ -28,7 +28,38 @@ class PubSubConfigTest {
     assertEquals(Duration.ofSeconds(10), config.batchTime());
     assertEquals(128L * 1024 * 1024, config.batchSize());
     assertEquals(1, config.numWriters());
+    assertEquals(SchemaMode.BASIC, config.schemaMode());
+    assertEquals(MetadataMode.NONE, config.metadataMode());
     assertEquals("projects/my-project/subscriptions/my-sub", config.subscriptionPath());
+  }
+
+  @Test
+  void fromOptionsParsesSchemaAndMetadataModes() {
+    Map<String, String> options = new HashMap<>();
+    options.put("projectId", "p");
+    options.put("subscription", "s");
+    options.put("schemaMode", "mixed");
+    options.put("metadataMode", "slim");
+
+    PubSubConfig config = PubSubConfig.fromOptions(options);
+
+    assertEquals(SchemaMode.MIXED, config.schemaMode());
+    assertEquals(MetadataMode.SLIM, config.metadataMode());
+  }
+
+  @Test
+  void rejectsUnknownSchemaAndMetadataModes() {
+    Map<String, String> schema = new HashMap<>();
+    schema.put("projectId", "p");
+    schema.put("subscription", "s");
+    schema.put("schemaMode", "full");
+    assertThrows(IllegalArgumentException.class, () -> PubSubConfig.fromOptions(schema));
+
+    Map<String, String> metadata = new HashMap<>();
+    metadata.put("projectId", "p");
+    metadata.put("subscription", "s");
+    metadata.put("metadataMode", "dynamic");
+    assertThrows(IllegalArgumentException.class, () -> PubSubConfig.fromOptions(metadata));
   }
 
   @Test

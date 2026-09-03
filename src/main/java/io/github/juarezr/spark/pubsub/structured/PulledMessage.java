@@ -10,7 +10,8 @@ import java.util.Objects;
 
 /** A Pub/Sub message pulled into Spark, including the ack id for later acknowledgement. */
 final class PulledMessage implements Serializable {
-  private static final long serialVersionUID = 1L;
+
+  private static final long serialVersionUID = 4367024244L;
 
   private final String messageId;
   private final byte[] data;

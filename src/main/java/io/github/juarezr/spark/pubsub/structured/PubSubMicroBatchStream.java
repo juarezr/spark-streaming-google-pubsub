@@ -17,7 +17,10 @@ import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
 import org.apache.spark.sql.connector.read.streaming.Offset;
+import org.apache.spark.sql.connector.read.streaming.ReadLimit;
 import org.apache.spark.sql.connector.read.streaming.ReportsSourceMetrics;
+import org.apache.spark.sql.connector.read.streaming.SupportsAdmissionControl;
+import org.apache.spark.sql.types.StructType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,16 +29,19 @@ import org.slf4j.LoggerFactory;
  * subscription cursor remains the durable source of truth across process restarts (no rewind unless
  * configured).
  */
-final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMetrics {
+final class PubSubMicroBatchStream
+    implements MicroBatchStream, ReportsSourceMetrics, SupportsAdmissionControl {
   private static final Logger LOG = LoggerFactory.getLogger(PubSubMicroBatchStream.class);
 
   private final PubSubConfig config;
+  private final StructType readSchema;
   private final PubSubClient client;
   private final AckCoordinator ackCoordinator;
   private final AckLeaseWatchdog leaseWatchdog = new AckLeaseWatchdog();
   private final AtomicLong nextBatchId = new AtomicLong(0);
   private final AtomicInteger lastPullMessageCount = new AtomicInteger(0);
   private final AtomicLong lastPullPayloadBytes = new AtomicLong(0);
+  private volatile Long lastPullMessageAgeMs;
   private final AtomicLong lastReportedRetryAttempts = new AtomicLong(0);
   private final int numPartitions;
   private volatile PubSubOffset lastProduced;
@@ -44,12 +50,26 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
       new ConcurrentHashMap<>();
 
   PubSubMicroBatchStream(PubSubConfig config, int numPartitions) {
-    this(config, numPartitions, new PubSubClient(config), true);
+    this(config, numPartitions, PubSubSchema.tableSchema(config, null));
+  }
+
+  PubSubMicroBatchStream(PubSubConfig config, int numPartitions, StructType readSchema) {
+    this(config, numPartitions, new PubSubClient(config), true, readSchema);
   }
 
   PubSubMicroBatchStream(
       PubSubConfig config, int numPartitions, PubSubClient client, boolean startClient) {
+    this(config, numPartitions, client, startClient, PubSubSchema.tableSchema(config, null));
+  }
+
+  PubSubMicroBatchStream(
+      PubSubConfig config,
+      int numPartitions,
+      PubSubClient client,
+      boolean startClient,
+      StructType readSchema) {
     this.config = config;
+    this.readSchema = readSchema == null ? PubSubSchema.tableSchema(config, null) : readSchema;
     this.client = client;
     this.ackCoordinator = new AckCoordinator(config.ackMode());
     this.numPartitions = Math.max(1, numPartitions);
@@ -64,15 +84,38 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
   }
 
   @Override
+  public ReadLimit getDefaultReadLimit() {
+    if (config.batchCount() > 0) {
+      return ReadLimit.maxRows(config.batchCount());
+    }
+    return ReadLimit.allAvailable();
+  }
+
+  @Override
+  public Offset reportLatestOffset() {
+    return lastProduced != null ? lastProduced : currentOffset;
+  }
+
+  @Override
   public Offset latestOffset() {
+    return latestOffset(AdmissionLimits.from(config, null), false);
+  }
+
+  @Override
+  public Offset latestOffset(Offset startOffset, ReadLimit limit) {
+    return latestOffset(AdmissionLimits.from(config, limit), true);
+  }
+
+  private Offset latestOffset(AdmissionLimits limits, boolean nullIfEmpty) {
     if (lastProduced != null) {
       return lastProduced;
     }
-    List<PulledMessage> pulled = gatherMessages();
+    List<PulledMessage> pulled = gatherMessages(limits);
     if (pulled.isEmpty()) {
       lastPullMessageCount.set(0);
       lastPullPayloadBytes.set(0);
-      return currentOffset;
+      lastPullMessageAgeMs = null;
+      return nullIfEmpty ? null : currentOffset;
     }
     long batchId = nextBatchId.getAndIncrement();
     PubSubOffset offset = new PubSubOffset(batchId);
@@ -104,28 +147,40 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
     final long pulledBytes = PulledMessage.payloadBytes(pulled);
     lastPullMessageCount.set(pulledSize);
     lastPullPayloadBytes.set(pulledBytes);
+    lastPullMessageAgeMs =
+        PubSubSourceMetrics.newestMessageAgeMs(pulled, System.currentTimeMillis());
     LOG.debug("latestOffset batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
     return offset;
   }
 
-  private List<PulledMessage> gatherMessages() {
+  private List<PulledMessage> gatherMessages(AdmissionLimits limits) {
     List<PulledMessage> messages = new ArrayList<>();
-    if (config.gatherMode() == GatherMode.PULL) {
-      messages.addAll(client.pull(config.pullDeadline()));
+    if (limits.singlePull()) {
+      int maxMessages = limits.messagesForNextPull(0, config.pullMaxMessages());
+      if (maxMessages > 0) {
+        messages.addAll(client.pull(config.pullDeadline(), maxMessages));
+      }
       return messages;
     }
 
-    long deadlineNanos = System.nanoTime() + config.batchTime().toNanos();
+    long deadlineNanos = System.nanoTime() + limits.waitTime().toNanos();
     long payloadBytes = 0L;
     boolean firstPull = true;
     try {
       while (System.nanoTime() < deadlineNanos) {
+        if (limits.reachedMax(messages.size(), payloadBytes)) {
+          break;
+        }
         Duration remaining = Duration.ofNanos(Math.max(1L, deadlineNanos - System.nanoTime()));
         Duration rpcDeadline =
             firstPull
                 ? min(config.pullDeadline(), remaining)
                 : min(Duration.ofSeconds(1), remaining);
-        List<PulledMessage> pulled = client.pull(rpcDeadline);
+        int maxMessages = limits.messagesForNextPull(messages.size(), config.pullMaxMessages());
+        if (maxMessages <= 0) {
+          break;
+        }
+        List<PulledMessage> pulled = client.pull(rpcDeadline, maxMessages);
         firstPull = false;
         if (!pulled.isEmpty()) {
           messages.addAll(pulled);
@@ -147,8 +202,10 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
             }
           }
         }
-        if ((config.batchSize() > 0 && payloadBytes >= config.batchSize())
-            || (config.batchCount() > 0 && messages.size() >= config.batchCount())) {
+        if (limits.reachedMax(messages.size(), payloadBytes)) {
+          break;
+        }
+        if (config.gatherMode() == GatherMode.PULL && limits.minRowsMet(messages.size())) {
           break;
         }
       }
@@ -187,6 +244,7 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
     return PubSubSourceMetrics.snapshot(
         lastPullMessageCount.get(),
         lastPullPayloadBytes.get(),
+        lastPullMessageAgeMs,
         client.outstandingBytes(),
         producedBatchId,
         latestConsumedOffset,
@@ -218,7 +276,7 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
 
   @Override
   public PartitionReaderFactory createReaderFactory() {
-    return new PubSubPartitionReaderFactory();
+    return new PubSubPartitionReaderFactory(readSchema);
   }
 
   @Override

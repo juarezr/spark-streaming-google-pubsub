@@ -34,7 +34,8 @@ import org.threeten.bp.Duration;
  * Thin wrapper around the Pub/Sub subscriber stub with pull/ack/nack, retries, and optional seek.
  */
 final class PubSubClient implements Closeable, Serializable {
-  private static final long serialVersionUID = 1L;
+
+  private static final long serialVersionUID = -3861530485L;
   private static final Logger LOG = LoggerFactory.getLogger(PubSubClient.class);
 
   private final RetryPolicy retryPolicy;
@@ -92,7 +93,7 @@ final class PubSubClient implements Closeable, Serializable {
     try (PubSubEmulator adminEmulator =
         this.config.emulatorHost().map(PubSubEmulator::new).orElse(null)) {
       if (adminEmulator != null) {
-        adminEmulator.configureAdmin(builder);
+        adminEmulator.configureSubscriptionAdmin(builder);
       } else {
         builder.setCredentialsProvider(
             FixedCredentialsProvider.create(this.credentialsProvider.getCredentials()));
@@ -166,15 +167,21 @@ final class PubSubClient implements Closeable, Serializable {
   }
 
   List<PulledMessage> pull(java.time.Duration deadline) {
-    ensureStarted();
-    return retryPolicy.execute("pull", () -> pullMessagesFromSubscription(deadline));
+    return pull(deadline, config.pullMaxMessages());
   }
 
-  private List<PulledMessage> pullMessagesFromSubscription(java.time.Duration deadline) {
+  List<PulledMessage> pull(java.time.Duration deadline, int maxMessages) {
+    ensureStarted();
+    final int capped = Math.max(1, Math.min(this.config.pullMaxMessages(), maxMessages));
+    return retryPolicy.execute("pull", () -> pullMessagesFromSubscription(deadline, capped));
+  }
+
+  private List<PulledMessage> pullMessagesFromSubscription(
+      java.time.Duration deadline, int maxMessages) {
     final PullRequest request =
         PullRequest.newBuilder()
             .setSubscription(this.config.subscriptionPath())
-            .setMaxMessages(this.config.pullMaxMessages())
+            .setMaxMessages(maxMessages)
             .build();
     final GrpcCallContext callContext =
         GrpcCallContext.createDefault()

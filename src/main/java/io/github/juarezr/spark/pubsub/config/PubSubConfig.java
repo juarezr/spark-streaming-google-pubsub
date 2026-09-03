@@ -12,7 +12,8 @@ import java.util.Optional;
 
 /** Validated connector configuration for Structured Streaming. */
 public final class PubSubConfig implements Serializable {
-  private static final long serialVersionUID = 1L;
+
+  private static final long serialVersionUID = 75047261L;
 
   public static final String SHORT_NAME = "google-pubsub";
 
@@ -34,6 +35,8 @@ public final class PubSubConfig implements Serializable {
   public static final String SEEK_SNAPSHOT = "seekSnapshot";
   public static final String CREDENTIALS_FILE = "credentialsFile";
   public static final String EMULATOR_HOST = "emulatorHost";
+  public static final String SCHEMA_MODE = "schemaMode";
+  public static final String METADATA_MODE = "metadataMode";
 
   public static final int DEFAULT_PULL_MAX_MESSAGES = 1000;
   public static final Duration DEFAULT_MAX_RETRY_TIME = Duration.ofSeconds(90);
@@ -60,6 +63,8 @@ public final class PubSubConfig implements Serializable {
   private final String seekSnapshot;
   private final String credentialsFile;
   private final String emulatorHost;
+  private final SchemaMode schemaMode;
+  private final MetadataMode metadataMode;
 
   private PubSubConfig(Builder builder) {
     this.projectId = Objects.requireNonNull(builder.projectId, "projectId is required");
@@ -80,6 +85,8 @@ public final class PubSubConfig implements Serializable {
     this.seekSnapshot = builder.seekSnapshot;
     this.credentialsFile = builder.credentialsFile;
     this.emulatorHost = builder.emulatorHost;
+    this.schemaMode = builder.schemaMode == null ? SchemaMode.BASIC : builder.schemaMode;
+    this.metadataMode = builder.metadataMode == null ? MetadataMode.NONE : builder.metadataMode;
     validate();
   }
 
@@ -197,6 +204,14 @@ public final class PubSubConfig implements Serializable {
     b.seekSnapshot(first(normalized, "seeksnapshot"));
     b.credentialsFile(first(normalized, "credentialsfile", "credentials"));
     b.emulatorHost(first(normalized, "emulatorhost"));
+    String schemaMode = first(normalized, "schemamode");
+    if (schemaMode != null) {
+      b.schemaMode(SchemaMode.fromString(schemaMode));
+    }
+    String metadataMode = first(normalized, "metadatamode");
+    if (metadataMode != null) {
+      b.metadataMode(MetadataMode.fromString(metadataMode));
+    }
     return b.build();
   }
 
@@ -342,6 +357,14 @@ public final class PubSubConfig implements Serializable {
     return Optional.ofNullable(emulatorHost).filter(t -> !t.isBlank());
   }
 
+  public SchemaMode schemaMode() {
+    return schemaMode;
+  }
+
+  public MetadataMode metadataMode() {
+    return metadataMode;
+  }
+
   public String subscriptionPath() {
     if (subscription.startsWith("projects/")) {
       return subscription;
@@ -349,7 +372,7 @@ public final class PubSubConfig implements Serializable {
     return String.format("projects/%s/subscriptions/%s", projectId, subscription);
   }
 
-  Optional<String> topicPath() {
+  public Optional<String> topicPath() {
     return topic()
         .map(
             t ->
@@ -381,6 +404,8 @@ public final class PubSubConfig implements Serializable {
     private String seekSnapshot;
     private String credentialsFile;
     private String emulatorHost;
+    private SchemaMode schemaMode = SchemaMode.BASIC;
+    private MetadataMode metadataMode = MetadataMode.NONE;
 
     public Builder projectId(String projectId) {
       this.projectId = projectId;
@@ -469,6 +494,16 @@ public final class PubSubConfig implements Serializable {
 
     public Builder emulatorHost(String emulatorHost) {
       this.emulatorHost = emulatorHost;
+      return this;
+    }
+
+    public Builder schemaMode(SchemaMode schemaMode) {
+      this.schemaMode = schemaMode;
+      return this;
+    }
+
+    public Builder metadataMode(MetadataMode metadataMode) {
+      this.metadataMode = metadataMode;
       return this;
     }
 

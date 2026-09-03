@@ -12,7 +12,7 @@ final class PubSubScan implements Scan {
 
   PubSubScan(PubSubConfig config, StructType readSchema) {
     this.config = config;
-    this.readSchema = readSchema == null ? PubSubSchema.SCHEMA : readSchema;
+    this.readSchema = readSchema;
   }
 
   @Override
@@ -27,6 +27,6 @@ final class PubSubScan implements Scan {
 
   @Override
   public MicroBatchStream toMicroBatchStream(String checkpointLocation) {
-    return new PubSubMicroBatchStream(config, config.numWriters());
+    return new PubSubMicroBatchStream(config, config.numWriters(), readSchema);
   }
 }

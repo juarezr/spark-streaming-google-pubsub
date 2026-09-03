@@ -1,6 +1,6 @@
 // Minimal Scala Structured Streaming example (illustrative).
-// spark-shell --packages io.github.juarezr:spark-streaming-google-pubsub_2.12:0.5.0
-// Spark 4.x: spark-streaming-google-pubsub_2.13:0.5.0
+// spark-shell --packages io.github.juarezr:spark-streaming-google-pubsub_2.12:0.6.0
+// Spark 4.x: spark-streaming-google-pubsub_2.13:0.6.0
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.streaming.Trigger
@@ -15,8 +15,10 @@ val messages = spark.readStream
   .option("gatherMode", "batch")
   .load()
 
+// Default schemaMode=basic: body, messageid, publishtime. Watermark on SELECT *:
+// messages.withWatermark("publishtime", "10 minutes")
+
 val query = messages
-  .drop("ackId")
   .writeStream
   .format("console")
   .option("truncate", "false")

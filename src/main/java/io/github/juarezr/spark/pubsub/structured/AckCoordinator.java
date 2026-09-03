@@ -16,7 +16,8 @@ import org.slf4j.LoggerFactory;
  * <p>Memory is bounded by removing entries on commit/abort; it does not grow unbounded over time.
  */
 final class AckCoordinator implements Serializable {
-  private static final long serialVersionUID = 1L;
+
+  private static final long serialVersionUID = -248749700L;
   private static final Logger LOG = LoggerFactory.getLogger(AckCoordinator.class);
 
   private final AckMode ackMode;

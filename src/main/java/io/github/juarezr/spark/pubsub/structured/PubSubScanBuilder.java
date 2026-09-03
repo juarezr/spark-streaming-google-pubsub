@@ -8,10 +8,11 @@ import org.apache.spark.sql.types.StructType;
 /** Builds a {@link PubSubScan}. */
 final class PubSubScanBuilder implements SupportsPushDownRequiredColumns {
   private final PubSubConfig config;
-  private StructType requiredSchema = PubSubSchema.SCHEMA;
+  private StructType requiredSchema;
 
-  PubSubScanBuilder(PubSubConfig config) {
+  PubSubScanBuilder(PubSubConfig config, StructType tableSchema) {
     this.config = config;
+    this.requiredSchema = tableSchema;
   }
 
   @Override

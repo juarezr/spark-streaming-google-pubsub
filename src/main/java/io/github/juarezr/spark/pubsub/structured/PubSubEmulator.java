@@ -3,7 +3,9 @@ package io.github.juarezr.spark.pubsub.structured;
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
+import com.google.cloud.pubsub.v1.SchemaServiceSettings;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
+import com.google.cloud.pubsub.v1.TopicAdminSettings;
 import com.google.cloud.pubsub.v1.stub.SubscriberStubSettings;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -27,7 +29,17 @@ final class PubSubEmulator implements AutoCloseable {
     builder.setCredentialsProvider(NoCredentialsProvider.create());
   }
 
-  void configureAdmin(final SubscriptionAdminSettings.Builder builder) {
+  void configureSubscriptionAdmin(final SubscriptionAdminSettings.Builder builder) {
+    builder.setTransportChannelProvider(transportProvider());
+    builder.setCredentialsProvider(NoCredentialsProvider.create());
+  }
+
+  void configureTopicAdmin(final TopicAdminSettings.Builder builder) {
+    builder.setTransportChannelProvider(transportProvider());
+    builder.setCredentialsProvider(NoCredentialsProvider.create());
+  }
+
+  void configureSchema(final SchemaServiceSettings.Builder builder) {
     builder.setTransportChannelProvider(transportProvider());
     builder.setCredentialsProvider(NoCredentialsProvider.create());
   }
