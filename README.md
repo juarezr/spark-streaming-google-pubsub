@@ -3,6 +3,13 @@
 Apache Spark connector for **Google Cloud Pub/Sub** (standard).
 Read messages from a subscription into **Structured Streaming** via `.format("google-pubsub")`.
 
+![GitHub top language](https://img.shields.io/github/languages/top/juarezr/spark-streaming-google-pubsub?logo=github)
+![Maven Central Version](https://img.shields.io/maven-central/v/io.github.juarezr/spark-streaming-google-pubsub_2.13?logo=maven)
+
+![Main branch](https://img.shields.io/github/check-suites/juarezr/spark-streaming-google-pubsub/main?logo=github)
+[![CI](https://github.com/juarezr/spark-streaming-google-pubsub/actions/workflows/ci.yml/badge.svg)](https://github.com/juarezr/spark-streaming-google-pubsub/actions/workflows/ci.yml)
+[![Release](https://github.com/juarezr/spark-streaming-google-pubsub/actions/workflows/release.yml/badge.svg)](https://github.com/juarezr/spark-streaming-google-pubsub/actions/workflows/release.yml)
+
 ## Why this connector
 
 This project aims to deliver:
