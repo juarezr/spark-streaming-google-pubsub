@@ -11,9 +11,9 @@ import org.apache.spark.sql.streaming.Trigger;
  *
  * <pre>
  * spark-submit --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
- *   --packages io.github.juarezr:spark-streaming-google-pubsub_2.12:0.4.1 \
+ *   --packages io.github.juarezr:spark-streaming-google-pubsub_2.12:0.5.0 \
  *   your-app.jar project-id subscription-id /tmp/checkpoint /tmp/out
- * Use spark-streaming-google-pubsub_2.13:0.4.1 on Spark 4.0–4.2.
+ * Use spark-streaming-google-pubsub_2.13:0.5.0 on Spark 4.0–4.2.
  * </pre>
  */
 public final class JavaStructuredStreamingExample {
