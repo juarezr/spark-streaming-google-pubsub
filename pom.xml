@@ -6,11 +6,11 @@
 
   <groupId>io.github.juarezr</groupId>
   <artifactId>spark-streaming-google-pubsub_${scala.binary.version}</artifactId>
-  <version>0.4.1-SNAPSHOT</version>
+  <version>0.5.0-SNAPSHOT</version>
   <packaging>jar</packaging>
 
   <name>spark-streaming-google-pubsub</name>
-  <description>Apache Spark Structured Streaming (and DStreams) connector for Google Cloud Pub/Sub</description>
+  <description>Apache Spark Structured Streaming connector for Google Cloud Pub/Sub</description>
   <url>https://github.com/juarezr/spark-streaming-google-pubsub</url>
 
   <licenses>
@@ -59,13 +59,6 @@
       <version>${spark.version}</version>
       <scope>provided</scope>
     </dependency>
-    <dependency>
-      <groupId>org.apache.spark</groupId>
-      <artifactId>spark-streaming_${scala.binary.version}</artifactId>
-      <version>${spark.version}</version>
-      <scope>provided</scope>
-    </dependency>
-
     <dependency>
       <groupId>com.google.cloud</groupId>
       <artifactId>google-cloud-pubsub</artifactId>

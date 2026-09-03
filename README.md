@@ -1,12 +1,7 @@
 # spark-streaming-google-pubsub
 
-Apache Spark connector for **Google Cloud Pub/Sub** (standard). Read messages from a subscription into:
-
-- **Structured Streaming** (primary) via `.format("google-pubsub")`
-- **Classic Spark Streaming (DStreams)** via a thin Legacy-compatible Java API
-
-Designed for Spark **3.5** (Scala 2.12) and Spark **4.0–4.2** (Scala 2.13; built against 4.1), including GCP Dataproc **2.3** (Spark 3.5) and **3.0** (Spark 4.1).
-Authentication defaults to **Application Default Credentials (ADC)**.
+Apache Spark connector for **Google Cloud Pub/Sub** (standard).
+Read messages from a subscription into **Structured Streaming** via `.format("google-pubsub")`.
 
 ## Why this connector
 
@@ -15,9 +10,14 @@ This project aims to deliver:
 - Structured Streaming Data Source V2 (`MicroBatchStream`)
 - Configurable ack semantics (`afterCommit` default, optional `early`)
 - No subscription rewind on restart unless you set `seek`
-- Retries/backoff and bounded outstanding bytes for 24×7 jobs
-- A DStreams shim for gradual migration from Legacy style streaming
+- Multi-pull gathering, retries, and ack-lease renewal for 24×7 jobs
 - Support for newer/modern Dataproc images
+
+### Characteristics
+
+This connector is designed for Spark **3.5** (Scala 2.12) and Spark **4.0–4.2** (Scala 2.13; built against 4.1), including GCP Dataproc **2.3** (Spark 3.5) and **3.0** (Spark 4.1).
+
+The authentication defaults to **Application Default Credentials (ADC)**.
 
 ## Using this connector
 
@@ -25,12 +25,13 @@ This project aims to deliver:
 
 | Spark   | Scala | Artifact                                                     |
 |---------|-------|--------------------------------------------------------------|
-| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.4.1` |
-| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.4.1` |
+| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.5.0` |
+| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.5.0` |
 
 Prefer `--packages` (or a Maven/Gradle dependency) so Google client libraries resolve as transitives.
 
-Fat JAR (`*-all.jar`, Google client deps bundled): built locally with `mvn package`, and attached to [GitHub Releases](https://github.com/juarezr/spark-streaming-google-pubsub/releases) — **not** published to Maven Central.
+Fat JAR (`*-all.jar`, Google client deps bundled) are **not** published to Maven Central.
+You can build locally with `mvn package`, or find them attached to [GitHub Releases](https://github.com/juarezr/spark-streaming-google-pubsub/releases).
 
 ### Schema (Structured Streaming)
 
@@ -41,28 +42,92 @@ Fat JAR (`*-all.jar`, Google client deps bundled): built locally with `mvn packa
 | `attributes`  | `map<string,string>` | Attributes                                  |
 | `publishTime` | timestamp            | Publish time                                |
 | `orderingKey` | string               | Ordering key (may be empty)                 |
-| `ackId`       | string               | Ack id (useful when managing acks manually) |
+| `ackId`       | string               | Delivery token; normally drop before writing |
+
+### How it works
+
+Pub/Sub Pull RPCs run on the **Spark driver**. Executors only process in-memory slices of messages
+that the driver already gathered. With `gatherMode=batch`, one Spark micro-batch can contain several
+Pull responses. An idle gather returns the previous offset, so Spark does not run an empty
+micro-batch or create an empty output file.
+
+```mermaid
+sequenceDiagram
+  participant Spark
+  participant Driver
+  participant PubSub
+  participant Executor
+  Spark->>Driver: latestOffset after trigger
+  loop until batchTime batchSize or batchCount
+    Driver->>PubSub: Pull pullMaxMessages
+    PubSub-->>Driver: messages
+  end
+  Driver-->>Spark: new batchId when non empty
+  Spark->>Executor: numWriters task slices
+  Executor-->>Spark: sink write completes
+  Spark->>Driver: commit
+  Driver->>PubSub: chunked acknowledge
+```
+
+The timing controls apply at different points:
+
+| Control | What it bounds |
+|:--------|:---------------|
+| Spark trigger | When Spark asks for the next offset after the previous micro-batch finishes |
+| `batchTime` | How long one `latestOffset` gathers Pull responses |
+| `pullDeadline` | How long one healthy Pull RPC waits for messages |
+| `ackDeadline` | How long Pub/Sub leases a delivered message; renewed until Spark commits |
+| `maxRetryTime` | How long failed Pub/Sub RPCs are retried |
+
+Spark trigger and `batchTime` are sequential waits. For example, a 10-second trigger plus a
+10-second gather can approach 20 seconds between batches. Prefer a short trigger and use
+`batchTime` to control grouping. In batch gathering, the effective Pull deadline is the smaller of
+`pullDeadline` and the remaining `batchTime`. `maxRetryTime` does not replace `pullDeadline`:
+an empty long-poll is normal, while retries only follow an RPC failure.
+
+`pullDeadline` bounds waiting **for** messages. `ackDeadline` bounds holding messages already
+delivered. The ack watchdog starts with the first non-empty Pull and renews leases during both
+gathering and sink processing.
 
 ### Options
 
-| Option                | Default       | Description                                 |
-|:----------------------|:--------------|:--------------------------------------------|
-| `projectId`           | required      | GCP project id                              |
-| `subscription`        | required      | Subscription id or full resource name       |
-| `topic`               |               | Optional topic (reserved for admin helpers) |
-| `ackMode`             | `afterCommit` | `afterCommit` or `early`                    |
-| `maxMessagesPerPull`  | `1000`        | Max messages per pull                       |
-| `maxBytesOutstanding` | `104857600`   | Soft cap on in-flight payload bytes         |
-| `ackDeadlineSeconds`  | `60`          | Extend deadline while a batch is in flight  |
-| `pullTimeoutSeconds`  | `20`          | RPC deadline for each pull (long-poll wait) |
-| `seek`                | `none`        | `none`, `beginning`, `timestamp`, `snapshot`|
-| `seekTime`            |               | Epoch millis/RFC-3339 (if `seek=timestamp`) |
-| `seekSnapshot`        |               | Snapshot resource (when `seek=snapshot`)    |
-| `credentialsFile`     | ADC           | Path to service-account JSON (optional)     |
-| `emulatorHost`        |               | e.g. `localhost:8085` for the emulator      |
+Bare duration values are seconds. Duration suffixes are `ms`, `s`, and `m`. Size suffixes `k`, `m`,
+and `g` use multiples of 1024.
 
-**Restart behavior:** with `seek=none` (default), the subscription cursor is **not** rewound.
-Unacked messages redeliver after a crash/watchdog restart — matching typical Dataproc workflow recovery.
+| Option | Default | Description |
+|:-------|:--------|:------------|
+| `projectId` | required | GCP project id |
+| `subscription` | required | Subscription id or full resource name |
+| `credentialsFile` | ADC | Optional service-account JSON path |
+| `seek` | `none` | `none`, `beginning`, `timestamp`, or `snapshot` |
+| `seekTime` | | Epoch milliseconds or RFC-3339 instant with `Z`/offset |
+| `seekSnapshot` | | Snapshot resource for `seek=snapshot` |
+| `pullMaxMessages` | `1000` | Messages requested by each Pull RPC (1–1000) |
+| `maxRetryTime` | `90s` | Retry window for transient RPC failures |
+| `pullDeadline` | `20s` | Deadline for one Pull long-poll |
+| `ackMode` | `afterCommit` | `afterCommit` or `early` |
+| `ackDeadline` | `60s` | Message lease, renewed about every third of this duration |
+| `gatherMode` | `batch` | `batch` gathers Pulls; `pull` emits one Pull per micro-batch |
+| `batchTime` | `10s` | Maximum gather time in `batch` mode |
+| `batchSize` | `128m` | Maximum gathered payload bytes; blank/0 disables |
+| `batchCount` | | Maximum gathered message count; blank/0 disables |
+| `numWriters` | `1` | Spark task slices; integer ≥1 or `auto` for driver CPU count |
+| `emulatorHost` | | Emulator address such as `localhost:8085` |
+
+Pub/Sub seek timestamps represent UTC instants. A local wall-clock value must include its offset,
+for example `2024-08-07T12:00:29.028-03:00`; naive datetimes are rejected.
+
+### Operational tuning
+
+- **Low latency:** use `gatherMode=pull` or a short `batchTime`. This creates more sink files.
+- **Higher throughput:** use `gatherMode=batch`, allowing several Pulls in each Spark micro-batch.
+- **Fewer parquet files:** increase `batchTime`, keep `numWriters=1`, use a short Spark trigger, and
+  partition in the application. `numWriters=2` means two Spark tasks for one gathered batch, not two
+  Pull loops.
+
+The driver holds message byte arrays, ack ids, attributes, and serialization copies.
+Reserve roughly 3–5 times the configured payload batch size as temporary driver-heap headroom.
+The option `batchSize` limits gathered payload bytes; it is not a Spark heap setting.
 
 ## Examples
 
@@ -74,12 +139,14 @@ Dataset<Row> messages = spark.readStream()
     .option("projectId", "my-project")
     .option("subscription", "my-subscription")
     .option("ackMode", "afterCommit")
+    .option("gatherMode", "batch")
     .load();
 
 messages
-    .selectExpr("messageId", "CAST(data AS STRING) AS payload", "publishTime")
+    .drop("ackId")
     .writeStream()
     .format("parquet")
+    .trigger(Trigger.ProcessingTime("1 second"))
     .option("path", "gs://bucket/tables/event")
     .option("checkpointLocation", "gs://bucket/checkpoints/event")
     .start()
@@ -98,28 +165,13 @@ messages = (
     .option("projectId", "my-project")
     .option("subscription", "my-subscription")
     .option("ackMode", "afterCommit")
+    .option("gatherMode", "batch")
     .load()
+    .drop("ackId")
 )
 ```
 
 Full script: [`examples/python/structured_streaming_example.py`](examples/python/structured_streaming_example.py).
-
-### DStreams shim (Legacy-compatible Java API)
-
-```java
-import io.github.juarezr.spark.pubsub.dstream.PubsubUtils;
-import io.github.juarezr.spark.pubsub.dstream.SparkGCPCredentials;
-import io.github.juarezr.spark.pubsub.dstream.SparkPubsubMessage;
-
-SparkGCPCredentials credentials = SparkGCPCredentials.builder().build(); // ADC
-JavaReceiverInputDStream<SparkPubsubMessage> stream = PubsubUtils.createStream(
-    jssc, projectId, topic, subscription, credentials, StorageLevel.MEMORY_AND_DISK_SER());
-```
-
-Migration from Legacy: change the Maven/Gradle dependency and imports from
-`org.apache.spark.streaming.pubsub.*` to `io.github.juarezr.spark.pubsub.dstream.*`.
-
-> DStreams remain available on Spark 4.x but are **deprecated**. Prefer Structured Streaming for new work.
 
 ## Platform Usage
 
@@ -136,7 +188,7 @@ Migration from Legacy: change the Maven/Gradle dependency and imports from
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.4.1 \
+  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.5.0 \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 
@@ -144,7 +196,7 @@ gcloud dataproc jobs submit spark \
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.4.1-all.jar \
+  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.5.0-all.jar \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -155,33 +207,36 @@ Add the Maven coordinate as a library on the cluster (`_2.12` or `_2.13` matchin
 Configure a Databricks secret or instance profile / GCP service account so ADC works, then use the
 same `.format("google-pubsub")` options as above. Use a durable `checkpointLocation` on cloud storage.
 
-## Reliability notes
-
-## Behavior
+## Reliability
 
 - **`ackMode=afterCommit` (default):** messages are acknowledged after Spark commits the micro-batch.
   Failures before commit lead to redelivery (at-least-once).
-- **`ackMode=early`:** ack soon after pull/store (Legacy-like). Faster ack release, higher loss risk on crash.
-- Outstanding byte accounting prevents unbounded memory growth under backpressure.
-  If Spark requests a new micro-batch without committing the previous one (`ackMode=afterCommit`),
-  the connector nacks that pull and releases the byte charge so `maxBytesOutstanding` cannot stall
-  empty pulls. Ack failures also release the charge (and nack best-effort) before Spark fails the batch.
-- With `ackMode=afterCommit`, ack deadlines are extended periodically on the driver (about every
-  `ackDeadlineSeconds / 3`) while the micro-batch is in flight, not only once at pull.
-- Transient Pub/Sub errors are retried with exponential backoff.
+- **`ackMode=early`:** ack soon after pull. Faster ack release, higher loss risk on crash.
+- With `ackMode=afterCommit`, deadlines are extended periodically on the driver (about every
+  `ackDeadline / 3`) from the first Pull until commit.
+- A replaced or stopped uncommitted batch is nacked so it can redeliver promptly.
+- Acknowledgement, nack, and lease-extension requests are chunked.
+- Transient failures use exponential backoff for at most `maxRetryTime`. Retry warnings are
+  rate-limited while counters continue to increase.
+- Checkpoint offsets contain only a synthetic batch id. Payloads and ack ids stay in driver memory.
+  After driver failure, unacknowledged messages redeliver from Pub/Sub (at-least-once).
+- With `seek=none` (default), restart never rewinds the subscription.
 
-You can monitor these with custom metrics on `StreamingQueryProgress` (Spark UI): last-pull size, payload bytes, outstanding payload bytes, batch ids, `pubsubRetryAttempts` (retries in this micro-batch), and `pubsubRetryAttemptsTotal` (retries since the stream started). They are **not** the Pub/Sub subscription backlog.
+Monitor custom metrics on `StreamingQueryProgress` (Spark UI): last-pull count/payload bytes,
+outstanding payload bytes, batch ids, `pubsubRetryAttempts`, and
+`pubsubRetryAttemptsTotal`. These are **not** the Pub/Sub subscription backlog.
 
 ### Limitations
 
 This connector is a **read-only Structured Streaming (micro-batch)** source. The following Spark features are not implemented:
 
-- **Spark 4.1 Real-time Mode** — does not fit Pub/Sub’s lease/ack model (driver pull and payload-in-offset vs long-running executor `nextWithTimeout`). That API is built around log sources such as Kafka.
+- **Spark 4.1 Real-time Mode** — does not fit this source's driver-side Pull and lease/ack model.
 - **Trigger.AvailableNow** (“drain then stop”) — a subscription has no durable log-end offset.
 - **Continuous Processing** — experimental; Spark recommends Real-time Mode instead. Same lease-model mismatch.
 - **Streaming sink and batch `spark.read`** — a subscription is a queue, not a table. Rewind/replay uses explicit `seek` / snapshot **options**, not a batch scan.
 - **SQL filter pushdown that seeks** — a `WHERE publishTime >= …` must not rewind a **shared** subscription. Filter on attributes with a GCP subscription filter; rewind with explicit `seek`.
-- **Spark admission control (`ReadLimit`)** — not implemented; `maxMessagesPerPull` and `maxBytesOutstanding` already bound each pull.
+- **Spark admission control (`ReadLimit`)** — not implemented; use `pullMaxMessages`,
+  `batchSize`, and `batchCount`.
 
 ## Build and test locally
 
@@ -232,7 +287,7 @@ mvn -Pspark35 -DskipTests package
 
 spark-submit \
   --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
-  --jars target/spark-streaming-google-pubsub_2.12-0.4.1-SNAPSHOT-all.jar \
+  --jars target/spark-streaming-google-pubsub_2.12-0.5.0-SNAPSHOT-all.jar \
   examples/java/JavaStructuredStreamingExample.java \
   YOUR_PROJECT YOUR_SUBSCRIPTION /tmp/pubsub-cp /tmp/pubsub-out
 ```

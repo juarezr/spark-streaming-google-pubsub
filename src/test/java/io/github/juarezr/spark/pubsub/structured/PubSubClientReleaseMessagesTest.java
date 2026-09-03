@@ -1,4 +1,4 @@
-package io.github.juarezr.spark.pubsub.client;
+package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -9,7 +9,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
-/** Tests flow-control byte accounting helpers used by the manual-ack DStreams path. */
+/** Tests flow-control byte accounting helpers used when a batch is nacked or abandoned. */
 class PubSubClientReleaseMessagesTest {
 
   @Test

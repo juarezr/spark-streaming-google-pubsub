@@ -3,17 +3,17 @@ package io.github.juarezr.spark.pubsub.config;
 /** How messages are acknowledged relative to Spark processing. */
 public enum AckMode {
   /**
-   * Acknowledge only after Spark successfully commits the micro-batch (or after the receiver stores
-   * and the batch completes for DStreams). At-least-once; duplicates possible on failure.
+   * Acknowledge only after Spark successfully commits the micro-batch. At-least-once; duplicates
+   * possible on failure.
    */
   AFTER_COMMIT,
   /**
-   * Acknowledge soon after a successful pull/store (Legacy-like). Higher risk of loss if the
-   * process crashes before Spark finishes processing.
+   * Acknowledge soon after a successful pull. Higher risk of loss if the process crashes before
+   * Spark finishes processing.
    */
   EARLY;
 
-  public static AckMode fromString(String value) {
+  static AckMode fromString(String value) {
     if (value == null || value.isBlank()) {
       return AFTER_COMMIT;
     }

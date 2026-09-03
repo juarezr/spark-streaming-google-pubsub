@@ -6,11 +6,11 @@ import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
 import org.apache.spark.sql.types.StructType;
 
 /** Scan that exposes a Pub/Sub {@link MicroBatchStream}. */
-public final class PubSubScan implements Scan {
+final class PubSubScan implements Scan {
   private final PubSubConfig config;
   private final StructType readSchema;
 
-  public PubSubScan(PubSubConfig config, StructType readSchema) {
+  PubSubScan(PubSubConfig config, StructType readSchema) {
     this.config = config;
     this.readSchema = readSchema == null ? PubSubSchema.SCHEMA : readSchema;
   }
@@ -27,7 +27,6 @@ public final class PubSubScan implements Scan {
 
   @Override
   public MicroBatchStream toMicroBatchStream(String checkpointLocation) {
-    int partitions = Math.max(1, Runtime.getRuntime().availableProcessors());
-    return new PubSubMicroBatchStream(config, partitions);
+    return new PubSubMicroBatchStream(config, config.numWriters());
   }
 }

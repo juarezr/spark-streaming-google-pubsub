@@ -1,4 +1,4 @@
-package io.github.juarezr.spark.pubsub.client;
+package io.github.juarezr.spark.pubsub.structured;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -13,23 +13,24 @@ import org.slf4j.LoggerFactory;
  * Periodically extends Pub/Sub ack deadlines on the driver while a micro-batch is in flight. {@link
  * #stop()} is idempotent.
  */
-public final class AckLeaseWatchdog implements AutoCloseable {
+final class AckLeaseWatchdog implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger(AckLeaseWatchdog.class);
 
   private final Object lock = new Object();
   private ScheduledExecutorService executor;
   private ScheduledFuture<?> future;
+  private volatile List<String> ackIds = List.of();
 
   static int extendIntervalSeconds(int ackDeadlineSeconds) {
     return Math.max(1, ackDeadlineSeconds / 3);
   }
 
-  public void start(PubSubClient client, List<String> ackIds, int ackDeadlineSeconds) {
+  void start(PubSubClient client, List<String> ackIds, int ackDeadlineSeconds) {
     stop();
     if (client == null || ackIds == null || ackIds.isEmpty() || ackDeadlineSeconds <= 0) {
       return;
     }
-    List<String> snapshot = new ArrayList<>(ackIds);
+    this.ackIds = new ArrayList<>(ackIds);
     int intervalSeconds = extendIntervalSeconds(ackDeadlineSeconds);
     synchronized (lock) {
       executor =
@@ -42,6 +43,7 @@ public final class AckLeaseWatchdog implements AutoCloseable {
       future =
           executor.scheduleAtFixedRate(
               () -> {
+                List<String> snapshot = this.ackIds;
                 try {
                   client.extendAckDeadline(snapshot, ackDeadlineSeconds);
                 } catch (RuntimeException e) {
@@ -54,7 +56,12 @@ public final class AckLeaseWatchdog implements AutoCloseable {
     }
   }
 
-  public void stop() {
+  /** Replaces the ids extended by an already-running watchdog. */
+  void update(List<String> ackIds) {
+    this.ackIds = ackIds == null ? List.of() : new ArrayList<>(ackIds);
+  }
+
+  void stop() {
     synchronized (lock) {
       if (future != null) {
         future.cancel(false);
@@ -64,6 +71,7 @@ public final class AckLeaseWatchdog implements AutoCloseable {
         executor.shutdownNow();
         executor = null;
       }
+      ackIds = List.of();
     }
   }
 

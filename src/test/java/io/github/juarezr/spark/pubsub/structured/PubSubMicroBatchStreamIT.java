@@ -19,8 +19,12 @@ import io.github.juarezr.spark.pubsub.config.AckMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Base64;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.spark.sql.Dataset;
@@ -101,11 +105,12 @@ class PubSubMicroBatchStreamIT {
             .setCredentialsProvider(credentialsProvider)
             .build();
     try {
-      for (int i = 0; i < 5; i++) {
+      byte[] payload = examplePayload();
+      for (int i = 0; i < 50; i++) {
         publisher
             .publish(
                 PubsubMessage.newBuilder()
-                    .setData(ByteString.copyFromUtf8("msg-" + i))
+                    .setData(ByteString.copyFrom(payload))
                     .putAttributes("idx", Integer.toString(i))
                     .build())
             .get(30, TimeUnit.SECONDS);
@@ -123,6 +128,18 @@ class PubSubMicroBatchStreamIT {
             .config("spark.sql.shuffle.partitions", "2")
             .getOrCreate();
     spark.sparkContext().setLogLevel("WARN");
+  }
+
+  private byte[] examplePayload() throws Exception {
+    try (BufferedReader reader =
+        new BufferedReader(
+            new InputStreamReader(
+                getClass().getResourceAsStream("/examples/example-proto.csv"),
+                StandardCharsets.UTF_8))) {
+      reader.readLine();
+      String[] columns = reader.readLine().split(",", 3);
+      return Base64.getDecoder().decode(columns[2]);
+    }
   }
 
   @AfterAll
@@ -148,8 +165,11 @@ class PubSubMicroBatchStreamIT {
             .option(PubSubConfig.SUBSCRIPTION, SUBSCRIPTION)
             .option(PubSubConfig.EMULATOR_HOST, emulatorHost)
             .option(PubSubConfig.ACK_MODE, AckMode.AFTER_COMMIT.name())
-            .option(PubSubConfig.PULL_TIMEOUT_SECONDS, "2")
-            .option(PubSubConfig.MAX_MESSAGES_PER_PULL, "10")
+            .option(PubSubConfig.PULL_DEADLINE, "2s")
+            .option(PubSubConfig.PULL_MAX_MESSAGES, "10")
+            .option(PubSubConfig.GATHER_MODE, "batch")
+            .option(PubSubConfig.BATCH_TIME, "2s")
+            .option(PubSubConfig.BATCH_COUNT, "50")
             .load();
 
     AtomicInteger seen = new AtomicInteger();
@@ -162,10 +182,11 @@ class PubSubMicroBatchStreamIT {
                   batch.write().mode("append").json(output.toString());
                 })
             .option("checkpointLocation", checkpoint.toString())
-            .trigger(Trigger.AvailableNow())
+            .trigger(Trigger.ProcessingTime("100 milliseconds"))
             .start();
 
-    query.awaitTermination(120_000);
+    query.awaitTermination(10_000L);
+    query.stop();
     assumeTrue(seen.get() > 0, "Expected to read at least one message from the emulator");
   }
 }

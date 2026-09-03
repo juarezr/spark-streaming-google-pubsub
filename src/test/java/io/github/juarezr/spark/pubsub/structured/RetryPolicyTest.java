@@ -1,4 +1,4 @@
-package io.github.juarezr.spark.pubsub.client;
+package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -42,6 +42,22 @@ class RetryPolicyTest {
                 }));
     assertEquals(1, attempts.get());
     assertEquals(0, policy.retryAttempts());
+  }
+
+  @Test
+  void stopsWhenMaxRetryTimeElapsed() {
+    RetryPolicy policy = new RetryPolicy(1L, 5L, 1000, 0L);
+    AtomicInteger attempts = new AtomicInteger();
+    assertThrows(
+        RuntimeException.class,
+        () ->
+            policy.execute(
+                "op",
+                () -> {
+                  attempts.incrementAndGet();
+                  throw new RuntimeException("UNAVAILABLE");
+                }));
+    assertEquals(1, attempts.get());
   }
 
   @Test
