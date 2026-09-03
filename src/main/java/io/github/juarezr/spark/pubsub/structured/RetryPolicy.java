@@ -1,4 +1,4 @@
-package io.github.juarezr.spark.pubsub.client;
+package io.github.juarezr.spark.pubsub.structured;
 
 import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;

@@ -7,7 +7,7 @@ public enum GatherMode {
   BATCH,
   PULL;
 
-  public static GatherMode fromString(String value) {
+  static GatherMode fromString(String value) {
     if (value == null || value.isBlank()) {
       return BATCH;
     }

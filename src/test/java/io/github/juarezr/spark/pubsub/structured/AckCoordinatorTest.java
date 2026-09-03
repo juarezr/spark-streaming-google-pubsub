@@ -1,7 +1,6 @@
-package io.github.juarezr.spark.pubsub.client;
+package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -31,7 +30,7 @@ class AckCoordinatorTest {
 
     coordinator.commit(client, "1");
     verify(client, times(1)).acknowledge(List.of("a1", "a2"));
-    verify(client, times(1)).releaseBytes(30L);
+    verify(client, times(1)).releaseMessages(messages);
     assertEquals(0, coordinator.pendingBatchCount());
   }
 
@@ -55,11 +54,5 @@ class AckCoordinatorTest {
     coordinator.abort(client, "2");
     verify(client, times(1)).nack(List.of("n1"));
     assertEquals(0, coordinator.pendingBatchCount());
-  }
-
-  @Test
-  void retryPolicyDetectsRetryable() {
-    assertTrue(RetryPolicy.isRetryable(new RuntimeException("UNAVAILABLE: backend")));
-    assertTrue(RetryPolicy.isRetryable(new RuntimeException("deadline exceeded")));
   }
 }

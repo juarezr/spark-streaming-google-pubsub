@@ -20,7 +20,7 @@ final class PubSubOffset extends Offset implements Serializable {
     this.batchId = batchId;
   }
 
-  public long batchId() {
+  long batchId() {
     return batchId;
   }
 
@@ -31,7 +31,7 @@ final class PubSubOffset extends Offset implements Serializable {
     return GSON.toJson(envelope);
   }
 
-  public static PubSubOffset fromJson(String json) {
+  static PubSubOffset fromJson(String json) {
     Envelope envelope = GSON.fromJson(json, Envelope.class);
     if (envelope == null) {
       return new PubSubOffset(0L);
@@ -39,7 +39,7 @@ final class PubSubOffset extends Offset implements Serializable {
     return new PubSubOffset(envelope.batchId);
   }
 
-  public static PubSubOffset empty(long batchId) {
+  static PubSubOffset empty(long batchId) {
     return new PubSubOffset(batchId);
   }
 

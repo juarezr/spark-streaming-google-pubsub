@@ -14,7 +14,7 @@ public enum SeekMode {
   /** Seek to a Pub/Sub snapshot resource name. */
   SNAPSHOT;
 
-  public static SeekMode fromString(String value) {
+  static SeekMode fromString(String value) {
     if (value == null || value.isBlank() || "none".equalsIgnoreCase(value.trim())) {
       return NONE;
     }

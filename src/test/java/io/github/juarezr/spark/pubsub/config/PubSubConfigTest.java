@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -124,5 +125,21 @@ class PubSubConfigTest {
     assertThrows(IllegalArgumentException.class, () -> PubSubConfig.parseDuration("test", "10x"));
     assertThrows(
         IllegalArgumentException.class, () -> PubSubConfig.parseSeekTime("2024-08-07 12:00:00"));
+  }
+
+  @Test
+  void parseSeekTimeAcceptsEpochMillisAndRfc3339() {
+    assertEquals(
+        Instant.ofEpochMilli(1_723_050_029_028L), PubSubConfig.parseSeekTime("1723050029028"));
+    assertEquals(
+        Instant.parse("2024-08-07T15:00:29.028Z"),
+        PubSubConfig.parseSeekTime("2024-08-07T12:00:29.028-03:00"));
+  }
+
+  @Test
+  void parseSeekTimeRejectsNaiveDatetime() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> PubSubConfig.parseSeekTime("2024-08-07 12:00:29.028"));
   }
 }

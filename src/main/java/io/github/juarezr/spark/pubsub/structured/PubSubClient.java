@@ -1,4 +1,4 @@
-package io.github.juarezr.spark.pubsub.client;
+package io.github.juarezr.spark.pubsub.structured;
 
 import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.api.gax.grpc.GrpcCallContext;
@@ -15,7 +15,6 @@ import com.google.pubsub.v1.PullRequest;
 import com.google.pubsub.v1.PullResponse;
 import com.google.pubsub.v1.ReceivedMessage;
 import com.google.pubsub.v1.SeekRequest;
-import com.google.pubsub.v1.SubscriptionName;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import io.github.juarezr.spark.pubsub.config.SeekMode;
 import java.io.Closeable;
@@ -34,7 +33,7 @@ import org.threeten.bp.Duration;
 /**
  * Thin wrapper around the Pub/Sub subscriber stub with pull/ack/nack, retries, and optional seek.
  */
-public final class PubSubClient implements Closeable, Serializable {
+final class PubSubClient implements Closeable, Serializable {
   private static final long serialVersionUID = 1L;
   private static final Logger LOG = LoggerFactory.getLogger(PubSubClient.class);
 
@@ -47,7 +46,7 @@ public final class PubSubClient implements Closeable, Serializable {
   private transient AtomicLong outstandingBytes;
   private transient boolean seekApplied;
 
-  public PubSubClient(PubSubConfig config) {
+  PubSubClient(PubSubConfig config) {
     this(
         config,
         new PubSubCredentialsProvider(config.credentialsFile().orElse(null)),
@@ -61,7 +60,7 @@ public final class PubSubClient implements Closeable, Serializable {
     this.retryPolicy = retryPolicy;
   }
 
-  public synchronized void start() throws IOException {
+  synchronized void start() throws IOException {
     if (this.subscriberStub != null) {
       return;
     }
@@ -118,7 +117,7 @@ public final class PubSubClient implements Closeable, Serializable {
         seek.setTime(Timestamp.newBuilder().setSeconds(0).setNanos(0).build());
         break;
       case TIMESTAMP:
-        final Instant instant = parseSeekTime(this.config.seekTime().orElseThrow());
+        final Instant instant = this.config.seekTimeAsInstant();
         final Timestamp seekTime =
             Timestamp.newBuilder()
                 .setSeconds(instant.getEpochSecond())
@@ -133,10 +132,6 @@ public final class PubSubClient implements Closeable, Serializable {
       default:
     }
     return seek;
-  }
-
-  static Instant parseSeekTime(String seekTime) {
-    return PubSubConfig.parseSeekTime(seekTime);
   }
 
   private void ensureStarted() {
@@ -170,11 +165,7 @@ public final class PubSubClient implements Closeable, Serializable {
     }
   }
 
-  public List<PulledMessage> pull() {
-    return pull(config.pullDeadline());
-  }
-
-  public List<PulledMessage> pull(java.time.Duration deadline) {
+  List<PulledMessage> pull(java.time.Duration deadline) {
     ensureStarted();
     return retryPolicy.execute("pull", () -> pullMessagesFromSubscription(deadline));
   }
@@ -210,7 +201,7 @@ public final class PubSubClient implements Closeable, Serializable {
     return messages;
   }
 
-  public void acknowledge(List<String> ackIds) {
+  void acknowledge(List<String> ackIds) {
     if (ackIds == null || ackIds.isEmpty()) {
       return;
     }
@@ -229,34 +220,21 @@ public final class PubSubClient implements Closeable, Serializable {
     this.subscriberStub.acknowledgeCallable().call(request);
   }
 
-  public void nack(List<String> ackIds) {
+  void nack(List<String> ackIds) {
+    modifyAckDeadline(ackIds, 0, "nack");
+  }
+
+  void extendAckDeadline(List<String> ackIds, int deadlineSeconds) {
+    modifyAckDeadline(ackIds, deadlineSeconds, "modifyAckDeadline");
+  }
+
+  private void modifyAckDeadline(List<String> ackIds, int deadlineSeconds, String operation) {
     if (ackIds == null || ackIds.isEmpty()) {
       return;
     }
     ensureStarted();
     for (List<String> chunk : chunks(ackIds)) {
-      retryPolicy.executeVoid("nack", () -> nackRequest(chunk));
-    }
-  }
-
-  private void nackRequest(List<String> ackIds) {
-    ModifyAckDeadlineRequest request =
-        ModifyAckDeadlineRequest.newBuilder()
-            .setSubscription(this.config.subscriptionPath())
-            .addAllAckIds(ackIds)
-            .setAckDeadlineSeconds(0)
-            .build();
-    this.subscriberStub.modifyAckDeadlineCallable().call(request);
-  }
-
-  public void extendAckDeadline(List<String> ackIds, int deadlineSeconds) {
-    if (ackIds == null || ackIds.isEmpty()) {
-      return;
-    }
-    ensureStarted();
-    for (List<String> chunk : chunks(ackIds)) {
-      retryPolicy.executeVoid(
-          "modifyAckDeadline", () -> extendDeadlineRequest(chunk, deadlineSeconds));
+      retryPolicy.executeVoid(operation, () -> modifyAckDeadlineRequest(chunk, deadlineSeconds));
     }
   }
 
@@ -269,7 +247,7 @@ public final class PubSubClient implements Closeable, Serializable {
     return chunks;
   }
 
-  private void extendDeadlineRequest(List<String> ackIds, int deadlineSeconds) {
+  private void modifyAckDeadlineRequest(List<String> ackIds, int deadlineSeconds) {
     ModifyAckDeadlineRequest request =
         ModifyAckDeadlineRequest.newBuilder()
             .setSubscription(this.config.subscriptionPath())
@@ -279,49 +257,27 @@ public final class PubSubClient implements Closeable, Serializable {
     this.subscriberStub.modifyAckDeadlineCallable().call(request);
   }
 
-  public void releaseBytes(long bytes) {
-    if (this.outstandingBytes != null && bytes > 0) {
-      this.outstandingBytes.addAndGet(-bytes);
+  void releaseMessages(List<PulledMessage> messages) {
+    if (this.outstandingBytes != null) {
+      long bytes = PulledMessage.payloadBytes(messages);
+      if (bytes > 0) {
+        this.outstandingBytes.addAndGet(-bytes);
+      }
     }
-  }
-
-  /** Releases flow-control byte accounting for the given messages without acknowledging them. */
-  public void releaseMessages(List<PulledMessage> messages) {
-    if (messages == null || messages.isEmpty()) {
-      return;
-    }
-    long bytes = 0L;
-    for (PulledMessage message : messages) {
-      bytes += message.data().length;
-    }
-    releaseBytes(bytes);
   }
 
   /** Clears outstanding byte accounting (e.g. on receiver shutdown). */
-  public void resetOutstandingBytes() {
+  void resetOutstandingBytes() {
     if (this.outstandingBytes != null) {
       this.outstandingBytes.set(0);
     }
   }
 
-  /** Visible for tests. */
-  public long outstandingBytes() {
+  long outstandingBytes() {
     return this.outstandingBytes == null ? 0L : this.outstandingBytes.get();
   }
 
-  public long retryAttempts() {
+  long retryAttempts() {
     return retryPolicy.retryAttempts();
-  }
-
-  public PubSubConfig config() {
-    return config;
-  }
-
-  public String subscriptionPath() {
-    return this.config.subscriptionPath();
-  }
-
-  public SubscriptionName subscriptionName() {
-    return SubscriptionName.parse(this.config.subscriptionPath());
   }
 }

@@ -1,4 +1,4 @@
-package io.github.juarezr.spark.pubsub.client;
+package io.github.juarezr.spark.pubsub.structured;
 
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;

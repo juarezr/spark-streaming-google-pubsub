@@ -1,6 +1,5 @@
 package io.github.juarezr.spark.pubsub.structured;
 
-import io.github.juarezr.spark.pubsub.client.PulledMessage;
 import java.io.IOException;
 import java.util.Iterator;
 import java.util.Map;

@@ -1,13 +1,15 @@
-package io.github.juarezr.spark.pubsub.client;
+package io.github.juarezr.spark.pubsub.structured;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
 /** A Pub/Sub message pulled into Spark, including the ack id for later acknowledgement. */
-public final class PulledMessage implements Serializable {
+final class PulledMessage implements Serializable {
   private static final long serialVersionUID = 1L;
 
   private final String messageId;
@@ -17,7 +19,7 @@ public final class PulledMessage implements Serializable {
   private final String orderingKey;
   private final String ackId;
 
-  public PulledMessage(
+  PulledMessage(
       String messageId,
       byte[] data,
       Map<String, String> attributes,
@@ -35,27 +37,49 @@ public final class PulledMessage implements Serializable {
     this.ackId = Objects.requireNonNull(ackId, "ackId");
   }
 
-  public String messageId() {
+  String messageId() {
     return messageId;
   }
 
-  public byte[] data() {
+  byte[] data() {
     return data;
   }
 
-  public Map<String, String> attributes() {
+  Map<String, String> attributes() {
     return attributes;
   }
 
-  public long publishTimeMillis() {
+  long publishTimeMillis() {
     return publishTimeMillis;
   }
 
-  public String orderingKey() {
+  String orderingKey() {
     return orderingKey;
   }
 
-  public String ackId() {
+  String ackId() {
     return ackId;
+  }
+
+  static List<String> ackIds(List<PulledMessage> messages) {
+    if (messages == null || messages.isEmpty()) {
+      return List.of();
+    }
+    List<String> ids = new ArrayList<>(messages.size());
+    for (PulledMessage message : messages) {
+      ids.add(message.ackId());
+    }
+    return ids;
+  }
+
+  static long payloadBytes(List<PulledMessage> messages) {
+    if (messages == null || messages.isEmpty()) {
+      return 0L;
+    }
+    long bytes = 0L;
+    for (PulledMessage message : messages) {
+      bytes += message.data().length;
+    }
+    return bytes;
   }
 }

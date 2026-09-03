@@ -8,8 +8,6 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import io.github.juarezr.spark.pubsub.client.PubSubClient;
-import io.github.juarezr.spark.pubsub.client.PulledMessage;
 import io.github.juarezr.spark.pubsub.config.AckMode;
 import io.github.juarezr.spark.pubsub.config.GatherMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;

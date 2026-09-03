@@ -1,4 +1,4 @@
-package io.github.juarezr.spark.pubsub.client;
+package io.github.juarezr.spark.pubsub.structured;
 
 import com.google.auth.Credentials;
 import com.google.auth.oauth2.GoogleCredentials;
@@ -8,7 +8,6 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.io.UncheckedIOException;
 import java.util.Collections;
-import java.util.Objects;
 
 /** Resolves Google credentials, defaulting to Application Default Credentials (ADC). */
 final class PubSubCredentialsProvider implements Serializable {
@@ -17,10 +16,6 @@ final class PubSubCredentialsProvider implements Serializable {
   private static final String PUBSUB_SCOPE = "https://www.googleapis.com/auth/pubsub";
 
   private final String credentialsFile;
-
-  PubSubCredentialsProvider() {
-    this(null);
-  }
 
   PubSubCredentialsProvider(String credentialsFile) {
     this.credentialsFile = credentialsFile;
@@ -39,26 +34,5 @@ final class PubSubCredentialsProvider implements Serializable {
     } catch (IOException e) {
       throw new UncheckedIOException("Failed to load Google credentials (ADC or file)", e);
     }
-  }
-
-  String credentialsFile() {
-    return credentialsFile;
-  }
-
-  @Override
-  public boolean equals(Object o) {
-    if (this == o) {
-      return true;
-    }
-    if (!(o instanceof PubSubCredentialsProvider)) {
-      return false;
-    }
-    PubSubCredentialsProvider that = (PubSubCredentialsProvider) o;
-    return Objects.equals(credentialsFile, that.credentialsFile);
-  }
-
-  @Override
-  public int hashCode() {
-    return Objects.hash(credentialsFile);
   }
 }

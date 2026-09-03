@@ -13,7 +13,6 @@ import java.util.Optional;
 public final class PubSubConfig implements Serializable {
   private static final long serialVersionUID = 1L;
 
-  public static final String FORMAT = "google-pubsub";
   public static final String SHORT_NAME = "google-pubsub";
 
   public static final String PROJECT_ID = "projectId";
@@ -200,7 +199,7 @@ public final class PubSubConfig implements Serializable {
     return b.build();
   }
 
-  public static Duration parseDuration(String option, String raw) {
+  static Duration parseDuration(String option, String raw) {
     if (raw == null || raw.isBlank()) {
       throw new IllegalArgumentException(option + " must not be blank");
     }
@@ -222,7 +221,7 @@ public final class PubSubConfig implements Serializable {
     }
   }
 
-  public static long parseSize(String option, String raw) {
+  static long parseSize(String option, String raw) {
     if (raw == null || raw.isBlank()) {
       return 0L;
     }
@@ -241,7 +240,7 @@ public final class PubSubConfig implements Serializable {
     }
   }
 
-  public static Instant parseSeekTime(String raw) {
+  static Instant parseSeekTime(String raw) {
     String value = raw == null ? "" : raw.trim();
     try {
       if (!value.isEmpty() && value.chars().allMatch(Character::isDigit)) {
@@ -325,6 +324,11 @@ public final class PubSubConfig implements Serializable {
     return Optional.ofNullable(seekTime).filter(t -> !t.isBlank());
   }
 
+  /** Parsed {@link #seekTime()} value; valid after construction when seek is timestamp. */
+  public Instant seekTimeAsInstant() {
+    return parseSeekTime(seekTime);
+  }
+
   public Optional<String> seekSnapshot() {
     return Optional.ofNullable(seekSnapshot).filter(t -> !t.isBlank());
   }
@@ -344,36 +348,13 @@ public final class PubSubConfig implements Serializable {
     return String.format("projects/%s/subscriptions/%s", projectId, subscription);
   }
 
-  public Optional<String> topicPath() {
+  Optional<String> topicPath() {
     return topic()
         .map(
             t ->
                 t.startsWith("projects/")
                     ? t
                     : String.format("projects/%s/topics/%s", projectId, t));
-  }
-
-  public Map<String, String> toOptionsMap() {
-    Map<String, String> map = new HashMap<>();
-    map.put(PROJECT_ID, projectId);
-    map.put(SUBSCRIPTION, subscription);
-    topic().ifPresent(t -> map.put(TOPIC, t));
-    map.put(ACK_MODE, ackMode.name().toLowerCase(Locale.ROOT).replace('_', '-'));
-    map.put(PULL_MAX_MESSAGES, Integer.toString(pullMaxMessages));
-    map.put(MAX_RETRY_TIME, maxRetryTime.toMillis() + "ms");
-    map.put(PULL_DEADLINE, pullDeadline.toMillis() + "ms");
-    map.put(ACK_DEADLINE, ackDeadline.toMillis() + "ms");
-    map.put(GATHER_MODE, gatherMode.name().toLowerCase(Locale.ROOT));
-    map.put(BATCH_TIME, batchTime.toMillis() + "ms");
-    map.put(BATCH_SIZE, Long.toString(batchSize));
-    map.put(BATCH_COUNT, Long.toString(batchCount));
-    map.put(NUM_WRITERS, numWriters);
-    map.put(SEEK, seekMode.name().toLowerCase(Locale.ROOT));
-    seekTime().ifPresent(t -> map.put(SEEK_TIME, t));
-    seekSnapshot().ifPresent(t -> map.put(SEEK_SNAPSHOT, t));
-    credentialsFile().ifPresent(t -> map.put(CREDENTIALS_FILE, t));
-    emulatorHost().ifPresent(t -> map.put(EMULATOR_HOST, t));
-    return map;
   }
 
   public static Builder builder() {

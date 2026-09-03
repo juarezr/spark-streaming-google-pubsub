@@ -9,7 +9,7 @@ import org.apache.spark.sql.types.StructType;
 final class PubSubSchema {
   private PubSubSchema() {}
 
-  public static final StructType SCHEMA =
+  static final StructType SCHEMA =
       new StructType(
           new StructField[] {
             new StructField("messageId", DataTypes.StringType, false, Metadata.empty()),

@@ -1,6 +1,5 @@
 package io.github.juarezr.spark.pubsub.structured;
 
-import io.github.juarezr.spark.pubsub.client.PulledMessage;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -19,7 +18,7 @@ final class PubSubInputPartition implements InputPartition {
             : Collections.unmodifiableList(new ArrayList<>(messages));
   }
 
-  public List<PulledMessage> messages() {
+  List<PulledMessage> messages() {
     return messages;
   }
 }

@@ -13,7 +13,7 @@ public enum AckMode {
    */
   EARLY;
 
-  public static AckMode fromString(String value) {
+  static AckMode fromString(String value) {
     if (value == null || value.isBlank()) {
       return AFTER_COMMIT;
     }
