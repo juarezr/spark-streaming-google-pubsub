@@ -18,6 +18,7 @@ import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
 import org.apache.spark.sql.connector.read.streaming.Offset;
 import org.apache.spark.sql.connector.read.streaming.ReportsSourceMetrics;
+import org.apache.spark.sql.types.StructType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,6 +31,7 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
   private static final Logger LOG = LoggerFactory.getLogger(PubSubMicroBatchStream.class);
 
   private final PubSubConfig config;
+  private final StructType readSchema;
   private final PubSubClient client;
   private final AckCoordinator ackCoordinator;
   private final AckLeaseWatchdog leaseWatchdog = new AckLeaseWatchdog();
@@ -45,12 +47,26 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
       new ConcurrentHashMap<>();
 
   PubSubMicroBatchStream(PubSubConfig config, int numPartitions) {
-    this(config, numPartitions, new PubSubClient(config), true);
+    this(config, numPartitions, PubSubSchema.SCHEMA);
+  }
+
+  PubSubMicroBatchStream(PubSubConfig config, int numPartitions, StructType readSchema) {
+    this(config, numPartitions, new PubSubClient(config), true, readSchema);
   }
 
   PubSubMicroBatchStream(
       PubSubConfig config, int numPartitions, PubSubClient client, boolean startClient) {
+    this(config, numPartitions, client, startClient, PubSubSchema.SCHEMA);
+  }
+
+  PubSubMicroBatchStream(
+      PubSubConfig config,
+      int numPartitions,
+      PubSubClient client,
+      boolean startClient,
+      StructType readSchema) {
     this.config = config;
+    this.readSchema = readSchema == null ? PubSubSchema.SCHEMA : readSchema;
     this.client = client;
     this.ackCoordinator = new AckCoordinator(config.ackMode());
     this.numPartitions = Math.max(1, numPartitions);
@@ -223,7 +239,7 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
 
   @Override
   public PartitionReaderFactory createReaderFactory() {
-    return new PubSubPartitionReaderFactory();
+    return new PubSubPartitionReaderFactory(readSchema);
   }
 
   @Override

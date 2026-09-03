@@ -27,6 +27,6 @@ final class PubSubScan implements Scan {
 
   @Override
   public MicroBatchStream toMicroBatchStream(String checkpointLocation) {
-    return new PubSubMicroBatchStream(config, config.numWriters());
+    return new PubSubMicroBatchStream(config, config.numWriters(), readSchema);
   }
 }
