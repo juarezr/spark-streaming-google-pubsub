@@ -1,9 +1,7 @@
 # spark-streaming-google-pubsub
 
-Apache Spark connector for **Google Cloud Pub/Sub** (standard). Read messages from a subscription into **Structured Streaming** via `.format("google-pubsub")`.
-
-Designed for Spark **3.5** (Scala 2.12) and Spark **4.0–4.2** (Scala 2.13; built against 4.1), including GCP Dataproc **2.3** (Spark 3.5) and **3.0** (Spark 4.1).
-Authentication defaults to **Application Default Credentials (ADC)**.
+Apache Spark connector for **Google Cloud Pub/Sub** (standard).
+Read messages from a subscription into **Structured Streaming** via `.format("google-pubsub")`.
 
 ## Why this connector
 
@@ -14,6 +12,12 @@ This project aims to deliver:
 - No subscription rewind on restart unless you set `seek`
 - Multi-pull gathering, retries, and ack-lease renewal for 24×7 jobs
 - Support for newer/modern Dataproc images
+
+### Characteristics
+
+This connector is designed for Spark **3.5** (Scala 2.12) and Spark **4.0–4.2** (Scala 2.13; built against 4.1), including GCP Dataproc **2.3** (Spark 3.5) and **3.0** (Spark 4.1).
+
+The authentication defaults to **Application Default Credentials (ADC)**.
 
 ## Using this connector
 
@@ -26,7 +30,8 @@ This project aims to deliver:
 
 Prefer `--packages` (or a Maven/Gradle dependency) so Google client libraries resolve as transitives.
 
-Fat JAR (`*-all.jar`, Google client deps bundled): built locally with `mvn package`, and attached to [GitHub Releases](https://github.com/juarezr/spark-streaming-google-pubsub/releases) — **not** published to Maven Central.
+Fat JAR (`*-all.jar`, Google client deps bundled) are **not** published to Maven Central.
+You can build locally with `mvn package`, or find them attached to [GitHub Releases](https://github.com/juarezr/spark-streaming-google-pubsub/releases).
 
 ### Schema (Structured Streaming)
 
@@ -120,9 +125,9 @@ for example `2024-08-07T12:00:29.028-03:00`; naive datetimes are rejected.
   partition in the application. `numWriters=2` means two Spark tasks for one gathered batch, not two
   Pull loops.
 
-The driver holds message byte arrays, ack ids, attributes, and serialization copies. Allow roughly
-3–5 times the configured payload batch size as temporary driver-heap headroom. `batchSize` limits
-gathered payload bytes; it is not a Spark heap setting.
+The driver holds message byte arrays, ack ids, attributes, and serialization copies.
+Reserve roughly 3–5 times the configured payload batch size as temporary driver-heap headroom.
+The option `batchSize` limits gathered payload bytes; it is not a Spark heap setting.
 
 ## Examples
 
