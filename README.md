@@ -32,8 +32,8 @@ The authentication defaults to **Application Default Credentials (ADC)**.
 
 | Spark   | Scala | Artifact                                                     |
 |---------|-------|--------------------------------------------------------------|
-| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.5.0` |
-| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.5.0` |
+| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.6.0` |
+| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.6.0` |
 
 Prefer `--packages` (or a Maven/Gradle dependency) so Google client libraries resolve as transitives.
 
@@ -234,7 +234,7 @@ Full script: [`examples/python/structured_streaming_example.py`](examples/python
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.5.0 \
+  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.6.0 \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 
@@ -242,7 +242,7 @@ gcloud dataproc jobs submit spark \
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.5.0-all.jar \
+  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.6.0-all.jar \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -334,7 +334,7 @@ mvn -Pspark35 -DskipTests package
 
 spark-submit \
   --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
-  --jars target/spark-streaming-google-pubsub_2.12-0.5.0-SNAPSHOT-all.jar \
+  --jars target/spark-streaming-google-pubsub_2.12-0.6.0-SNAPSHOT-all.jar \
   examples/java/JavaStructuredStreamingExample.java \
   YOUR_PROJECT YOUR_SUBSCRIPTION /tmp/pubsub-cp /tmp/pubsub-out
 ```
