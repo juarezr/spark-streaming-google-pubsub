@@ -44,6 +44,15 @@ You can build locally with `mvn package`, or find them attached to [GitHub Relea
 | `orderingKey` | string               | Ordering key (may be empty)                 |
 | `ackId`       | string               | Delivery token; normally drop before writing |
 
+Spark projects unused envelope columns away. The reader emits only the columns the query
+requests, in that order.
+
+`publishTime` is event time. Use it for watermarks:
+
+```scala
+.withWatermark("publishTime", "10 minutes")
+```
+
 ### How it works
 
 Pub/Sub Pull RPCs run on the **Spark driver**. Executors only process in-memory slices of messages
@@ -223,6 +232,7 @@ same `.format("google-pubsub")` options as above. Use a durable `checkpointLocat
 - With `seek=none` (default), restart never rewinds the subscription.
 
 Monitor custom metrics on `StreamingQueryProgress` (Spark UI): last-pull count/payload bytes,
+`lastPullMessageAgeMs` (age of the newest publish time in the last gather; `-` when empty),
 outstanding payload bytes, batch ids, `pubsubRetryAttempts`, and
 `pubsubRetryAttemptsTotal`. These are **not** the Pub/Sub subscription backlog.
 
