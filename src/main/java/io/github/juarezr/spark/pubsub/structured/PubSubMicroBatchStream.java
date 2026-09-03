@@ -36,6 +36,7 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
   private final AtomicLong nextBatchId = new AtomicLong(0);
   private final AtomicInteger lastPullMessageCount = new AtomicInteger(0);
   private final AtomicLong lastPullPayloadBytes = new AtomicLong(0);
+  private volatile Long lastPullMessageAgeMs;
   private final AtomicLong lastReportedRetryAttempts = new AtomicLong(0);
   private final int numPartitions;
   private volatile PubSubOffset lastProduced;
@@ -72,6 +73,7 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
     if (pulled.isEmpty()) {
       lastPullMessageCount.set(0);
       lastPullPayloadBytes.set(0);
+      lastPullMessageAgeMs = null;
       return currentOffset;
     }
     long batchId = nextBatchId.getAndIncrement();
@@ -104,6 +106,8 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
     final long pulledBytes = PulledMessage.payloadBytes(pulled);
     lastPullMessageCount.set(pulledSize);
     lastPullPayloadBytes.set(pulledBytes);
+    lastPullMessageAgeMs =
+        PubSubSourceMetrics.newestMessageAgeMs(pulled, System.currentTimeMillis());
     LOG.debug("latestOffset batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
     return offset;
   }
@@ -187,6 +191,7 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
     return PubSubSourceMetrics.snapshot(
         lastPullMessageCount.get(),
         lastPullPayloadBytes.get(),
+        lastPullMessageAgeMs,
         client.outstandingBytes(),
         producedBatchId,
         latestConsumedOffset,

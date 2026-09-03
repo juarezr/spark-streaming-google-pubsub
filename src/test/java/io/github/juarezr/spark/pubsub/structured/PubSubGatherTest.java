@@ -1,6 +1,7 @@
 package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -15,6 +16,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.streaming.Offset;
 import org.junit.jupiter.api.Test;
@@ -33,7 +35,32 @@ class PubSubGatherTest {
     Offset latest = stream.latestOffset();
 
     assertEquals(initial, latest);
+    assertEquals(
+        "-", stream.metrics(Optional.empty()).get(PubSubSourceMetrics.LAST_PULL_MESSAGE_AGE_MS));
     verify(client, times(1)).pull(any(Duration.class));
+  }
+
+  @Test
+  void pullReportsNewestMessageAge() {
+    PubSubClient client = mock(PubSubClient.class);
+    PulledMessage older =
+        new PulledMessage("old", new byte[] {1}, Collections.emptyMap(), 1_000L, "", "ack-old");
+    PulledMessage newer =
+        new PulledMessage("new", new byte[] {1}, Collections.emptyMap(), 4_000L, "", "ack-new");
+    when(client.pull(any(Duration.class))).thenReturn(List.of(older, newer));
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    long before = System.currentTimeMillis();
+    stream.latestOffset();
+    long after = System.currentTimeMillis();
+    long age =
+        Long.parseLong(
+            stream.metrics(Optional.empty()).get(PubSubSourceMetrics.LAST_PULL_MESSAGE_AGE_MS));
+
+    assertTrue(age >= before - 4_000L);
+    assertTrue(age <= after - 4_000L);
   }
 
   @Test
