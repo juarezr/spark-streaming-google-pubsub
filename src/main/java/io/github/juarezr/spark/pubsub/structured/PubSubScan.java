@@ -27,7 +27,6 @@ final class PubSubScan implements Scan {
 
   @Override
   public MicroBatchStream toMicroBatchStream(String checkpointLocation) {
-    int partitions = Math.max(1, Runtime.getRuntime().availableProcessors());
-    return new PubSubMicroBatchStream(config, partitions);
+    return new PubSubMicroBatchStream(config, config.numWriters());
   }
 }

@@ -2,9 +2,6 @@ package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import io.github.juarezr.spark.pubsub.client.PulledMessage;
-import java.util.Collections;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.apache.spark.sql.connector.read.streaming.Offset;
@@ -27,9 +24,7 @@ class PubSubSourceMetricsTest {
 
   @Test
   void pullWithMessagesAndConsumedOffset() {
-    PulledMessage message =
-        new PulledMessage("m1", new byte[] {1, 2, 3}, Collections.emptyMap(), 0L, "", "ack-1");
-    PubSubOffset consumed = new PubSubOffset(7L, List.of(message));
+    PubSubOffset consumed = new PubSubOffset(7L);
     Map<String, String> metrics =
         PubSubSourceMetrics.snapshot(1, 3L, 3L, 7L, Optional.of(consumed), 1L, 4L);
     assertEquals("1", metrics.get(PubSubSourceMetrics.LAST_PULL_MESSAGE_COUNT));

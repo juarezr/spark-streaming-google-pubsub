@@ -45,6 +45,22 @@ class RetryPolicyTest {
   }
 
   @Test
+  void stopsWhenMaxRetryTimeElapsed() {
+    RetryPolicy policy = new RetryPolicy(1L, 5L, 1000, 0L);
+    AtomicInteger attempts = new AtomicInteger();
+    assertThrows(
+        RuntimeException.class,
+        () ->
+            policy.execute(
+                "op",
+                () -> {
+                  attempts.incrementAndGet();
+                  throw new RuntimeException("UNAVAILABLE");
+                }));
+    assertEquals(1, attempts.get());
+  }
+
+  @Test
   void isRetryableHeuristics() {
     assertTrue(RetryPolicy.isRetryable(new RuntimeException("resource_exhausted")));
     assertTrue(

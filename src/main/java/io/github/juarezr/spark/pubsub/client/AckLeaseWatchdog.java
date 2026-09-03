@@ -19,6 +19,7 @@ public final class AckLeaseWatchdog implements AutoCloseable {
   private final Object lock = new Object();
   private ScheduledExecutorService executor;
   private ScheduledFuture<?> future;
+  private volatile List<String> ackIds = List.of();
 
   static int extendIntervalSeconds(int ackDeadlineSeconds) {
     return Math.max(1, ackDeadlineSeconds / 3);
@@ -29,7 +30,7 @@ public final class AckLeaseWatchdog implements AutoCloseable {
     if (client == null || ackIds == null || ackIds.isEmpty() || ackDeadlineSeconds <= 0) {
       return;
     }
-    List<String> snapshot = new ArrayList<>(ackIds);
+    this.ackIds = new ArrayList<>(ackIds);
     int intervalSeconds = extendIntervalSeconds(ackDeadlineSeconds);
     synchronized (lock) {
       executor =
@@ -42,6 +43,7 @@ public final class AckLeaseWatchdog implements AutoCloseable {
       future =
           executor.scheduleAtFixedRate(
               () -> {
+                List<String> snapshot = this.ackIds;
                 try {
                   client.extendAckDeadline(snapshot, ackDeadlineSeconds);
                 } catch (RuntimeException e) {
@@ -54,6 +56,11 @@ public final class AckLeaseWatchdog implements AutoCloseable {
     }
   }
 
+  /** Replaces the ids extended by an already-running watchdog. */
+  public void update(List<String> ackIds) {
+    this.ackIds = ackIds == null ? List.of() : new ArrayList<>(ackIds);
+  }
+
   public void stop() {
     synchronized (lock) {
       if (future != null) {
@@ -64,6 +71,7 @@ public final class AckLeaseWatchdog implements AutoCloseable {
         executor.shutdownNow();
         executor = null;
       }
+      ackIds = List.of();
     }
   }
 

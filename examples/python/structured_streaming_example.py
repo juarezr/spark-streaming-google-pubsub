@@ -7,6 +7,7 @@
 #   spark-submit --packages ... examples/python/structured_streaming_example.py
 
 from pyspark.sql import SparkSession
+from pyspark.sql.streaming import Trigger
 
 spark = SparkSession.builder.appName("pubsub-pyspark-example").getOrCreate()
 
@@ -15,19 +16,16 @@ messages = (
     .option("projectId", "my-project")
     .option("subscription", "my-subscription")
     .option("ackMode", "afterCommit")
+    .option("gatherMode", "batch")
     .load()
 )
 
 query = (
-    messages.selectExpr(
-        "messageId",
-        "CAST(data AS STRING) AS payload",
-        "publishTime",
-        "attributes",
-    )
+    messages.drop("ackId")
     .writeStream.format("console")
     .option("truncate", "false")
     .option("checkpointLocation", "/tmp/pubsub-pyspark-checkpoint")
+    .trigger(Trigger.ProcessingTime("1 second"))
     .start()
 )
 

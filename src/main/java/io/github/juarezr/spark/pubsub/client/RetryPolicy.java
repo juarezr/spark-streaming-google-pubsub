@@ -1,5 +1,6 @@
 package io.github.juarezr.spark.pubsub.client;
 
+import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -17,17 +18,23 @@ final class RetryPolicy {
   private final long initialBackoffMs;
   private final long maxBackoffMs;
   private final int maxAttempts;
+  private final long maxRetryTimeMs;
   private final AtomicLong retryAttempts;
 
   RetryPolicy(long initialBackoffMs, long maxBackoffMs, int maxAttempts) {
+    this(initialBackoffMs, maxBackoffMs, maxAttempts, Long.MAX_VALUE);
+  }
+
+  RetryPolicy(long initialBackoffMs, long maxBackoffMs, int maxAttempts, long maxRetryTimeMs) {
     this.initialBackoffMs = initialBackoffMs;
     this.maxBackoffMs = maxBackoffMs;
     this.maxAttempts = maxAttempts;
+    this.maxRetryTimeMs = maxRetryTimeMs;
     this.retryAttempts = new AtomicLong(0);
   }
 
-  static RetryPolicy defaults() {
-    return new RetryPolicy(100L, 10_000L, 8);
+  static RetryPolicy defaults(Duration maxRetryTime) {
+    return new RetryPolicy(100L, 10_000L, 1000, maxRetryTime.toMillis());
   }
 
   /** Lifetime count of retryable failures that slept and retried. Resets with this instance. */
@@ -38,6 +45,9 @@ final class RetryPolicy {
   <T> T execute(String operation, RetryableCallable<T> callable) {
     RuntimeException last = null;
     long backoff = this.initialBackoffMs;
+    long startedAt = System.nanoTime();
+    long lastWarnAt = Long.MIN_VALUE;
+    int suppressedWarnings = 0;
 
     for (int attempt = 1; attempt <= this.maxAttempts; attempt++) {
       try {
@@ -45,15 +55,27 @@ final class RetryPolicy {
       } catch (RuntimeException e) {
         last = e;
         final boolean retryable = isRetryable(e);
-        if (attempt == this.maxAttempts || !retryable) {
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+        if (attempt == this.maxAttempts || !retryable || elapsedMs >= maxRetryTimeMs) {
           throw e;
         }
         retryAttempts.incrementAndGet();
         final long jitterBound = Math.max(1, backoff / 4);
         final long nextBackoffMs = backoff + ThreadLocalRandom.current().nextLong(0, jitterBound);
-        final long sleep = Math.min(nextBackoffMs, this.maxBackoffMs);
+        final long remainingRetryMs = Math.max(0L, maxRetryTimeMs - elapsedMs);
+        final long sleep = Math.min(Math.min(nextBackoffMs, this.maxBackoffMs), remainingRetryMs);
         backoff = Math.min(backoff * 2, this.maxBackoffMs);
-        LOG.warn(FAILURE_ON_ATTEMPT_MSG, operation, attempt, this.maxAttempts, e.toString(), sleep);
+        if (attempt == 1 || elapsedMs - lastWarnAt >= 15_000L) {
+          String failure =
+              suppressedWarnings == 0
+                  ? e.toString()
+                  : e + " (" + suppressedWarnings + " retry warnings suppressed)";
+          LOG.warn(FAILURE_ON_ATTEMPT_MSG, operation, attempt, this.maxAttempts, failure, sleep);
+          lastWarnAt = elapsedMs;
+          suppressedWarnings = 0;
+        } else {
+          suppressedWarnings++;
+        }
         try {
           TimeUnit.MILLISECONDS.sleep(sleep);
         } catch (InterruptedException ie) {

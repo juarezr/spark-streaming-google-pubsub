@@ -1,6 +1,8 @@
 package io.github.juarezr.spark.pubsub.config;
 
 import java.io.Serializable;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -18,29 +20,41 @@ public final class PubSubConfig implements Serializable {
   public static final String SUBSCRIPTION = "subscription";
   public static final String TOPIC = "topic";
   public static final String ACK_MODE = "ackMode";
-  public static final String MAX_MESSAGES_PER_PULL = "maxMessagesPerPull";
-  public static final String MAX_BYTES_OUTSTANDING = "maxBytesOutstanding";
-  public static final String ACK_DEADLINE_SECONDS = "ackDeadlineSeconds";
-  public static final String PULL_TIMEOUT_SECONDS = "pullTimeoutSeconds";
+  public static final String PULL_MAX_MESSAGES = "pullMaxMessages";
+  public static final String MAX_RETRY_TIME = "maxRetryTime";
+  public static final String PULL_DEADLINE = "pullDeadline";
+  public static final String ACK_DEADLINE = "ackDeadline";
+  public static final String GATHER_MODE = "gatherMode";
+  public static final String BATCH_TIME = "batchTime";
+  public static final String BATCH_SIZE = "batchSize";
+  public static final String BATCH_COUNT = "batchCount";
+  public static final String NUM_WRITERS = "numWriters";
   public static final String SEEK = "seek";
   public static final String SEEK_TIME = "seekTime";
   public static final String SEEK_SNAPSHOT = "seekSnapshot";
   public static final String CREDENTIALS_FILE = "credentialsFile";
   public static final String EMULATOR_HOST = "emulatorHost";
 
-  public static final int DEFAULT_MAX_MESSAGES_PER_PULL = 1000;
-  public static final long DEFAULT_MAX_BYTES_OUTSTANDING = 100L * 1024 * 1024;
-  public static final int DEFAULT_ACK_DEADLINE_SECONDS = 60;
-  public static final int DEFAULT_PULL_TIMEOUT_SECONDS = 20;
+  public static final int DEFAULT_PULL_MAX_MESSAGES = 1000;
+  public static final Duration DEFAULT_MAX_RETRY_TIME = Duration.ofSeconds(90);
+  public static final Duration DEFAULT_PULL_DEADLINE = Duration.ofSeconds(20);
+  public static final Duration DEFAULT_ACK_DEADLINE = Duration.ofSeconds(60);
+  public static final Duration DEFAULT_BATCH_TIME = Duration.ofSeconds(10);
+  public static final long DEFAULT_BATCH_SIZE = 128L * 1024 * 1024;
 
   private final String projectId;
   private final String subscription;
   private final String topic;
   private final AckMode ackMode;
-  private final int maxMessagesPerPull;
-  private final long maxBytesOutstanding;
-  private final int ackDeadlineSeconds;
-  private final int pullTimeoutSeconds;
+  private final int pullMaxMessages;
+  private final Duration maxRetryTime;
+  private final Duration pullDeadline;
+  private final Duration ackDeadline;
+  private final GatherMode gatherMode;
+  private final Duration batchTime;
+  private final long batchSize;
+  private final long batchCount;
+  private final String numWriters;
   private final SeekMode seekMode;
   private final String seekTime;
   private final String seekSnapshot;
@@ -52,10 +66,15 @@ public final class PubSubConfig implements Serializable {
     this.subscription = Objects.requireNonNull(builder.subscription, "subscription is required");
     this.topic = builder.topic;
     this.ackMode = builder.ackMode == null ? AckMode.AFTER_COMMIT : builder.ackMode;
-    this.maxMessagesPerPull = builder.maxMessagesPerPull;
-    this.maxBytesOutstanding = builder.maxBytesOutstanding;
-    this.ackDeadlineSeconds = builder.ackDeadlineSeconds;
-    this.pullTimeoutSeconds = builder.pullTimeoutSeconds;
+    this.pullMaxMessages = builder.pullMaxMessages;
+    this.maxRetryTime = builder.maxRetryTime;
+    this.pullDeadline = builder.pullDeadline;
+    this.ackDeadline = builder.ackDeadline;
+    this.gatherMode = builder.gatherMode;
+    this.batchTime = builder.batchTime;
+    this.batchSize = builder.batchSize;
+    this.batchCount = builder.batchCount;
+    this.numWriters = builder.numWriters;
     this.seekMode = builder.seekMode == null ? SeekMode.NONE : builder.seekMode;
     this.seekTime = builder.seekTime;
     this.seekSnapshot = builder.seekSnapshot;
@@ -71,20 +90,50 @@ public final class PubSubConfig implements Serializable {
     if (subscription.isBlank()) {
       throw new IllegalArgumentException("subscription must not be blank");
     }
-    if (maxMessagesPerPull <= 0) {
-      throw new IllegalArgumentException("maxMessagesPerPull must be > 0");
+    if (pullMaxMessages <= 0 || pullMaxMessages > 1000) {
+      throw new IllegalArgumentException("pullMaxMessages must be between 1 and 1000");
     }
-    if (maxBytesOutstanding <= 0) {
-      throw new IllegalArgumentException("maxBytesOutstanding must be > 0");
+    if (batchTime == null || batchTime.isZero() || batchTime.isNegative()) {
+      throw new IllegalArgumentException("batchTime must be > 0");
     }
-    if (ackDeadlineSeconds <= 0) {
-      throw new IllegalArgumentException("ackDeadlineSeconds must be > 0");
+    if (batchSize != 0 && batchSize < 1024L * 1024L) {
+      throw new IllegalArgumentException("batchSize must be 0/blank or at least 1m");
     }
-    if (pullTimeoutSeconds <= 0) {
-      throw new IllegalArgumentException("pullTimeoutSeconds must be > 0");
+    if (batchCount < 0) {
+      throw new IllegalArgumentException("batchCount must be >= 0");
+    }
+    if (pullDeadline == null || pullDeadline.isZero() || pullDeadline.isNegative()) {
+      throw new IllegalArgumentException("pullDeadline must be > 0");
+    }
+    if (pullDeadline.compareTo(Duration.ofSeconds(600)) > 0) {
+      throw new IllegalArgumentException("pullDeadline must be <= 600s");
+    }
+    if (ackDeadline == null
+        || ackDeadline.compareTo(Duration.ofSeconds(10)) < 0
+        || ackDeadline.compareTo(Duration.ofSeconds(600)) > 0
+        || ackDeadline.toMillis() % 1000L != 0L) {
+      throw new IllegalArgumentException(
+          "ackDeadline must be a whole number of seconds between 10s and 600s");
+    }
+    if (maxRetryTime == null
+        || maxRetryTime.isNegative()
+        || maxRetryTime.compareTo(Duration.ofMinutes(30)) > 0) {
+      throw new IllegalArgumentException("maxRetryTime must be between 0 and 30m");
+    }
+    if (!"auto".equalsIgnoreCase(numWriters)) {
+      try {
+        if (Integer.parseInt(numWriters) < 1) {
+          throw new IllegalArgumentException("numWriters must be auto or an integer >= 1");
+        }
+      } catch (NumberFormatException e) {
+        throw new IllegalArgumentException("numWriters must be auto or an integer >= 1", e);
+      }
     }
     if (seekMode == SeekMode.TIMESTAMP && (seekTime == null || seekTime.isBlank())) {
       throw new IllegalArgumentException("seek=timestamp requires seekTime");
+    }
+    if (seekMode == SeekMode.TIMESTAMP) {
+      parseSeekTime(seekTime);
     }
     if (seekMode == SeekMode.SNAPSHOT && (seekSnapshot == null || seekSnapshot.isBlank())) {
       throw new IllegalArgumentException("seek=snapshot requires seekSnapshot");
@@ -104,21 +153,41 @@ public final class PubSubConfig implements Serializable {
     if (ack != null) {
       b.ackMode(AckMode.fromString(ack));
     }
-    String maxMsg = first(normalized, "maxmessagesperpull", "maxmessages");
+    String maxMsg = first(normalized, "pullmaxmessages");
     if (maxMsg != null) {
-      b.maxMessagesPerPull(Integer.parseInt(maxMsg));
+      b.pullMaxMessages(Integer.parseInt(maxMsg));
     }
-    String maxBytes = first(normalized, "maxbytesoutstanding");
-    if (maxBytes != null) {
-      b.maxBytesOutstanding(Long.parseLong(maxBytes));
+    String maxRetry = first(normalized, "maxretrytime");
+    if (maxRetry != null) {
+      b.maxRetryTime(parseDuration(MAX_RETRY_TIME, maxRetry));
     }
-    String ackDeadline = first(normalized, "ackdeadlineseconds");
+    String pullDeadline = first(normalized, "pulldeadline");
+    if (pullDeadline != null) {
+      b.pullDeadline(parseDuration(PULL_DEADLINE, pullDeadline));
+    }
+    String ackDeadline = first(normalized, "ackdeadline");
     if (ackDeadline != null) {
-      b.ackDeadlineSeconds(Integer.parseInt(ackDeadline));
+      b.ackDeadline(parseDuration(ACK_DEADLINE, ackDeadline));
     }
-    String pullTimeout = first(normalized, "pulltimeoutseconds");
-    if (pullTimeout != null) {
-      b.pullTimeoutSeconds(Integer.parseInt(pullTimeout));
+    String gatherMode = first(normalized, "gathermode");
+    if (gatherMode != null) {
+      b.gatherMode(GatherMode.fromString(gatherMode));
+    }
+    String batchTime = first(normalized, "batchtime");
+    if (batchTime != null) {
+      b.batchTime(parseDuration(BATCH_TIME, batchTime));
+    }
+    String batchSize = first(normalized, "batchsize");
+    if (batchSize != null) {
+      b.batchSize(parseSize(BATCH_SIZE, batchSize));
+    }
+    String batchCount = first(normalized, "batchcount");
+    if (batchCount != null && !batchCount.isBlank()) {
+      b.batchCount(Long.parseLong(batchCount));
+    }
+    String numWriters = first(normalized, "numwriters");
+    if (numWriters != null) {
+      b.numWriters(numWriters);
     }
     String seek = first(normalized, "seek");
     if (seek != null) {
@@ -129,6 +198,60 @@ public final class PubSubConfig implements Serializable {
     b.credentialsFile(first(normalized, "credentialsfile", "credentials"));
     b.emulatorHost(first(normalized, "emulatorhost"));
     return b.build();
+  }
+
+  public static Duration parseDuration(String option, String raw) {
+    if (raw == null || raw.isBlank()) {
+      throw new IllegalArgumentException(option + " must not be blank");
+    }
+    String value = raw.trim().toLowerCase(Locale.ROOT);
+    try {
+      if (value.endsWith("ms")) {
+        return Duration.ofMillis(Long.parseLong(value.substring(0, value.length() - 2)));
+      }
+      if (value.endsWith("s")) {
+        return Duration.ofSeconds(Long.parseLong(value.substring(0, value.length() - 1)));
+      }
+      if (value.endsWith("m")) {
+        return Duration.ofMinutes(Long.parseLong(value.substring(0, value.length() - 1)));
+      }
+      return Duration.ofSeconds(Long.parseLong(value));
+    } catch (ArithmeticException | NumberFormatException e) {
+      throw new IllegalArgumentException(
+          "Invalid " + option + " '" + raw + "'. Use a number with ms, s, or m.", e);
+    }
+  }
+
+  public static long parseSize(String option, String raw) {
+    if (raw == null || raw.isBlank()) {
+      return 0L;
+    }
+    String value = raw.trim().toLowerCase(Locale.ROOT);
+    long multiplier = 1L;
+    char suffix = value.charAt(value.length() - 1);
+    if (suffix == 'k' || suffix == 'm' || suffix == 'g') {
+      value = value.substring(0, value.length() - 1);
+      multiplier = suffix == 'k' ? 1024L : suffix == 'm' ? 1024L * 1024L : 1024L * 1024L * 1024L;
+    }
+    try {
+      return Math.multiplyExact(Long.parseLong(value), multiplier);
+    } catch (ArithmeticException | NumberFormatException e) {
+      throw new IllegalArgumentException(
+          "Invalid " + option + " '" + raw + "'. Use bytes or a k, m, or g suffix.", e);
+    }
+  }
+
+  public static Instant parseSeekTime(String raw) {
+    String value = raw == null ? "" : raw.trim();
+    try {
+      if (!value.isEmpty() && value.chars().allMatch(Character::isDigit)) {
+        return Instant.ofEpochMilli(Long.parseLong(value));
+      }
+      return Instant.parse(value);
+    } catch (Exception e) {
+      throw new IllegalArgumentException(
+          "Invalid seekTime '" + raw + "'. Use epoch milliseconds or RFC-3339 with Z/offset.", e);
+    }
   }
 
   private static String first(Map<String, String> map, String... keys) {
@@ -156,20 +279,42 @@ public final class PubSubConfig implements Serializable {
     return ackMode;
   }
 
-  public int maxMessagesPerPull() {
-    return maxMessagesPerPull;
+  public int pullMaxMessages() {
+    return pullMaxMessages;
   }
 
-  public long maxBytesOutstanding() {
-    return maxBytesOutstanding;
+  public Duration maxRetryTime() {
+    return maxRetryTime;
   }
 
-  public int ackDeadlineSeconds() {
-    return ackDeadlineSeconds;
+  public Duration pullDeadline() {
+    return pullDeadline;
   }
 
-  public int pullTimeoutSeconds() {
-    return pullTimeoutSeconds;
+  public Duration ackDeadline() {
+    return ackDeadline;
+  }
+
+  public GatherMode gatherMode() {
+    return gatherMode;
+  }
+
+  public Duration batchTime() {
+    return batchTime;
+  }
+
+  public long batchSize() {
+    return batchSize;
+  }
+
+  public long batchCount() {
+    return batchCount;
+  }
+
+  public int numWriters() {
+    return "auto".equalsIgnoreCase(numWriters)
+        ? Math.max(1, Runtime.getRuntime().availableProcessors())
+        : Integer.parseInt(numWriters);
   }
 
   public SeekMode seekMode() {
@@ -214,10 +359,15 @@ public final class PubSubConfig implements Serializable {
     map.put(SUBSCRIPTION, subscription);
     topic().ifPresent(t -> map.put(TOPIC, t));
     map.put(ACK_MODE, ackMode.name().toLowerCase(Locale.ROOT).replace('_', '-'));
-    map.put(MAX_MESSAGES_PER_PULL, Integer.toString(maxMessagesPerPull));
-    map.put(MAX_BYTES_OUTSTANDING, Long.toString(maxBytesOutstanding));
-    map.put(ACK_DEADLINE_SECONDS, Integer.toString(ackDeadlineSeconds));
-    map.put(PULL_TIMEOUT_SECONDS, Integer.toString(pullTimeoutSeconds));
+    map.put(PULL_MAX_MESSAGES, Integer.toString(pullMaxMessages));
+    map.put(MAX_RETRY_TIME, maxRetryTime.toMillis() + "ms");
+    map.put(PULL_DEADLINE, pullDeadline.toMillis() + "ms");
+    map.put(ACK_DEADLINE, ackDeadline.toMillis() + "ms");
+    map.put(GATHER_MODE, gatherMode.name().toLowerCase(Locale.ROOT));
+    map.put(BATCH_TIME, batchTime.toMillis() + "ms");
+    map.put(BATCH_SIZE, Long.toString(batchSize));
+    map.put(BATCH_COUNT, Long.toString(batchCount));
+    map.put(NUM_WRITERS, numWriters);
     map.put(SEEK, seekMode.name().toLowerCase(Locale.ROOT));
     seekTime().ifPresent(t -> map.put(SEEK_TIME, t));
     seekSnapshot().ifPresent(t -> map.put(SEEK_SNAPSHOT, t));
@@ -235,10 +385,15 @@ public final class PubSubConfig implements Serializable {
     private String subscription;
     private String topic;
     private AckMode ackMode = AckMode.AFTER_COMMIT;
-    private int maxMessagesPerPull = DEFAULT_MAX_MESSAGES_PER_PULL;
-    private long maxBytesOutstanding = DEFAULT_MAX_BYTES_OUTSTANDING;
-    private int ackDeadlineSeconds = DEFAULT_ACK_DEADLINE_SECONDS;
-    private int pullTimeoutSeconds = DEFAULT_PULL_TIMEOUT_SECONDS;
+    private int pullMaxMessages = DEFAULT_PULL_MAX_MESSAGES;
+    private Duration maxRetryTime = DEFAULT_MAX_RETRY_TIME;
+    private Duration pullDeadline = DEFAULT_PULL_DEADLINE;
+    private Duration ackDeadline = DEFAULT_ACK_DEADLINE;
+    private GatherMode gatherMode = GatherMode.BATCH;
+    private Duration batchTime = DEFAULT_BATCH_TIME;
+    private long batchSize = DEFAULT_BATCH_SIZE;
+    private long batchCount;
+    private String numWriters = "1";
     private SeekMode seekMode = SeekMode.NONE;
     private String seekTime;
     private String seekSnapshot;
@@ -265,23 +420,48 @@ public final class PubSubConfig implements Serializable {
       return this;
     }
 
-    public Builder maxMessagesPerPull(int maxMessagesPerPull) {
-      this.maxMessagesPerPull = maxMessagesPerPull;
+    public Builder pullMaxMessages(int pullMaxMessages) {
+      this.pullMaxMessages = pullMaxMessages;
       return this;
     }
 
-    public Builder maxBytesOutstanding(long maxBytesOutstanding) {
-      this.maxBytesOutstanding = maxBytesOutstanding;
+    public Builder maxRetryTime(Duration maxRetryTime) {
+      this.maxRetryTime = maxRetryTime;
       return this;
     }
 
-    public Builder ackDeadlineSeconds(int ackDeadlineSeconds) {
-      this.ackDeadlineSeconds = ackDeadlineSeconds;
+    public Builder pullDeadline(Duration pullDeadline) {
+      this.pullDeadline = pullDeadline;
       return this;
     }
 
-    public Builder pullTimeoutSeconds(int pullTimeoutSeconds) {
-      this.pullTimeoutSeconds = pullTimeoutSeconds;
+    public Builder ackDeadline(Duration ackDeadline) {
+      this.ackDeadline = ackDeadline;
+      return this;
+    }
+
+    public Builder gatherMode(GatherMode gatherMode) {
+      this.gatherMode = gatherMode;
+      return this;
+    }
+
+    public Builder batchTime(Duration batchTime) {
+      this.batchTime = batchTime;
+      return this;
+    }
+
+    public Builder batchSize(long batchSize) {
+      this.batchSize = batchSize;
+      return this;
+    }
+
+    public Builder batchCount(long batchCount) {
+      this.batchCount = batchCount;
+      return this;
+    }
+
+    public Builder numWriters(String numWriters) {
+      this.numWriters = numWriters;
       return this;
     }
 

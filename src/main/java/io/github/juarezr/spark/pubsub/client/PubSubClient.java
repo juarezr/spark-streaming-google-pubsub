@@ -23,7 +23,6 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -52,7 +51,7 @@ public final class PubSubClient implements Closeable, Serializable {
     this(
         config,
         new PubSubCredentialsProvider(config.credentialsFile().orElse(null)),
-        RetryPolicy.defaults());
+        RetryPolicy.defaults(config.maxRetryTime()));
   }
 
   PubSubClient(
@@ -136,17 +135,8 @@ public final class PubSubClient implements Closeable, Serializable {
     return seek;
   }
 
-  private static Instant parseSeekTime(String seekTime) {
-    String value = seekTime.trim();
-    try {
-      if (value.chars().allMatch(Character::isDigit)) {
-        return Instant.ofEpochMilli(Long.parseLong(value));
-      }
-      return Instant.parse(value);
-    } catch (Exception e) {
-      throw new IllegalArgumentException(
-          "Invalid seekTime '" + seekTime + "'. Use epoch millis or RFC-3339 instant.", e);
-    }
+  static Instant parseSeekTime(String seekTime) {
+    return PubSubConfig.parseSeekTime(seekTime);
   }
 
   private void ensureStarted() {
@@ -181,25 +171,23 @@ public final class PubSubClient implements Closeable, Serializable {
   }
 
   public List<PulledMessage> pull() {
-    ensureStarted();
-    final long currentBytes = this.outstandingBytes.get();
-    long maxBytes = this.config.maxBytesOutstanding();
-    if (currentBytes >= maxBytes) {
-      LOG.debug("Skipping pull; outstanding bytes {} >= limit {}", currentBytes, maxBytes);
-      return Collections.emptyList();
-    }
-    return retryPolicy.execute("pull", this::pullMessagesFromSubscription);
+    return pull(config.pullDeadline());
   }
 
-  private List<PulledMessage> pullMessagesFromSubscription() {
+  public List<PulledMessage> pull(java.time.Duration deadline) {
+    ensureStarted();
+    return retryPolicy.execute("pull", () -> pullMessagesFromSubscription(deadline));
+  }
+
+  private List<PulledMessage> pullMessagesFromSubscription(java.time.Duration deadline) {
     final PullRequest request =
         PullRequest.newBuilder()
             .setSubscription(this.config.subscriptionPath())
-            .setMaxMessages(this.config.maxMessagesPerPull())
+            .setMaxMessages(this.config.pullMaxMessages())
             .build();
     final GrpcCallContext callContext =
         GrpcCallContext.createDefault()
-            .withTimeout(Duration.ofSeconds(this.config.pullTimeoutSeconds()));
+            .withTimeout(Duration.ofMillis(Math.max(1L, deadline.toMillis())));
     final PullResponse response = subscriberStub.pullCallable().call(request, callContext);
     final int receivedCount = response.getReceivedMessagesCount();
     final List<PulledMessage> messages = new ArrayList<>(receivedCount);
@@ -227,7 +215,9 @@ public final class PubSubClient implements Closeable, Serializable {
       return;
     }
     ensureStarted();
-    retryPolicy.executeVoid("acknowledge", () -> acknowledgeRequest(ackIds));
+    for (List<String> chunk : chunks(ackIds)) {
+      retryPolicy.executeVoid("acknowledge", () -> acknowledgeRequest(chunk));
+    }
   }
 
   private void acknowledgeRequest(List<String> ackIds) {
@@ -244,7 +234,9 @@ public final class PubSubClient implements Closeable, Serializable {
       return;
     }
     ensureStarted();
-    retryPolicy.executeVoid("nack", () -> nackRequest(ackIds));
+    for (List<String> chunk : chunks(ackIds)) {
+      retryPolicy.executeVoid("nack", () -> nackRequest(chunk));
+    }
   }
 
   private void nackRequest(List<String> ackIds) {
@@ -262,8 +254,19 @@ public final class PubSubClient implements Closeable, Serializable {
       return;
     }
     ensureStarted();
-    retryPolicy.executeVoid(
-        "modifyAckDeadline", () -> extendDeadlineRequest(ackIds, deadlineSeconds));
+    for (List<String> chunk : chunks(ackIds)) {
+      retryPolicy.executeVoid(
+          "modifyAckDeadline", () -> extendDeadlineRequest(chunk, deadlineSeconds));
+    }
+  }
+
+  private List<List<String>> chunks(List<String> ackIds) {
+    List<List<String>> chunks = new ArrayList<>();
+    int size = this.config.pullMaxMessages();
+    for (int start = 0; start < ackIds.size(); start += size) {
+      chunks.add(ackIds.subList(start, Math.min(start + size, ackIds.size())));
+    }
+    return chunks;
   }
 
   private void extendDeadlineRequest(List<String> ackIds, int deadlineSeconds) {

@@ -4,6 +4,7 @@ import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.streaming.StreamingQuery;
+import org.apache.spark.sql.streaming.Trigger;
 
 /**
  * Minimal Structured Streaming example.
@@ -39,15 +40,17 @@ public final class JavaStructuredStreamingExample {
             .option("projectId", projectId)
             .option("subscription", subscription)
             .option("ackMode", "afterCommit")
+            .option("gatherMode", "batch")
             .load();
 
     StreamingQuery query =
         messages
-            .selectExpr("messageId", "CAST(data AS STRING) AS payload", "publishTime")
+            .drop("ackId")
             .writeStream()
             .format("json")
             .option("path", output)
             .option("checkpointLocation", checkpoint)
+            .trigger(Trigger.ProcessingTime("1 second"))
             .start();
 
     query.awaitTermination();

@@ -5,12 +5,16 @@ import io.github.juarezr.spark.pubsub.client.AckLeaseWatchdog;
 import io.github.juarezr.spark.pubsub.client.PubSubClient;
 import io.github.juarezr.spark.pubsub.client.PulledMessage;
 import io.github.juarezr.spark.pubsub.config.AckMode;
+import io.github.juarezr.spark.pubsub.config.GatherMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.spark.sql.connector.read.InputPartition;
@@ -39,12 +43,23 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
   private final AtomicLong lastReportedRetryAttempts = new AtomicLong(0);
   private final int numPartitions;
   private volatile PubSubOffset lastProduced;
+  private volatile PubSubOffset currentOffset = PubSubOffset.empty(-1L);
+  private final ConcurrentMap<Long, List<PulledMessage>> messagesByBatch =
+      new ConcurrentHashMap<>();
 
   PubSubMicroBatchStream(PubSubConfig config, int numPartitions) {
+    this(config, numPartitions, new PubSubClient(config), true);
+  }
+
+  PubSubMicroBatchStream(
+      PubSubConfig config, int numPartitions, PubSubClient client, boolean startClient) {
     this.config = config;
-    this.client = new PubSubClient(config);
+    this.client = client;
     this.ackCoordinator = new AckCoordinator(config.ackMode());
     this.numPartitions = Math.max(1, numPartitions);
+    if (!startClient) {
+      return;
+    }
     try {
       this.client.start();
     } catch (IOException e) {
@@ -54,25 +69,38 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
 
   @Override
   public Offset latestOffset() {
-    if (config.ackMode() == AckMode.AFTER_COMMIT) {
-      leaseWatchdog.stop();
-      abandon(client, lastProduced);
-      lastProduced = null;
+    if (lastProduced != null) {
+      return lastProduced;
     }
-    List<PulledMessage> pulled = client.pull();
+    List<PulledMessage> pulled = gatherMessages();
+    if (pulled.isEmpty()) {
+      lastPullMessageCount.set(0);
+      lastPullPayloadBytes.set(0);
+      return currentOffset;
+    }
     long batchId = nextBatchId.getAndIncrement();
-    PubSubOffset offset = new PubSubOffset(batchId, pulled);
+    PubSubOffset offset = new PubSubOffset(batchId);
     String batchKey = Long.toString(batchId);
-    ackCoordinator.registerBatch(batchKey, pulled);
-    if (config.ackMode() == AckMode.EARLY) {
-      ackCoordinator.onPulled(client, batchKey);
-    } else if (!pulled.isEmpty()) {
+    messagesByBatch.put(batchId, pulled);
+    try {
+      if (config.ackMode() == AckMode.AFTER_COMMIT) {
+        ackCoordinator.registerBatch(batchKey, pulled);
+      } else if (config.gatherMode() == GatherMode.PULL) {
+        ackCoordinator.registerBatch(batchKey, pulled);
+        ackCoordinator.onPulled(client, batchKey);
+      }
+    } catch (RuntimeException e) {
+      ackCoordinator.abort(client, batchKey);
+      messagesByBatch.remove(batchId);
+      throw e;
+    }
+    if (config.ackMode() == AckMode.AFTER_COMMIT && config.gatherMode() == GatherMode.PULL) {
       try {
-        client.extendAckDeadline(offset.ackIds(), config.ackDeadlineSeconds());
+        client.extendAckDeadline(ackIds(pulled), ackDeadlineSeconds());
       } catch (RuntimeException e) {
         LOG.warn("Failed to extend ack deadline for batch {}", batchId, e);
       }
-      leaseWatchdog.start(client, offset.ackIds(), config.ackDeadlineSeconds());
+      leaseWatchdog.start(client, ackIds(pulled), ackDeadlineSeconds());
     }
     lastProduced = offset;
     final int pulledSize = pulled.size();
@@ -81,6 +109,82 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
     lastPullPayloadBytes.set(pulledBytes);
     LOG.debug("latestOffset batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
     return offset;
+  }
+
+  private List<PulledMessage> gatherMessages() {
+    List<PulledMessage> messages = new ArrayList<>();
+    if (config.gatherMode() == GatherMode.PULL) {
+      messages.addAll(client.pull(config.pullDeadline()));
+      return messages;
+    }
+
+    long deadlineNanos = System.nanoTime() + config.batchTime().toNanos();
+    long payloadBytes = 0L;
+    boolean firstPull = true;
+    try {
+      while (System.nanoTime() < deadlineNanos) {
+        Duration remaining = Duration.ofNanos(Math.max(1L, deadlineNanos - System.nanoTime()));
+        Duration rpcDeadline =
+            firstPull
+                ? min(config.pullDeadline(), remaining)
+                : min(Duration.ofSeconds(1), remaining);
+        List<PulledMessage> pulled = client.pull(rpcDeadline);
+        firstPull = false;
+        if (!pulled.isEmpty()) {
+          messages.addAll(pulled);
+          payloadBytes += pulled.stream().mapToLong(m -> m.data().length).sum();
+          if (config.ackMode() == AckMode.EARLY) {
+            client.acknowledge(ackIds(pulled));
+            client.releaseMessages(pulled);
+          } else {
+            try {
+              client.extendAckDeadline(ackIds(pulled), ackDeadlineSeconds());
+            } catch (RuntimeException e) {
+              LOG.warn("Failed to extend initial ack deadline while gathering", e);
+            }
+            List<String> ids = ackIds(messages);
+            if (messages.size() == pulled.size()) {
+              leaseWatchdog.start(client, ids, ackDeadlineSeconds());
+            } else {
+              leaseWatchdog.update(ids);
+            }
+          }
+        }
+        if ((config.batchSize() > 0 && payloadBytes >= config.batchSize())
+            || (config.batchCount() > 0 && messages.size() >= config.batchCount())) {
+          break;
+        }
+      }
+    } catch (RuntimeException e) {
+      leaseWatchdog.stop();
+      if (config.ackMode() == AckMode.AFTER_COMMIT && !messages.isEmpty()) {
+        try {
+          client.nack(ackIds(messages));
+        } catch (RuntimeException nackError) {
+          LOG.warn("Failed to nack messages after gather failure", nackError);
+        } finally {
+          client.releaseMessages(messages);
+        }
+      }
+      throw e;
+    }
+    return messages;
+  }
+
+  private static Duration min(Duration left, Duration right) {
+    return left.compareTo(right) <= 0 ? left : right;
+  }
+
+  private int ackDeadlineSeconds() {
+    return Math.toIntExact(config.ackDeadline().getSeconds());
+  }
+
+  private static List<String> ackIds(List<PulledMessage> messages) {
+    List<String> ids = new ArrayList<>(messages.size());
+    for (PulledMessage message : messages) {
+      ids.add(message.ackId());
+    }
+    return ids;
   }
 
   @Override
@@ -104,7 +208,7 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
   @Override
   public InputPartition[] planInputPartitions(Offset start, Offset end) {
     PubSubOffset endOffset = (PubSubOffset) end;
-    List<PulledMessage> messages = endOffset.messages();
+    List<PulledMessage> messages = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
     if (messages.isEmpty()) {
       return new InputPartition[] {new PubSubInputPartition(messages)};
     }
@@ -130,13 +234,14 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
 
   @Override
   public Offset initialOffset() {
-    return PubSubOffset.empty(-1L);
+    return currentOffset;
   }
 
   @Override
   public Offset deserializeOffset(String json) {
     PubSubOffset offset = PubSubOffset.fromJson(json);
     nextBatchId.updateAndGet(v -> Math.max(v, offset.batchId() + 1));
+    currentOffset = offset;
     return offset;
   }
 
@@ -146,7 +251,8 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
     String batchKey = Long.toString(endOffset.batchId());
     leaseWatchdog.stop();
     if (config.ackMode() == AckMode.AFTER_COMMIT) {
-      List<String> ackIds = endOffset.ackIds();
+      List<PulledMessage> messages = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
+      List<String> ackIds = ackIds(messages);
       try {
         if (!ackIds.isEmpty()) {
           try {
@@ -166,34 +272,24 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
         }
       } finally {
         if (!ackIds.isEmpty()) {
-          client.releaseMessages(endOffset.messages());
+          client.releaseMessages(messages);
         }
         ackCoordinator.clear();
+        messagesByBatch.remove(endOffset.batchId());
         if (lastProduced != null && lastProduced.batchId() == endOffset.batchId()) {
           lastProduced = null;
         }
       }
+      currentOffset = endOffset;
     } else {
       ackCoordinator.commit(client, batchKey);
+      messagesByBatch.remove(endOffset.batchId());
+      currentOffset = endOffset;
+      if (lastProduced != null && lastProduced.batchId() == endOffset.batchId()) {
+        lastProduced = null;
+      }
     }
     LOG.debug("Committed offset batchId={}", endOffset.batchId());
-  }
-
-  static void abandon(final PubSubClient client, final PubSubOffset offset) {
-    if (client == null || offset == null || offset.ackIds().isEmpty()) {
-      return;
-    }
-    List<String> ackIds = offset.ackIds();
-    try {
-      client.nack(ackIds);
-    } catch (RuntimeException e) {
-      LOG.warn(
-          "Failed to nack {} messages for abandoned batch {}; they will redeliver on deadline",
-          ackIds.size(),
-          offset.batchId(),
-          e);
-    }
-    client.releaseMessages(offset.messages());
   }
 
   @Override
@@ -202,13 +298,18 @@ final class PubSubMicroBatchStream implements MicroBatchStream, ReportsSourceMet
       leaseWatchdog.stop();
       if (lastProduced != null
           && config.ackMode() == AckMode.AFTER_COMMIT
-          && !lastProduced.ackIds().isEmpty()) {
+          && !ackCoordinator.messagesForBatch(Long.toString(lastProduced.batchId())).isEmpty()) {
+        List<PulledMessage> messages =
+            ackCoordinator.messagesForBatch(Long.toString(lastProduced.batchId()));
         LOG.info(
             "Stopping stream; {} uncommitted messages will redeliver if not committed",
-            lastProduced.ackIds().size());
+            messages.size());
+        ackCoordinator.abort(client, Long.toString(lastProduced.batchId()));
+        messagesByBatch.remove(lastProduced.batchId());
       }
     } finally {
       ackCoordinator.clear();
+      messagesByBatch.clear();
       client.resetOutstandingBytes();
       client.close();
     }
