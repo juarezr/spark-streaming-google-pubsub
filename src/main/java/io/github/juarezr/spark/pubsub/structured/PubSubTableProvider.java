@@ -21,13 +21,16 @@ public final class PubSubTableProvider implements TableProvider, DataSourceRegis
 
   @Override
   public StructType inferSchema(CaseInsensitiveStringMap options) {
-    return PubSubSchema.SCHEMA;
+    return PubSubSchema.inferTableSchema(PubSubConfig.fromOptions(options.asCaseSensitiveMap()));
   }
 
   @Override
   public Table getTable(
       StructType schema, Transform[] partitioning, Map<String, String> properties) {
-    return new PubSubTable(PubSubConfig.fromOptions(properties));
+    PubSubConfig config = PubSubConfig.fromOptions(properties);
+    StructType table =
+        schema != null && schema.length() > 0 ? schema : PubSubSchema.inferTableSchema(config);
+    return new PubSubTable(config, table);
   }
 
   @Override

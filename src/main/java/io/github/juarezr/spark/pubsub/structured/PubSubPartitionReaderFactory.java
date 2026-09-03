@@ -14,7 +14,7 @@ final class PubSubPartitionReaderFactory implements PartitionReaderFactory {
   private final StructType readSchema;
 
   PubSubPartitionReaderFactory(StructType readSchema) {
-    this.readSchema = readSchema == null ? PubSubSchema.SCHEMA : readSchema;
+    this.readSchema = readSchema;
   }
 
   @Override

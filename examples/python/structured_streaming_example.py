@@ -21,8 +21,7 @@ messages = (
 )
 
 query = (
-    messages.drop("ackId")
-    .writeStream.format("console")
+    messages.writeStream.format("console")
     .option("truncate", "false")
     .option("checkpointLocation", "/tmp/pubsub-pyspark-checkpoint")
     .trigger(Trigger.ProcessingTime("1 second"))

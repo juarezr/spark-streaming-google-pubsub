@@ -35,23 +35,49 @@ You can build locally with `mvn package`, or find them attached to [GitHub Relea
 
 ### Schema (Structured Streaming)
 
-| Column        | Type                 | Description                                 |
-|---------------|:---------------------|:--------------------------------------------|
-| `messageId`   | string               | Pub/Sub message id                          |
-| `data`        | binary               | Payload bytes                               |
-| `attributes`  | `map<string,string>` | Attributes                                  |
-| `publishTime` | timestamp            | Publish time                                |
-| `orderingKey` | string               | Ordering key (may be empty)                 |
-| `ackId`       | string               | Delivery token; normally drop before writing |
+`schemaMode` controls `SELECT *`. Default is `basic`. Names are lowercase.
 
-Spark projects unused envelope columns away. The reader emits only the columns the query
-requests, in that order.
+| `schemaMode` | Table columns |
+|:-------------|:--------------|
+| `raw` | `body` (binary) |
+| `basic` (default) | `body`, `messageid`, `publishtime` |
+| `slim` | `body`, `messageid`, `publishtime`, `orderingkey` |
+| `dynamic` | fields from the topic Avro schema (JSON encoding only) |
+| `mixed` | topic Avro fields plus `messageid`, `publishtime` |
 
-`publishTime` is event time. Use it for watermarks:
+`metadataMode` adds opt-in columns that are **not** in `SELECT *`. Users must name them. A metadata
+name that already exists on the table is omitted (no duplicate columns).
+
+| `metadataMode` | Candidate columns (then minus table names) |
+|:---------------|:-------------------------------------------|
+| `none` (default) | (none) |
+| `basic` | `messageid`, `publishtime` |
+| `slim` | `messageid`, `publishtime`, `orderingkey`, `ackid` |
+| `full` | same as `slim` plus `attributes` (`map<string,string>`) |
+
+`ackid` is never a table column. Spark projects unused columns away; the reader emits only what the
+query requests. After subtract, some combinations leave no metadata columns; that is legal:
+
+| `schemaMode` | `metadataMode` | Leftover metadata |
+|:-------------|:---------------|:------------------|
+| `basic` | `basic` | (none) |
+| `mixed` | `basic` | (none) |
+| `slim` | `slim` | `ackid` |
+| `dynamic` | `basic` | `messageid`, `publishtime` |
+
+`publishtime` is event time. With `schemaMode=basic` (default), `slim`, or `mixed`:
 
 ```scala
-.withWatermark("publishTime", "10 minutes")
+.withWatermark("publishtime", "10 minutes")
 ```
+
+For `raw` or `dynamic`, set `metadataMode=basic` (or higher) and select `publishtime` first.
+
+`schemaMode=dynamic` and `mixed` fetch the topic schema (JSON encoding + Avro type only). Grant
+`pubsub.schemas.get` and either `pubsub.topics.get` or `pubsub.subscriptions.get` (if `topic` is
+omitted). BINARY and Protocol Buffer schemas fail fast. A user-supplied
+`readStream.schema(...)` becomes the table schema in every mode; extra fields are JSON-decoded
+from `body`.
 
 ### How it works
 
@@ -122,6 +148,9 @@ and `g` use multiples of 1024.
 | `batchSize` | `128m` | Maximum gathered payload bytes; blank/0 disables. Effective cap is the min of this and Spark `maxBytesPerTrigger` (Spark 4+) |
 | `batchCount` | | Maximum gathered message count; blank/0 disables. Effective cap is the min of this and Spark `maxRowsPerTrigger` |
 | `numWriters` | `1` | Spark task slices; integer ≥1 or `auto` for driver CPU count |
+| `topic` | subscription's topic | Topic id or full resource name; used by `schemaMode=dynamic`/`mixed` to skip `GetSubscription` |
+| `schemaMode` | `basic` | `raw`, `basic`, `slim`, `dynamic`, or `mixed` |
+| `metadataMode` | `none` | `none`, `basic`, `slim`, or `full`. Metadata never repeats a table field |
 | `emulatorHost` | | Emulator address such as `localhost:8085` |
 
 Pub/Sub seek timestamps represent UTC instants. A local wall-clock value must include its offset,
@@ -150,10 +179,10 @@ Dataset<Row> messages = spark.readStream()
     .option("subscription", "my-subscription")
     .option("ackMode", "afterCommit")
     .option("gatherMode", "batch")
+    .option("schemaMode", "basic")
     .load();
 
 messages
-    .drop("ackId")
     .writeStream()
     .format("parquet")
     .trigger(Trigger.ProcessingTime("1 second"))
@@ -176,8 +205,8 @@ messages = (
     .option("subscription", "my-subscription")
     .option("ackMode", "afterCommit")
     .option("gatherMode", "batch")
+    .option("schemaMode", "mixed")
     .load()
-    .drop("ackId")
 )
 ```
 
@@ -247,7 +276,7 @@ This connector is a **read-only Structured Streaming (micro-batch)** source. The
   are implemented; AvailableNow still is not.
 - **Continuous Processing** — experimental; Spark recommends Real-time Mode instead. Same lease-model mismatch.
 - **Streaming sink and batch `spark.read`** — a subscription is a queue, not a table. Rewind/replay uses explicit `seek` / snapshot **options**, not a batch scan.
-- **SQL filter pushdown that seeks** — a `WHERE publishTime >= …` must not rewind a **shared** subscription. Filter on attributes with a GCP subscription filter; rewind with explicit `seek`.
+- **SQL filter pushdown that seeks** — a `WHERE publishtime >= …` must not rewind a **shared** subscription. Filter on attributes with a GCP subscription filter; rewind with explicit `seek`.
 
 ## Build and test locally
 

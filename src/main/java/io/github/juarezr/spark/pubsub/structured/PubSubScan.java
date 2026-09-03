@@ -12,7 +12,7 @@ final class PubSubScan implements Scan {
 
   PubSubScan(PubSubConfig config, StructType readSchema) {
     this.config = config;
-    this.readSchema = readSchema == null ? PubSubSchema.SCHEMA : readSchema;
+    this.readSchema = readSchema;
   }
 
   @Override

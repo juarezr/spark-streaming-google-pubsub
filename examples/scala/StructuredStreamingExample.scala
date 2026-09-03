@@ -15,8 +15,10 @@ val messages = spark.readStream
   .option("gatherMode", "batch")
   .load()
 
+// Default schemaMode=basic: body, messageid, publishtime. Watermark on SELECT *:
+// messages.withWatermark("publishtime", "10 minutes")
+
 val query = messages
-  .drop("ackId")
   .writeStream
   .format("console")
   .option("truncate", "false")

@@ -50,7 +50,7 @@ final class PubSubMicroBatchStream
       new ConcurrentHashMap<>();
 
   PubSubMicroBatchStream(PubSubConfig config, int numPartitions) {
-    this(config, numPartitions, PubSubSchema.SCHEMA);
+    this(config, numPartitions, PubSubSchema.tableSchema(config, null));
   }
 
   PubSubMicroBatchStream(PubSubConfig config, int numPartitions, StructType readSchema) {
@@ -59,7 +59,7 @@ final class PubSubMicroBatchStream
 
   PubSubMicroBatchStream(
       PubSubConfig config, int numPartitions, PubSubClient client, boolean startClient) {
-    this(config, numPartitions, client, startClient, PubSubSchema.SCHEMA);
+    this(config, numPartitions, client, startClient, PubSubSchema.tableSchema(config, null));
   }
 
   PubSubMicroBatchStream(
@@ -69,7 +69,7 @@ final class PubSubMicroBatchStream
       boolean startClient,
       StructType readSchema) {
     this.config = config;
-    this.readSchema = readSchema == null ? PubSubSchema.SCHEMA : readSchema;
+    this.readSchema = readSchema == null ? PubSubSchema.tableSchema(config, null) : readSchema;
     this.client = client;
     this.ackCoordinator = new AckCoordinator(config.ackMode());
     this.numPartitions = Math.max(1, numPartitions);

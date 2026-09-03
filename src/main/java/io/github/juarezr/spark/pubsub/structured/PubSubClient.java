@@ -93,7 +93,7 @@ final class PubSubClient implements Closeable, Serializable {
     try (PubSubEmulator adminEmulator =
         this.config.emulatorHost().map(PubSubEmulator::new).orElse(null)) {
       if (adminEmulator != null) {
-        adminEmulator.configureAdmin(builder);
+        adminEmulator.configureSubscriptionAdmin(builder);
       } else {
         builder.setCredentialsProvider(
             FixedCredentialsProvider.create(this.credentialsProvider.getCredentials()));

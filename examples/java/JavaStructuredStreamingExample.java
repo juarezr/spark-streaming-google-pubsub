@@ -45,7 +45,6 @@ public final class JavaStructuredStreamingExample {
 
     StreamingQuery query =
         messages
-            .drop("ackId")
             .writeStream()
             .format("json")
             .option("path", output)
