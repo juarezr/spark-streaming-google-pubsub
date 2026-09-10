@@ -46,6 +46,7 @@ final class PubSubClient implements Closeable, Serializable {
   private transient SubscriberStub subscriberStub;
   private transient AtomicLong outstandingBytes;
   private transient boolean seekApplied;
+  private final AtomicLong lastSeenNewestPublishMillis = new AtomicLong(Long.MIN_VALUE);
 
   PubSubClient(PubSubConfig config) {
     this(
@@ -59,6 +60,7 @@ final class PubSubClient implements Closeable, Serializable {
     this.config = config;
     this.credentialsProvider = credentialsProvider;
     this.retryPolicy = retryPolicy;
+    this.retryPolicy.lastPublishTime(this.lastSeenNewestPublishMillis::get);
   }
 
   synchronized void start() throws IOException {
@@ -205,6 +207,10 @@ final class PubSubClient implements Closeable, Serializable {
           new PulledMessage(messageId, data, attributes, publishMillis, orderingKey, ackId);
       messages.add(converted);
     }
+    final PublishTimeWindow window = PublishTimeWindow.of(messages);
+    if (window != null) {
+      this.lastSeenNewestPublishMillis.set(window.newestMillis());
+    }
     return messages;
   }
 
@@ -286,5 +292,10 @@ final class PubSubClient implements Closeable, Serializable {
 
   long retryAttempts() {
     return retryPolicy.retryAttempts();
+  }
+
+  /** Newest publish time from the last non-empty pull, or {@link Long#MIN_VALUE} if none. */
+  long lastSeenNewestPublishMillis() {
+    return lastSeenNewestPublishMillis.get();
   }
 }

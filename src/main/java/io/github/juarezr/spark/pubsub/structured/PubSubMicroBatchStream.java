@@ -46,6 +46,9 @@ final class PubSubMicroBatchStream
   private final int numPartitions;
   private volatile PubSubOffset lastProduced;
   private volatile PubSubOffset currentOffset = PubSubOffset.empty(-1L);
+  private volatile boolean firstBatchLogged;
+  private volatile Long lastGatheredBatchId;
+  private volatile PublishTimeWindow lastGatheredWindow;
   private final ConcurrentMap<Long, List<PulledMessage>> messagesByBatch =
       new ConcurrentHashMap<>();
 
@@ -149,6 +152,7 @@ final class PubSubMicroBatchStream
     lastPullPayloadBytes.set(pulledBytes);
     lastPullMessageAgeMs =
         PubSubSourceMetrics.newestMessageAgeMs(pulled, System.currentTimeMillis());
+    retainGatheredWindow(batchId, pulled);
     LOG.debug("latestOffset batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
     return offset;
   }
@@ -337,23 +341,80 @@ final class PubSubMicroBatchStream
   public void stop() {
     try {
       leaseWatchdog.stop();
+      int uncommitted = 0;
       if (lastProduced != null && config.ackMode() == AckMode.AFTER_COMMIT) {
         String batchKey = Long.toString(lastProduced.batchId());
         List<PulledMessage> messages = ackCoordinator.messagesForBatch(batchKey);
         if (!messages.isEmpty()) {
-          LOG.info(
-              "Stopping stream; {} uncommitted messages will redeliver if not committed",
-              messages.size());
+          uncommitted = messages.size();
           ackCoordinator.abort(client, batchKey);
           messagesByBatch.remove(lastProduced.batchId());
         }
       }
+      logStop(uncommitted);
     } finally {
       ackCoordinator.clear();
       messagesByBatch.clear();
       client.resetOutstandingBytes();
       client.close();
     }
+  }
+
+  private void retainGatheredWindow(long batchId, List<PulledMessage> pulled) {
+    PublishTimeWindow window = PublishTimeWindow.of(pulled);
+    lastGatheredBatchId = batchId;
+    lastGatheredWindow = window;
+    if (firstBatchLogged || window == null) {
+      return;
+    }
+    firstBatchLogged = true;
+    long now = System.currentTimeMillis();
+    LOG.info(
+        "First batch batchId={} messages={} oldestPublishTime={} newestPublishTime={} newestAgeMs={}",
+        batchId,
+        window.messageCount(),
+        window.oldestIso(),
+        window.newestIso(),
+        window.newestAgeMs(now));
+  }
+
+  private void logStop(int uncommitted) {
+    PublishTimeWindow window = lastGatheredWindow;
+    if (window == null) {
+      LOG.info("Stopping stream; no messages gathered");
+      return;
+    }
+    long now = System.currentTimeMillis();
+    if (uncommitted > 0) {
+      LOG.info(
+          "Stopping stream; last batch batchId={} messages={} oldestPublishTime={} newestPublishTime={} newestAgeMs={}; {} uncommitted messages will redeliver if not committed",
+          lastGatheredBatchId,
+          window.messageCount(),
+          window.oldestIso(),
+          window.newestIso(),
+          window.newestAgeMs(now),
+          uncommitted);
+      return;
+    }
+    LOG.info(
+        "Stopping stream; last batch batchId={} messages={} oldestPublishTime={} newestPublishTime={} newestAgeMs={}",
+        lastGatheredBatchId,
+        window.messageCount(),
+        window.oldestIso(),
+        window.newestIso(),
+        window.newestAgeMs(now));
+  }
+
+  PublishTimeWindow lastGatheredWindow() {
+    return lastGatheredWindow;
+  }
+
+  boolean firstBatchLogged() {
+    return firstBatchLogged;
+  }
+
+  Long lastGatheredBatchId() {
+    return lastGatheredBatchId;
   }
 
   private void finishBatch(long batchId) {
