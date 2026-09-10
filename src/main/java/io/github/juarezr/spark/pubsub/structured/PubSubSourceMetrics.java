@@ -50,14 +50,8 @@ final class PubSubSourceMetrics {
 
   /** Age of the newest publish time in the gather, clamped at 0 for clock skew. */
   static Long newestMessageAgeMs(List<PulledMessage> messages, long nowMillis) {
-    if (messages == null || messages.isEmpty()) {
-      return null;
-    }
-    long newestPublishMillis = Long.MIN_VALUE;
-    for (PulledMessage message : messages) {
-      newestPublishMillis = Math.max(newestPublishMillis, message.publishTimeMillis());
-    }
-    return Math.max(0L, nowMillis - newestPublishMillis);
+    PublishTimeWindow window = PublishTimeWindow.of(messages);
+    return window == null ? null : window.newestAgeMs(nowMillis);
   }
 
   /** Retries since the last progress report. {@code total} is the lifetime counter. */

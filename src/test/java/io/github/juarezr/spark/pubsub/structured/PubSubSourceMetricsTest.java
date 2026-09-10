@@ -76,4 +76,23 @@ class PubSubSourceMetricsTest {
     assertNull(PubSubSourceMetrics.newestMessageAgeMs(List.of(), 5_000L));
     assertNull(PubSubSourceMetrics.newestMessageAgeMs(null, 5_000L));
   }
+
+  @Test
+  void publishTimeWindowOldestNewestAndIso() {
+    PulledMessage older =
+        new PulledMessage("old", new byte[1], Collections.emptyMap(), 1_000L, "", "ack-old");
+    PulledMessage newer =
+        new PulledMessage("new", new byte[1], Collections.emptyMap(), 4_000L, "key", "ack-new");
+    PublishTimeWindow window = PublishTimeWindow.of(List.of(older, newer));
+    assertEquals(1_000L, window.oldestMillis());
+    assertEquals(4_000L, window.newestMillis());
+    assertEquals(2, window.messageCount());
+    assertEquals(1_000L, window.newestAgeMs(5_000L));
+    assertEquals("1970-01-01T00:00:01Z", window.oldestIso());
+    assertEquals("1970-01-01T00:00:04Z", window.newestIso());
+    assertEquals("none", PublishTimeWindow.formatIso((Long) null));
+    assertEquals("none", PublishTimeWindow.formatIso(Long.MIN_VALUE));
+    assertNull(PublishTimeWindow.of(List.of()));
+    assertNull(PublishTimeWindow.of(null));
+  }
 }

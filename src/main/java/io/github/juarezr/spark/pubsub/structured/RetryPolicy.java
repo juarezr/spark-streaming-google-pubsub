@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -13,13 +14,14 @@ final class RetryPolicy {
   private static final Logger LOG = LoggerFactory.getLogger(RetryPolicy.class);
 
   private static final String FAILURE_ON_ATTEMPT_MSG =
-      "Transient failure on {} (attempt {}/{}): {}. Retrying in {} ms";
+      "Transient failure on {} (attempt {}/{}): {}. Retrying in {} ms. lastPublishTime={}";
 
   private final long initialBackoffMs;
   private final long maxBackoffMs;
   private final int maxAttempts;
   private final long maxRetryTimeMs;
   private final AtomicLong retryAttempts;
+  private LongSupplier lastPublishTimeMillis = () -> Long.MIN_VALUE;
 
   RetryPolicy(long initialBackoffMs, long maxBackoffMs, int maxAttempts) {
     this(initialBackoffMs, maxBackoffMs, maxAttempts, Long.MAX_VALUE);
@@ -35,6 +37,12 @@ final class RetryPolicy {
 
   static RetryPolicy defaults(Duration maxRetryTime) {
     return new RetryPolicy(100L, 10_000L, 1000, maxRetryTime.toMillis());
+  }
+
+  /** Last-known newest publish time for retry warnings; {@link Long#MIN_VALUE} means none. */
+  void lastPublishTime(LongSupplier lastPublishTimeMillis) {
+    this.lastPublishTimeMillis =
+        lastPublishTimeMillis == null ? () -> Long.MIN_VALUE : lastPublishTimeMillis;
   }
 
   /** Lifetime count of retryable failures that slept and retried. Resets with this instance. */
@@ -70,7 +78,15 @@ final class RetryPolicy {
               suppressedWarnings == 0
                   ? e.toString()
                   : e + " (" + suppressedWarnings + " retry warnings suppressed)";
-          LOG.warn(FAILURE_ON_ATTEMPT_MSG, operation, attempt, this.maxAttempts, failure, sleep);
+          String lastTime = PublishTimeWindow.formatIso(this.lastPublishTimeMillis.getAsLong());
+          LOG.warn(
+              FAILURE_ON_ATTEMPT_MSG,
+              operation,
+              attempt,
+              this.maxAttempts,
+              failure,
+              sleep,
+              lastTime);
           lastWarnAt = elapsedMs;
           suppressedWarnings = 0;
         } else {

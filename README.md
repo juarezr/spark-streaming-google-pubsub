@@ -263,7 +263,7 @@ same `.format("google-pubsub")` options as above. Use a durable `checkpointLocat
 - A replaced or stopped uncommitted batch is nacked so it can redeliver promptly.
 - Acknowledgement, nack, and lease-extension requests are chunked.
 - Transient failures use exponential backoff for at most `maxRetryTime`. Retry warnings are
-  rate-limited while counters continue to increase.
+  rate-limited (at most every 15s) while counters continue to increase.
 - Checkpoint offsets contain only a synthetic batch id. Payloads and ack ids stay in driver memory.
   After driver failure, unacknowledged messages redeliver from Pub/Sub (at-least-once).
 - With `seek=none` (default), restart never rewinds the subscription.

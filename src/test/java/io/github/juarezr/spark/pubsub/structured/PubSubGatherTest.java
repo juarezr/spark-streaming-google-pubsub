@@ -1,6 +1,7 @@
 package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -42,7 +43,35 @@ class PubSubGatherTest {
     assertEquals(initial, latest);
     assertEquals(
         "-", stream.metrics(Optional.empty()).get(PubSubSourceMetrics.LAST_PULL_MESSAGE_AGE_MS));
+    assertFalse(stream.firstBatchLogged());
+    assertNull(stream.lastGatheredWindow());
     verify(client, times(1)).pull(any(Duration.class), anyInt());
+  }
+
+  @Test
+  void firstNonEmptyGatherRecordsPublishTimeWindow() {
+    PubSubClient client = mock(PubSubClient.class);
+    PulledMessage older =
+        new PulledMessage("old", new byte[] {1}, Collections.emptyMap(), 1_000L, "", "ack-old");
+    PulledMessage newer =
+        new PulledMessage("new", new byte[] {1}, Collections.emptyMap(), 4_000L, "", "ack-new");
+    when(client.pull(any(Duration.class), anyInt())).thenReturn(List.of(older, newer));
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    stream.latestOffset();
+    PublishTimeWindow window = stream.lastGatheredWindow();
+
+    assertTrue(stream.firstBatchLogged());
+    assertEquals(0L, stream.lastGatheredBatchId());
+    assertEquals(1_000L, window.oldestMillis());
+    assertEquals(4_000L, window.newestMillis());
+    assertEquals(2, window.messageCount());
+
+    stream.commit(stream.reportLatestOffset());
+    assertEquals(1_000L, stream.lastGatheredWindow().oldestMillis());
+    assertEquals(4_000L, stream.lastGatheredWindow().newestMillis());
   }
 
   @Test
