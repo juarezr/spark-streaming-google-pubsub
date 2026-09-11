@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.util.Map;
+import org.apache.spark.sql.connector.catalog.CatalogV2Util;
 import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.types.DataTypes;
@@ -35,6 +36,6 @@ class PubSubTableProviderTest {
             });
     Table table =
         provider.getTable(user, new Transform[0], Map.of("projectId", "p", "subscription", "s"));
-    assertEquals(user, table.schema());
+    assertEquals(user, CatalogV2Util.v2ColumnsToStructType(table.columns()));
   }
 }

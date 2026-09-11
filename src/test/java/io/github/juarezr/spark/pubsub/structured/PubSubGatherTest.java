@@ -102,7 +102,9 @@ class PubSubGatherTest {
   void batchGatherUsesThreePullsToReachThreeThousandMessages() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.pull(any(Duration.class), anyInt()))
-        .thenReturn(messages(0, 1000), messages(1000, 1000), messages(2000, 1000));
+        .thenReturn(messages(0, 1000))
+        .thenReturn(messages(1000, 1000))
+        .thenReturn(messages(2000, 1000));
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
@@ -125,7 +127,9 @@ class PubSubGatherTest {
   void latestOffsetIsIdempotentUntilCommit() {
     PubSubClient client = mock(PubSubClient.class);
     List<PulledMessage> first = messages(0, 2);
-    when(client.pull(any(Duration.class), anyInt())).thenReturn(first, Collections.emptyList());
+    when(client.pull(any(Duration.class), anyInt()))
+        .thenReturn(first)
+        .thenReturn(Collections.emptyList());
     PubSubConfig config =
         PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
@@ -186,7 +190,9 @@ class PubSubGatherTest {
   void sparkMaxRowsCapsBelowBatchCount() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.pull(any(Duration.class), anyInt()))
-        .thenReturn(messages(0, 500), messages(500, 500), messages(1000, 500));
+        .thenReturn(messages(0, 500))
+        .thenReturn(messages(500, 500))
+        .thenReturn(messages(1000, 500));
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
@@ -261,7 +267,8 @@ class PubSubGatherTest {
   void batchGatherKeepsMessagesWhenFollowUpIsEmpty() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.pull(any(Duration.class), anyInt()))
-        .thenReturn(messages(0, 2), Collections.emptyList());
+        .thenReturn(messages(0, 2))
+        .thenReturn(Collections.emptyList());
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
@@ -282,7 +289,9 @@ class PubSubGatherTest {
   @Test
   void batchFollowUpPullUsesRemainingPullDeadline() {
     PubSubClient client = mock(PubSubClient.class);
-    when(client.pull(any(Duration.class), anyInt())).thenReturn(messages(0, 1), messages(1, 1));
+    when(client.pull(any(Duration.class), anyInt()))
+        .thenReturn(messages(0, 1))
+        .thenReturn(messages(1, 1));
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
