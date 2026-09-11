@@ -169,23 +169,18 @@ final class PubSubMicroBatchStream
 
     long deadlineNanos = System.nanoTime() + limits.waitTime().toNanos();
     long payloadBytes = 0L;
-    boolean firstPull = true;
     try {
       while (System.nanoTime() < deadlineNanos) {
         if (limits.reachedMax(messages.size(), payloadBytes)) {
           break;
         }
         Duration remaining = Duration.ofNanos(Math.max(1L, deadlineNanos - System.nanoTime()));
-        Duration rpcDeadline =
-            firstPull
-                ? min(config.pullDeadline(), remaining)
-                : min(Duration.ofSeconds(1), remaining);
+        final Duration rpcDeadline = min(config.pullDeadline(), remaining);
         int maxMessages = limits.messagesForNextPull(messages.size(), config.pullMaxMessages());
         if (maxMessages <= 0) {
           break;
         }
         List<PulledMessage> pulled = client.pull(rpcDeadline, maxMessages);
-        firstPull = false;
         if (!pulled.isEmpty()) {
           messages.addAll(pulled);
           payloadBytes += PulledMessage.payloadBytes(pulled);

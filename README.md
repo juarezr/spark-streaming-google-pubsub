@@ -124,9 +124,9 @@ The timing controls apply at different points:
 
 Spark trigger and `batchTime` are sequential waits. For example, a 10-second trigger plus a
 10-second gather can approach 20 seconds between batches. Prefer a short trigger and use
-`batchTime` to control grouping. In batch gathering, the effective Pull deadline is the smaller of
-`pullDeadline` and the remaining `batchTime`. `maxRetryTime` does not replace `pullDeadline`:
-an empty long-poll is normal, while retries only follow an RPC failure.
+`batchTime` to control grouping. In batch gathering, every Pull uses the smaller of `pullDeadline`
+and the remaining `batchTime`. A client `DEADLINE_EXCEEDED` on Pull is an empty long-poll, not a
+retried failure. `maxRetryTime` still applies to transient RPC errors such as `UNAVAILABLE`.
 
 `pullDeadline` bounds waiting **for** messages. `ackDeadline` bounds holding messages already
 delivered. The ack watchdog starts with the first non-empty Pull and renews leases during both

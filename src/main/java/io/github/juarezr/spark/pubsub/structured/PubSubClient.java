@@ -2,6 +2,7 @@ package io.github.juarezr.spark.pubsub.structured;
 
 import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.api.gax.grpc.GrpcCallContext;
+import com.google.api.gax.rpc.DeadlineExceededException;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
 import com.google.cloud.pubsub.v1.stub.GrpcSubscriberStub;
@@ -20,6 +21,7 @@ import io.github.juarezr.spark.pubsub.config.SeekMode;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.Serializable;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,7 +30,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.threeten.bp.Duration;
 
 /**
  * Thin wrapper around the Pub/Sub subscriber stub with pull/ack/nack, retries, and optional seek.
@@ -168,26 +169,34 @@ final class PubSubClient implements Closeable, Serializable {
     }
   }
 
-  List<PulledMessage> pull(java.time.Duration deadline) {
+  List<PulledMessage> pull(Duration deadline) {
     return pull(deadline, config.pullMaxMessages());
   }
 
-  List<PulledMessage> pull(java.time.Duration deadline, int maxMessages) {
+  List<PulledMessage> pull(Duration deadline, int maxMessages) {
     ensureStarted();
     final int capped = Math.max(1, Math.min(this.config.pullMaxMessages(), maxMessages));
     return retryPolicy.execute("pull", () -> pullMessagesFromSubscription(deadline, capped));
   }
 
-  private List<PulledMessage> pullMessagesFromSubscription(
-      java.time.Duration deadline, int maxMessages) {
+  private List<PulledMessage> pullMessagesFromSubscription(Duration deadline, int maxMessages) {
+    try {
+      return pullSubscriptionMessages(deadline, maxMessages);
+    } catch (DeadlineExceededException e) {
+      LOG.debug("Pull long-poll timed out after {}; treating as empty", deadline, e);
+      return List.of();
+    }
+  }
+
+  private List<PulledMessage> pullSubscriptionMessages(Duration deadline, int maxMessages) {
     final PullRequest request =
         PullRequest.newBuilder()
             .setSubscription(this.config.subscriptionPath())
             .setMaxMessages(maxMessages)
             .build();
+    final long deadline2 = Math.max(1L, deadline.toMillis());
     final GrpcCallContext callContext =
-        GrpcCallContext.createDefault()
-            .withTimeout(Duration.ofMillis(Math.max(1L, deadline.toMillis())));
+        GrpcCallContext.createDefault().withTimeoutDuration(Duration.ofMillis(deadline2));
     final PullResponse response = subscriberStub.pullCallable().call(request, callContext);
     final int receivedCount = response.getReceivedMessagesCount();
     final List<PulledMessage> messages = new ArrayList<>(receivedCount);
