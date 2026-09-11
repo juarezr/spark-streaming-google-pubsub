@@ -412,6 +412,11 @@ final class PubSubMicroBatchStream
     return lastGatheredBatchId;
   }
 
+  @Override
+  public String toString() {
+    return PubSubConfig.SHORT_NAME + ":" + config.subscriptionPath();
+  }
+
   private void finishBatch(long batchId) {
     messagesByBatch.remove(batchId);
     if (lastProduced != null && lastProduced.batchId() == batchId) {

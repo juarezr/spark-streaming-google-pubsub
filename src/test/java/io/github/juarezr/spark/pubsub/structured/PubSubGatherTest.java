@@ -324,6 +324,15 @@ class PubSubGatherTest {
     assertEquals(ReadLimit.maxRows(250), limit);
   }
 
+  @Test
+  void toStringUsesSubscriptionPath() {
+    PubSubConfig config = PubSubConfig.builder().projectId("p").subscription("s").build();
+    PubSubMicroBatchStream stream =
+        new PubSubMicroBatchStream(config, 1, mock(PubSubClient.class), false);
+
+    assertEquals("google-pubsub:projects/p/subscriptions/s", stream.toString());
+  }
+
   private static List<PulledMessage> messages(int start, int count) {
     List<PulledMessage> messages = new ArrayList<>(count);
     for (int i = start; i < start + count; i++) {

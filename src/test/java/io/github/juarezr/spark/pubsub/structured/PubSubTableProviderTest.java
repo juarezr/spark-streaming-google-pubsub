@@ -37,5 +37,8 @@ class PubSubTableProviderTest {
     Table table =
         provider.getTable(user, new Transform[0], Map.of("projectId", "p", "subscription", "s"));
     assertEquals(user, CatalogV2Util.v2ColumnsToStructType(table.columns()));
+    assertEquals("pubsub:projects/p/subscriptions/s", table.name());
+    assertEquals(table.name(), table.toString());
+    assertEquals("google-pubsub", provider.toString());
   }
 }

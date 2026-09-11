@@ -37,4 +37,9 @@ public final class PubSubTableProvider implements TableProvider, DataSourceRegis
   public boolean supportsExternalMetadata() {
     return true;
   }
+
+  @Override
+  public String toString() {
+    return shortName();
+  }
 }

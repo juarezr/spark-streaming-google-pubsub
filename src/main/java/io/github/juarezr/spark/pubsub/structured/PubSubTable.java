@@ -52,4 +52,9 @@ final class PubSubTable implements SupportsRead, SupportsMetadataColumns {
         options.isEmpty() ? config : PubSubConfig.fromOptions(options.asCaseSensitiveMap());
     return new PubSubScanBuilder(merged, tableSchema);
   }
+
+  @Override
+  public String toString() {
+    return name();
+  }
 }
