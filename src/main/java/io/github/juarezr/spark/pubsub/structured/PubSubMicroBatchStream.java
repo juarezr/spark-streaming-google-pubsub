@@ -101,16 +101,22 @@ final class PubSubMicroBatchStream
 
   @Override
   public Offset latestOffset() {
-    return latestOffset(AdmissionLimits.from(config, null), false);
+    return latestOffset(null, AdmissionLimits.from(config, null), false);
   }
 
   @Override
   public Offset latestOffset(Offset startOffset, ReadLimit limit) {
-    return latestOffset(AdmissionLimits.from(config, limit), true);
+    return latestOffset(startOffset, AdmissionLimits.from(config, limit), true);
   }
 
-  private Offset latestOffset(AdmissionLimits limits, boolean nullIfEmpty) {
-    if (lastProduced != null) {
+  /**
+   * Spark 3.5 commits batch N-1 only when constructing batch N. Returning the same {@code
+   * lastProduced} after Spark has already accepted it as {@code startOffset} makes {@code
+   * constructNextBatch} see no new data, so {@link #commit} never runs and the query idles while
+   * the watchdog renews the first batch.
+   */
+  private Offset latestOffset(Offset startOffset, AdmissionLimits limits, boolean nullIfEmpty) {
+    if (lastProduced != null && !startConsumed(startOffset, lastProduced)) {
       return lastProduced;
     }
     List<PulledMessage> pulled = gatherMessages(limits);
@@ -118,6 +124,9 @@ final class PubSubMicroBatchStream
       lastPullMessageCount.set(0);
       lastPullPayloadBytes.set(0);
       lastPullMessageAgeMs = null;
+      if (lastProduced != null && startConsumed(startOffset, lastProduced)) {
+        commit(lastProduced);
+      }
       return nullIfEmpty ? null : currentOffset;
     }
     long batchId = nextBatchId.getAndIncrement();
@@ -226,6 +235,18 @@ final class PubSubMicroBatchStream
 
   private static Duration min(Duration left, Duration right) {
     return left.compareTo(right) <= 0 ? left : right;
+  }
+
+  /** True when Spark already persisted {@code produced} as the start of the next range. */
+  static boolean startConsumed(Offset startOffset, PubSubOffset produced) {
+    if (startOffset == null || produced == null) {
+      return false;
+    }
+    final long startBatchId =
+        startOffset instanceof PubSubOffset
+            ? ((PubSubOffset) startOffset).batchId()
+            : PubSubOffset.fromJson(startOffset.json()).batchId();
+    return startBatchId >= produced.batchId();
   }
 
   private int ackDeadlineSeconds() {
