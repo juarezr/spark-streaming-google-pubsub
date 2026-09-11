@@ -26,6 +26,7 @@ import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.streaming.Offset;
 import org.apache.spark.sql.connector.read.streaming.ReadLimit;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class PubSubGatherTest {
 
@@ -234,6 +235,72 @@ class PubSubGatherTest {
 
     assertNull(latest);
     verify(client, atLeast(2)).pull(any(Duration.class), anyInt());
+  }
+
+  @Test
+  void idleBatchGatherKeepsTheCurrentOffset() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt())).thenReturn(Collections.emptyList());
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .batchTime(Duration.ofMillis(80))
+            .pullDeadline(Duration.ofMillis(20))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset initial = stream.initialOffset();
+    Offset latest = stream.latestOffset();
+
+    assertEquals(initial, latest);
+    verify(client, atLeast(1)).pull(any(Duration.class), anyInt());
+  }
+
+  @Test
+  void batchGatherKeepsMessagesWhenFollowUpIsEmpty() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt()))
+        .thenReturn(messages(0, 2), Collections.emptyList());
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.EARLY)
+            .batchCount(100)
+            .batchTime(Duration.ofMillis(80))
+            .pullDeadline(Duration.ofMillis(20))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset latest = stream.latestOffset();
+    InputPartition[] partitions = stream.planInputPartitions(stream.initialOffset(), latest);
+
+    assertEquals(2, ((PubSubInputPartition) partitions[0]).messages().size());
+  }
+
+  @Test
+  void batchFollowUpPullUsesRemainingPullDeadline() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt())).thenReturn(messages(0, 1), messages(1, 1));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.EARLY)
+            .batchCount(2)
+            .batchTime(Duration.ofSeconds(3))
+            .pullDeadline(Duration.ofSeconds(5))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    stream.latestOffset();
+
+    ArgumentCaptor<Duration> deadlines = ArgumentCaptor.forClass(Duration.class);
+    verify(client, times(2)).pull(deadlines.capture(), anyInt());
+    Duration followUp = deadlines.getAllValues().get(1);
+    assertTrue(followUp.compareTo(Duration.ofSeconds(1)) > 0);
+    assertTrue(followUp.compareTo(Duration.ofSeconds(5)) <= 0);
   }
 
   @Test
