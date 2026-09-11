@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,26 +34,34 @@ final class AckLeaseWatchdog implements AutoCloseable {
     this.ackIds = new ArrayList<>(ackIds);
     int intervalSeconds = extendIntervalSeconds(ackDeadlineSeconds);
     synchronized (lock) {
-      executor =
-          Executors.newSingleThreadScheduledExecutor(
-              r -> {
-                Thread t = new Thread(r, "pubsub-ack-lease");
-                t.setDaemon(true);
-                return t;
-              });
-      future =
-          executor.scheduleAtFixedRate(
-              () -> {
-                List<String> snapshot = this.ackIds;
-                try {
-                  client.extendAckDeadline(snapshot, ackDeadlineSeconds);
-                } catch (RuntimeException e) {
-                  LOG.warn("Failed to extend ack deadline for {} messages", snapshot.size(), e);
-                }
-              },
-              intervalSeconds,
-              intervalSeconds,
-              TimeUnit.SECONDS);
+      this.executor = Executors.newSingleThreadScheduledExecutor(newAckLeaseWatchdogFactory());
+      final Runnable extender = newExtendAckDeadlineFactory(client, ackDeadlineSeconds);
+      this.future =
+          this.executor.scheduleAtFixedRate(
+              extender, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
+    }
+  }
+
+  private ThreadFactory newAckLeaseWatchdogFactory() {
+    return r -> {
+      final Thread t = new Thread(r, "pubsub-ack-lease");
+      t.setDaemon(true);
+      return t;
+    };
+  }
+
+  private Runnable newExtendAckDeadlineFactory(PubSubClient client, int ackDeadlineSeconds) {
+    return () -> extendAckDeadlineBy(client, ackDeadlineSeconds);
+  }
+
+  private void extendAckDeadlineBy(PubSubClient client, int ackDeadlineSeconds) {
+    final List<String> snapshot = this.ackIds;
+    final int total = snapshot.size();
+    try {
+      client.extendAckDeadline(snapshot, ackDeadlineSeconds);
+      LOG.debug("WATCHDOG: Successfully extended ack deadline for {} messages", total);
+    } catch (RuntimeException e) {
+      LOG.warn("WATCHDOG: Failed to extend ack deadline for {} messages", total, e.getMessage());
     }
   }
 
