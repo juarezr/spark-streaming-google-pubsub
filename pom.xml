@@ -307,6 +307,7 @@
   </build>
 
   <profiles>
+    <!-- Spark version selection profiles -->
     <profile>
       <id>spark35</id>
       <activation>
@@ -341,6 +342,44 @@
         <maven.compiler.release>17</maven.compiler.release>
       </properties>
     </profile>
+    <!-- Local development profiles -->
+    <profile>
+      <id>pre-commit</id>
+      <activation>
+        <activeByDefault>false</activeByDefault>
+      </activation>
+      <properties>
+        <activeProfile>spark35</activeProfile>
+      </properties>
+      <build>
+        <defaultGoal>verify</defaultGoal>
+      </build>
+    </profile>
+    <profile>
+      <id>format</id>
+      <activation>
+        <activeByDefault>false</activeByDefault>
+      </activation>
+      <properties>
+        <activeProfile>spark35</activeProfile>
+      </properties>
+      <build>
+        <defaultGoal>spotless:apply</defaultGoal>
+      </build>
+    </profile>
+    <profile>
+      <id>release-local</id>
+      <activation>
+        <activeByDefault>false</activeByDefault>
+      </activation>
+      <properties>
+        <activeProfile>spark35</activeProfile>
+      </properties>
+      <build>
+        <defaultGoal>clean install</defaultGoal>
+      </build>
+    </profile>
+    <!-- CI/CD release profiles -->
     <profile>
       <id>github-packages</id>
       <distributionManagement>
