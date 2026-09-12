@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
@@ -121,6 +122,78 @@ class PubSubGatherTest {
     assertEquals(1, partitions.length);
     assertEquals(3000, ((PubSubInputPartition) partitions[0]).messages().size());
     verify(client, times(3)).pull(any(Duration.class), anyInt());
+  }
+
+  @Test
+  void latestOffsetWithSameStartStaysIdempotent() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt())).thenReturn(messages(0, 2));
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
+    Offset repeated = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
+
+    assertEquals(first, repeated);
+    verify(client, times(1)).pull(any(Duration.class), anyInt());
+    verify(client, never()).acknowledge(anyList());
+  }
+
+  @Test
+  void latestOffsetGathersNextBatchWhenStartConsumedPrevious() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt()))
+        .thenReturn(messages(0, 2))
+        .thenReturn(messages(2, 3));
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
+    Offset second = stream.latestOffset(first, ReadLimit.allAvailable());
+
+    assertEquals(0L, ((PubSubOffset) first).batchId());
+    assertEquals(1L, ((PubSubOffset) second).batchId());
+    InputPartition[] partitions = stream.planInputPartitions(first, second);
+    assertEquals(3, ((PubSubInputPartition) partitions[0]).messages().size());
+    verify(client, times(2)).pull(any(Duration.class), anyInt());
+    verify(client, never()).acknowledge(anyList());
+  }
+
+  @Test
+  void emptyFollowUpAfterConsumedStartAcksPreviousBatch() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt()))
+        .thenReturn(messages(0, 2))
+        .thenReturn(Collections.emptyList());
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
+    Offset next = stream.latestOffset(first, ReadLimit.allAvailable());
+
+    assertNull(next);
+    verify(client).acknowledge(List.of("ack-0", "ack-1"));
+    verify(client).releaseMessages(any());
+  }
+
+  @Test
+  void formatStatsFillsBatchTimes() {
+    List<PulledMessage> pulled =
+        List.of(
+            new PulledMessage("old", new byte[] {1}, Collections.emptyMap(), 1_000L, "", "ack-old"),
+            new PulledMessage(
+                "new", new byte[] {1}, Collections.emptyMap(), 2_000L, "", "ack-new"));
+    String line = PublishTimeWindow.of(pulled).formatStats(0L, "BATCH: First batch:");
+
+    assertTrue(line.contains("BATCH: First batch:"));
+    assertTrue(line.contains("batchId=0"));
+    assertTrue(line.contains("messages=2"));
+    assertTrue(line.contains("1970-01-01T00:00:01Z"));
+    assertTrue(line.contains("1970-01-01T00:00:02Z"));
+    assertFalse(line.contains("{}"));
   }
 
   @Test
