@@ -108,7 +108,7 @@ final class PubSubClient implements Closeable, Serializable {
       }
       try (SubscriptionAdminClient admin = SubscriptionAdminClient.create(builder.build())) {
         LOG.warn(
-            "Applying seek={} on subscription {} (explicit rewind requested)",
+            "CONNECTION: Applying seek={} on subscription {} (explicit rewind requested)",
             this.config.seekMode(),
             this.config.subscriptionPath());
         admin.seek(seek.build());
@@ -148,7 +148,7 @@ final class PubSubClient implements Closeable, Serializable {
       try {
         start();
       } catch (IOException e) {
-        throw new IllegalStateException("Failed to start Pub/Sub client", e);
+        throw new IllegalStateException("CONNECTION: Failed to start Pub/Sub client", e);
       }
     }
   }
@@ -160,10 +160,10 @@ final class PubSubClient implements Closeable, Serializable {
         this.subscriberStub.shutdown();
         this.subscriberStub.awaitTermination(5, TimeUnit.SECONDS);
       } catch (InterruptedException e) {
-        LOG.warn("Interrupted while shutting down subscriber stub", e);
+        LOG.warn("CONNECTION: Interrupted while shutting down subscriber stub", e);
         Thread.currentThread().interrupt();
       } catch (Exception e) {
-        LOG.warn("Error shutting down subscriber stub", e);
+        LOG.warn("CONNECTION: Error shutting down subscriber stub", e);
       } finally {
         this.subscriberStub = null;
       }
@@ -188,7 +188,10 @@ final class PubSubClient implements Closeable, Serializable {
     try {
       return pullSubscriptionMessages(deadline, maxMessages);
     } catch (DeadlineExceededException e) {
-      LOG.debug("Pull long-poll timed out after {}; treating as empty", deadline, e);
+      LOG.debug(
+          "PULL: long-poll timed out after {}; treating as empty: {}",
+          asString(deadline),
+          e.toString());
       return List.of();
     }
   }
@@ -204,13 +207,22 @@ final class PubSubClient implements Closeable, Serializable {
     return Duration.ofMillis(waitMs + slackMs);
   }
 
+  /**
+   * Convert a duration to a human-readable string.
+   *
+   * @param duration the duration to convert
+   * @return the human-readable string
+   */
+  public static String asString(final Duration duration) {
+    return duration.toString().substring(2).replaceAll("(\\d[HMS])(?!$)", "$1").toLowerCase();
+  }
+
   private List<PulledMessage> pullSubscriptionMessages(Duration deadline, int maxMessages) {
     final PullRequest request =
         PullRequest.newBuilder()
             .setSubscription(this.config.subscriptionPath())
             .setMaxMessages(maxMessages)
             .build();
-    final long deadline2 = Math.max(1L, deadline.toMillis());
     final GrpcCallContext callContext =
         GrpcCallContext.createDefault().withTimeoutDuration(clientPullTimeout(deadline));
     final PullResponse response = subscriberStub.pullCallable().call(request, callContext);

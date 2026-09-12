@@ -51,7 +51,7 @@ final class AckCoordinator implements Serializable {
     final List<String> ackIds = PulledMessage.ackIds(messages);
     client.acknowledge(ackIds);
     release(client, batchId);
-    LOG.debug("Early-acked {} messages for batch {}", ackIds.size(), batchId);
+    LOG.debug("ACK: Early-acked {} messages for batch {}", ackIds.size(), batchId);
   }
 
   void commit(PubSubClient client, String batchId) {
@@ -62,7 +62,7 @@ final class AckCoordinator implements Serializable {
     if (ackMode == AckMode.AFTER_COMMIT && !messages.isEmpty()) {
       final List<String> ackIds = PulledMessage.ackIds(messages);
       client.acknowledge(ackIds);
-      LOG.debug("Committed (acked) {} messages for batch {}", ackIds.size(), batchId);
+      LOG.debug("ACK: Committed (acked) {} messages for batch {}", ackIds.size(), batchId);
     }
     release(client, batchId);
   }
@@ -76,10 +76,10 @@ final class AckCoordinator implements Serializable {
       final List<String> ackIds = PulledMessage.ackIds(messages);
       try {
         client.nack(ackIds);
-        LOG.warn("Aborted batch {}; nacked {} messages", batchId, ackIds.size());
-      } catch (RuntimeException e) {
+        LOG.warn("ACK: Aborted batch {}; nacked {} messages", batchId, ackIds.size());
+      } catch (Exception e) {
         LOG.warn(
-            "Failed to nack {} messages for aborted batch {}; they will redeliver on deadline",
+            "ACK: Failed to nack {} messages for aborted batch {}; they will redeliver on deadline",
             ackIds.size(),
             batchId,
             e);
@@ -89,11 +89,13 @@ final class AckCoordinator implements Serializable {
   }
 
   private void release(PubSubClient client, String batchId) {
-    List<PulledMessage> removed = pendingByBatch.remove(batchId);
-    if (removed == null) {
-      return;
+    final List<PulledMessage> removed = pendingByBatch.remove(batchId);
+    if (removed != null && !removed.isEmpty()) {
+      client.releaseMessages(removed);
+      LOG.debug("ACK: Released {} messages for batch {}", removed.size(), batchId);
+    } else {
+      LOG.debug("ACK: Found no messages to release for batch {}", batchId);
     }
-    client.releaseMessages(removed);
   }
 
   int pendingBatchCount() {
