@@ -32,6 +32,14 @@ import org.junit.jupiter.api.Test;
 class PubSubClientPullTimeoutTest {
 
   @Test
+  void clientPullTimeoutAddsBoundedSlack() {
+    assertEquals(Duration.ofSeconds(22), PubSubClient.clientPullTimeout(Duration.ofSeconds(20)));
+    assertEquals(Duration.ofSeconds(11), PubSubClient.clientPullTimeout(Duration.ofSeconds(10)));
+    assertEquals(Duration.ofMillis(520), PubSubClient.clientPullTimeout(Duration.ofMillis(20)));
+    assertEquals(Duration.ofMillis(501), PubSubClient.clientPullTimeout(Duration.ofMillis(1)));
+  }
+
+  @Test
   void pullTimeoutReturnsEmptyWithoutRetry() throws Exception {
     SubscriberStub stub = stubThatThrowsOnPull(deadlineExceeded());
     PubSubClient client = clientWithStub(stub);

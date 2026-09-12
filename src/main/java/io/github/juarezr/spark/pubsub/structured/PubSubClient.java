@@ -39,6 +39,11 @@ final class PubSubClient implements Closeable, Serializable {
   private static final long serialVersionUID = -3861530485L;
   private static final Logger LOG = LoggerFactory.getLogger(PubSubClient.class);
 
+  /** Extra client timeout so Pub/Sub can return an empty PullResponse before gRPC cancels. */
+  private static final long CLIENT_DEADLINE_SLACK_MIN_MS = 500L;
+
+  private static final long CLIENT_DEADLINE_SLACK_MAX_MS = 2_000L;
+
   private final RetryPolicy retryPolicy;
   private transient PubSubEmulator emulator;
 
@@ -188,6 +193,17 @@ final class PubSubClient implements Closeable, Serializable {
     }
   }
 
+  /**
+   * Client RPC timeout slightly longer than the intended wait so the server can return an empty
+   * {@link PullResponse} instead of the client cancelling with {@link DeadlineExceededException}.
+   */
+  static Duration clientPullTimeout(Duration wait) {
+    final long waitMs = Math.max(1L, wait.toMillis());
+    final long slackMs =
+        Math.min(CLIENT_DEADLINE_SLACK_MAX_MS, Math.max(CLIENT_DEADLINE_SLACK_MIN_MS, waitMs / 10));
+    return Duration.ofMillis(waitMs + slackMs);
+  }
+
   private List<PulledMessage> pullSubscriptionMessages(Duration deadline, int maxMessages) {
     final PullRequest request =
         PullRequest.newBuilder()
@@ -196,7 +212,7 @@ final class PubSubClient implements Closeable, Serializable {
             .build();
     final long deadline2 = Math.max(1L, deadline.toMillis());
     final GrpcCallContext callContext =
-        GrpcCallContext.createDefault().withTimeoutDuration(Duration.ofMillis(deadline2));
+        GrpcCallContext.createDefault().withTimeoutDuration(clientPullTimeout(deadline));
     final PullResponse response = subscriberStub.pullCallable().call(request, callContext);
     final int receivedCount = response.getReceivedMessagesCount();
     final List<PulledMessage> messages = new ArrayList<>(receivedCount);
