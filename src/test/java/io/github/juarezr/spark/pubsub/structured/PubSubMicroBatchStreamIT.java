@@ -189,4 +189,55 @@ class PubSubMicroBatchStreamIT {
     query.stop();
     assumeTrue(seen.get() > 0, "Expected to read at least one message from the emulator");
   }
+
+  @Test
+  void idleBatchGatherKeepsQueryActive(@TempDir Path tempDir) throws Exception {
+    String idleSubscription = "it-idle-subscription";
+    ProjectTopicName topicName = ProjectTopicName.of(PROJECT, TOPIC);
+    ProjectSubscriptionName idleName = ProjectSubscriptionName.of(PROJECT, idleSubscription);
+    FixedTransportChannelProvider channelProvider =
+        FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
+    NoCredentialsProvider credentialsProvider = NoCredentialsProvider.create();
+    SubscriptionAdminSettings subSettings =
+        SubscriptionAdminSettings.newBuilder()
+            .setTransportChannelProvider(channelProvider)
+            .setCredentialsProvider(credentialsProvider)
+            .build();
+    try (SubscriptionAdminClient subAdmin = SubscriptionAdminClient.create(subSettings)) {
+      try {
+        subAdmin.deleteSubscription(idleName.toString());
+      } catch (Exception ignored) {
+        // first run
+      }
+      subAdmin.createSubscription(
+          idleName.toString(), topicName.toString(), PushConfig.getDefaultInstance(), 60);
+    }
+
+    Path checkpoint = Files.createDirectory(tempDir.resolve("checkpoint"));
+    Dataset<Row> stream =
+        spark
+            .readStream()
+            .format("google-pubsub")
+            .option(PubSubConfig.PROJECT_ID, PROJECT)
+            .option(PubSubConfig.SUBSCRIPTION, idleSubscription)
+            .option(PubSubConfig.EMULATOR_HOST, emulatorHost)
+            .option(PubSubConfig.ACK_MODE, AckMode.AFTER_COMMIT.name())
+            .option(PubSubConfig.PULL_DEADLINE, "1s")
+            .option(PubSubConfig.GATHER_MODE, "batch")
+            .option(PubSubConfig.BATCH_TIME, "1s")
+            .load();
+
+    StreamingQuery query =
+        stream
+            .writeStream()
+            .foreachBatch((Dataset<Row> batch, Long id) -> {})
+            .option("checkpointLocation", checkpoint.toString())
+            .trigger(Trigger.ProcessingTime("100 milliseconds"))
+            .start();
+
+    query.awaitTermination(3_000L);
+    boolean active = query.isActive();
+    query.stop();
+    assumeTrue(active, "Idle batch gather should leave the query running");
+  }
 }

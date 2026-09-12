@@ -101,16 +101,22 @@ final class PubSubMicroBatchStream
 
   @Override
   public Offset latestOffset() {
-    return latestOffset(AdmissionLimits.from(config, null), false);
+    return latestOffset(null, AdmissionLimits.from(config, null), false);
   }
 
   @Override
   public Offset latestOffset(Offset startOffset, ReadLimit limit) {
-    return latestOffset(AdmissionLimits.from(config, limit), true);
+    return latestOffset(startOffset, AdmissionLimits.from(config, limit), true);
   }
 
-  private Offset latestOffset(AdmissionLimits limits, boolean nullIfEmpty) {
-    if (lastProduced != null) {
+  /**
+   * Spark 3.5 commits batch N-1 only when constructing batch N. Returning the same {@code
+   * lastProduced} after Spark has already accepted it as {@code startOffset} makes {@code
+   * constructNextBatch} see no new data, so {@link #commit} never runs and the query idles while
+   * the watchdog renews the first batch.
+   */
+  private Offset latestOffset(Offset startOffset, AdmissionLimits limits, boolean nullIfEmpty) {
+    if (lastProduced != null && !startConsumed(startOffset, lastProduced)) {
       return lastProduced;
     }
     List<PulledMessage> pulled = gatherMessages(limits);
@@ -118,6 +124,9 @@ final class PubSubMicroBatchStream
       lastPullMessageCount.set(0);
       lastPullPayloadBytes.set(0);
       lastPullMessageAgeMs = null;
+      if (lastProduced != null && startConsumed(startOffset, lastProduced)) {
+        commit(lastProduced);
+      }
       return nullIfEmpty ? null : currentOffset;
     }
     long batchId = nextBatchId.getAndIncrement();
@@ -141,7 +150,7 @@ final class PubSubMicroBatchStream
       try {
         client.extendAckDeadline(ids, ackDeadlineSeconds());
       } catch (RuntimeException e) {
-        LOG.warn("Failed to extend ack deadline for batch {}", batchId, e);
+        LOG.warn("BATCH: Failed to extend ack deadline for batch {}: {}", batchId, e.getMessage());
       }
       leaseWatchdog.start(client, ids, ackDeadlineSeconds());
     }
@@ -153,7 +162,8 @@ final class PubSubMicroBatchStream
     lastPullMessageAgeMs =
         PubSubSourceMetrics.newestMessageAgeMs(pulled, System.currentTimeMillis());
     retainGatheredWindow(batchId, pulled);
-    LOG.debug("latestOffset batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
+    LOG.debug(
+        "BATCH: latestOffset batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
     return offset;
   }
 
@@ -167,25 +177,21 @@ final class PubSubMicroBatchStream
       return messages;
     }
 
-    long deadlineNanos = System.nanoTime() + limits.waitTime().toNanos();
+    final long waitNanos = limits.waitTime().toNanos();
+    final long deadlineNanos = System.nanoTime() + waitNanos;
     long payloadBytes = 0L;
-    boolean firstPull = true;
     try {
       while (System.nanoTime() < deadlineNanos) {
         if (limits.reachedMax(messages.size(), payloadBytes)) {
           break;
         }
         Duration remaining = Duration.ofNanos(Math.max(1L, deadlineNanos - System.nanoTime()));
-        Duration rpcDeadline =
-            firstPull
-                ? min(config.pullDeadline(), remaining)
-                : min(Duration.ofSeconds(1), remaining);
+        final Duration rpcDeadline = min(config.pullDeadline(), remaining);
         int maxMessages = limits.messagesForNextPull(messages.size(), config.pullMaxMessages());
         if (maxMessages <= 0) {
           break;
         }
         List<PulledMessage> pulled = client.pull(rpcDeadline, maxMessages);
-        firstPull = false;
         if (!pulled.isEmpty()) {
           messages.addAll(pulled);
           payloadBytes += PulledMessage.payloadBytes(pulled);
@@ -196,7 +202,11 @@ final class PubSubMicroBatchStream
             try {
               client.extendAckDeadline(PulledMessage.ackIds(pulled), ackDeadlineSeconds());
             } catch (RuntimeException e) {
-              LOG.warn("Failed to extend initial ack deadline while gathering", e);
+              final String amount = PubSubClient.asString(rpcDeadline);
+              LOG.warn(
+                  "BATCH: Failed to extend initial ack deadline ({} remaining) while gathering: {}",
+                  amount,
+                  e.getMessage());
             }
             List<String> ids = PulledMessage.ackIds(messages);
             if (messages.size() == pulled.size()) {
@@ -219,7 +229,7 @@ final class PubSubMicroBatchStream
         try {
           client.nack(PulledMessage.ackIds(messages));
         } catch (RuntimeException nackError) {
-          LOG.warn("Failed to nack messages after gather failure", nackError);
+          LOG.warn("BATCH: Failed to nack messages after gather failure", nackError.getMessage());
         } finally {
           client.releaseMessages(messages);
         }
@@ -231,6 +241,18 @@ final class PubSubMicroBatchStream
 
   private static Duration min(Duration left, Duration right) {
     return left.compareTo(right) <= 0 ? left : right;
+  }
+
+  /** True when Spark already persisted {@code produced} as the start of the next range. */
+  static boolean startConsumed(Offset startOffset, PubSubOffset produced) {
+    if (startOffset == null || produced == null) {
+      return false;
+    }
+    final long startBatchId =
+        startOffset instanceof PubSubOffset
+            ? ((PubSubOffset) startOffset).batchId()
+            : PubSubOffset.fromJson(startOffset.json()).batchId();
+    return startBatchId >= produced.batchId();
   }
 
   private int ackDeadlineSeconds() {
@@ -308,15 +330,19 @@ final class PubSubMicroBatchStream
         if (!ackIds.isEmpty()) {
           try {
             client.acknowledge(ackIds);
+            LOG.debug(
+                "BATCH: Committed (acked) {} messages for batch {}",
+                ackIds.size(),
+                endOffset.batchId());
           } catch (RuntimeException e) {
             try {
               client.nack(ackIds);
             } catch (RuntimeException nackError) {
               LOG.warn(
-                  "Failed to nack {} messages after ack failure for batch {}",
+                  "BATCH: Failed to nack {} messages after ack failure for batch {}",
                   ackIds.size(),
                   endOffset.batchId(),
-                  nackError);
+                  nackError.getMessage());
             }
             throw e;
           }
@@ -334,7 +360,7 @@ final class PubSubMicroBatchStream
       finishBatch(endOffset.batchId());
       currentOffset = endOffset;
     }
-    LOG.debug("Committed offset batchId={}", endOffset.batchId());
+    LOG.debug("BATCH: Committed offset batchId={}", endOffset.batchId());
   }
 
   @Override
@@ -367,42 +393,24 @@ final class PubSubMicroBatchStream
     if (firstBatchLogged || window == null) {
       return;
     }
-    firstBatchLogged = true;
-    long now = System.currentTimeMillis();
-    LOG.info(
-        "First batch batchId={} messages={} oldestPublishTime={} newestPublishTime={} newestAgeMs={}",
-        batchId,
-        window.messageCount(),
-        window.oldestIso(),
-        window.newestIso(),
-        window.newestAgeMs(now));
+    this.firstBatchLogged = true;
+    LOG.info(window.formatStats(batchId, "BATCH: First batch:"));
   }
 
   private void logStop(int uncommitted) {
     PublishTimeWindow window = lastGatheredWindow;
     if (window == null) {
-      LOG.info("Stopping stream; no messages gathered");
+      LOG.info("BATCH: Stopping stream; no messages gathered");
       return;
     }
-    long now = System.currentTimeMillis();
-    if (uncommitted > 0) {
-      LOG.info(
-          "Stopping stream; last batch batchId={} messages={} oldestPublishTime={} newestPublishTime={} newestAgeMs={}; {} uncommitted messages will redeliver if not committed",
-          lastGatheredBatchId,
-          window.messageCount(),
-          window.oldestIso(),
-          window.newestIso(),
-          window.newestAgeMs(now),
-          uncommitted);
-      return;
-    }
-    LOG.info(
-        "Stopping stream; last batch batchId={} messages={} oldestPublishTime={} newestPublishTime={} newestAgeMs={}",
-        lastGatheredBatchId,
-        window.messageCount(),
-        window.oldestIso(),
-        window.newestIso(),
-        window.newestAgeMs(now));
+    final long batchId = this.lastGatheredBatchId == null ? -1L : this.lastGatheredBatchId;
+    final String prefix =
+        uncommitted <= 0
+            ? "BATCH: Stopping stream; 0 uncommitted messages found; Last batch is:"
+            : String.format(
+                "BATCH: Stopping stream; %d uncommitted messages will redeliver if not committed; Last batch is:",
+                uncommitted);
+    LOG.info(window.formatStats(batchId, prefix));
   }
 
   PublishTimeWindow lastGatheredWindow() {
@@ -415,6 +423,11 @@ final class PubSubMicroBatchStream
 
   Long lastGatheredBatchId() {
     return lastGatheredBatchId;
+  }
+
+  @Override
+  public String toString() {
+    return PubSubConfig.SHORT_NAME + ":" + config.subscriptionPath();
   }
 
   private void finishBatch(long batchId) {

@@ -68,4 +68,15 @@ final class PublishTimeWindow {
     }
     return Instant.ofEpochMilli(millis).toString();
   }
+
+  String formatStats(long batchId, String prefix) {
+    return String.format(
+        "%s batchId=%d messages=%d oldestPublishTime=%s newestPublishTime=%s newestAgeMs=%d",
+        prefix == null ? "" : prefix,
+        batchId,
+        messageCount,
+        oldestIso(),
+        newestIso(),
+        newestAgeMs(System.currentTimeMillis()));
+  }
 }

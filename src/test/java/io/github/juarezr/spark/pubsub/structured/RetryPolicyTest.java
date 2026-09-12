@@ -67,4 +67,22 @@ class RetryPolicyTest {
         RetryPolicy.isRetryable(
             new RuntimeException("wrap", new RuntimeException("timeout waiting"))));
   }
+
+  @Test
+  void deadlineRemainsRetryableForNonPullOperations() {
+    RetryPolicy policy = new RetryPolicy(1L, 5L, 5);
+    AtomicInteger attempts = new AtomicInteger();
+    String result =
+        policy.execute(
+            "acknowledge",
+            () -> {
+              if (attempts.incrementAndGet() < 2) {
+                throw new RuntimeException("DEADLINE_EXCEEDED");
+              }
+              return "acked";
+            });
+    assertEquals("acked", result);
+    assertEquals(2, attempts.get());
+    assertEquals(1, policy.retryAttempts());
+  }
 }

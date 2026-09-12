@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
@@ -26,6 +27,7 @@ import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.streaming.Offset;
 import org.apache.spark.sql.connector.read.streaming.ReadLimit;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class PubSubGatherTest {
 
@@ -101,7 +103,9 @@ class PubSubGatherTest {
   void batchGatherUsesThreePullsToReachThreeThousandMessages() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.pull(any(Duration.class), anyInt()))
-        .thenReturn(messages(0, 1000), messages(1000, 1000), messages(2000, 1000));
+        .thenReturn(messages(0, 1000))
+        .thenReturn(messages(1000, 1000))
+        .thenReturn(messages(2000, 1000));
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
@@ -121,10 +125,84 @@ class PubSubGatherTest {
   }
 
   @Test
+  void latestOffsetWithSameStartStaysIdempotent() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt())).thenReturn(messages(0, 2));
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
+    Offset repeated = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
+
+    assertEquals(first, repeated);
+    verify(client, times(1)).pull(any(Duration.class), anyInt());
+    verify(client, never()).acknowledge(anyList());
+  }
+
+  @Test
+  void latestOffsetGathersNextBatchWhenStartConsumedPrevious() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt()))
+        .thenReturn(messages(0, 2))
+        .thenReturn(messages(2, 3));
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
+    Offset second = stream.latestOffset(first, ReadLimit.allAvailable());
+
+    assertEquals(0L, ((PubSubOffset) first).batchId());
+    assertEquals(1L, ((PubSubOffset) second).batchId());
+    InputPartition[] partitions = stream.planInputPartitions(first, second);
+    assertEquals(3, ((PubSubInputPartition) partitions[0]).messages().size());
+    verify(client, times(2)).pull(any(Duration.class), anyInt());
+    verify(client, never()).acknowledge(anyList());
+  }
+
+  @Test
+  void emptyFollowUpAfterConsumedStartAcksPreviousBatch() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt()))
+        .thenReturn(messages(0, 2))
+        .thenReturn(Collections.emptyList());
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
+    Offset next = stream.latestOffset(first, ReadLimit.allAvailable());
+
+    assertNull(next);
+    verify(client).acknowledge(List.of("ack-0", "ack-1"));
+    verify(client).releaseMessages(any());
+  }
+
+  @Test
+  void formatStatsFillsBatchTimes() {
+    List<PulledMessage> pulled =
+        List.of(
+            new PulledMessage("old", new byte[] {1}, Collections.emptyMap(), 1_000L, "", "ack-old"),
+            new PulledMessage(
+                "new", new byte[] {1}, Collections.emptyMap(), 2_000L, "", "ack-new"));
+    String line = PublishTimeWindow.of(pulled).formatStats(0L, "BATCH: First batch:");
+
+    assertTrue(line.contains("BATCH: First batch:"));
+    assertTrue(line.contains("batchId=0"));
+    assertTrue(line.contains("messages=2"));
+    assertTrue(line.contains("1970-01-01T00:00:01Z"));
+    assertTrue(line.contains("1970-01-01T00:00:02Z"));
+    assertFalse(line.contains("{}"));
+  }
+
+  @Test
   void latestOffsetIsIdempotentUntilCommit() {
     PubSubClient client = mock(PubSubClient.class);
     List<PulledMessage> first = messages(0, 2);
-    when(client.pull(any(Duration.class), anyInt())).thenReturn(first, Collections.emptyList());
+    when(client.pull(any(Duration.class), anyInt()))
+        .thenReturn(first)
+        .thenReturn(Collections.emptyList());
     PubSubConfig config =
         PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
@@ -185,7 +263,9 @@ class PubSubGatherTest {
   void sparkMaxRowsCapsBelowBatchCount() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.pull(any(Duration.class), anyInt()))
-        .thenReturn(messages(0, 500), messages(500, 500), messages(1000, 500));
+        .thenReturn(messages(0, 500))
+        .thenReturn(messages(500, 500))
+        .thenReturn(messages(1000, 500));
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
@@ -237,6 +317,75 @@ class PubSubGatherTest {
   }
 
   @Test
+  void idleBatchGatherKeepsTheCurrentOffset() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt())).thenReturn(Collections.emptyList());
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .batchTime(Duration.ofMillis(80))
+            .pullDeadline(Duration.ofMillis(20))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset initial = stream.initialOffset();
+    Offset latest = stream.latestOffset();
+
+    assertEquals(initial, latest);
+    verify(client, atLeast(1)).pull(any(Duration.class), anyInt());
+  }
+
+  @Test
+  void batchGatherKeepsMessagesWhenFollowUpIsEmpty() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt()))
+        .thenReturn(messages(0, 2))
+        .thenReturn(Collections.emptyList());
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.EARLY)
+            .batchCount(100)
+            .batchTime(Duration.ofMillis(80))
+            .pullDeadline(Duration.ofMillis(20))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset latest = stream.latestOffset();
+    InputPartition[] partitions = stream.planInputPartitions(stream.initialOffset(), latest);
+
+    assertEquals(2, ((PubSubInputPartition) partitions[0]).messages().size());
+  }
+
+  @Test
+  void batchFollowUpPullUsesRemainingPullDeadline() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt()))
+        .thenReturn(messages(0, 1))
+        .thenReturn(messages(1, 1));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.EARLY)
+            .batchCount(2)
+            .batchTime(Duration.ofSeconds(3))
+            .pullDeadline(Duration.ofSeconds(5))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    stream.latestOffset();
+
+    ArgumentCaptor<Duration> deadlines = ArgumentCaptor.forClass(Duration.class);
+    verify(client, times(2)).pull(deadlines.capture(), anyInt());
+    Duration followUp = deadlines.getAllValues().get(1);
+    assertTrue(followUp.compareTo(Duration.ofSeconds(1)) > 0);
+    assertTrue(followUp.compareTo(Duration.ofSeconds(5)) <= 0);
+  }
+
+  @Test
   void defaultReadLimitUsesBatchCount() {
     PubSubConfig config =
         PubSubConfig.builder().projectId("p").subscription("s").batchCount(250).build();
@@ -246,6 +395,15 @@ class PubSubGatherTest {
     ReadLimit limit = stream.getDefaultReadLimit();
 
     assertEquals(ReadLimit.maxRows(250), limit);
+  }
+
+  @Test
+  void toStringUsesSubscriptionPath() {
+    PubSubConfig config = PubSubConfig.builder().projectId("p").subscription("s").build();
+    PubSubMicroBatchStream stream =
+        new PubSubMicroBatchStream(config, 1, mock(PubSubClient.class), false);
+
+    assertEquals("google-pubsub:projects/p/subscriptions/s", stream.toString());
   }
 
   private static List<PulledMessage> messages(int start, int count) {

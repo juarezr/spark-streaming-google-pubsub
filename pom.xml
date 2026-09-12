@@ -6,7 +6,7 @@
 
   <groupId>io.github.juarezr</groupId>
   <artifactId>spark-streaming-google-pubsub_${scala.binary.version}</artifactId>
-  <version>0.6.0-SNAPSHOT</version>
+  <version>0.6.2-SNAPSHOT</version>
   <packaging>jar</packaging>
 
   <name>spark-streaming-google-pubsub</name>
@@ -110,6 +110,18 @@
         <version>3.13.0</version>
         <configuration>
           <release>${maven.compiler.release}</release>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.2</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+            </manifest>
+          </archive>
         </configuration>
       </plugin>
       <plugin>
@@ -275,6 +287,8 @@
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <manifestEntries>
                     <Automatic-Module-Name>io.github.juarezr.spark.pubsub</Automatic-Module-Name>
+                    <Implementation-Title>${project.artifactId}</Implementation-Title>
+                    <Implementation-Version>${project.version}</Implementation-Version>
                   </manifestEntries>
                 </transformer>
               </transformers>
@@ -293,6 +307,7 @@
   </build>
 
   <profiles>
+    <!-- Spark version selection profiles -->
     <profile>
       <id>spark35</id>
       <activation>
@@ -327,6 +342,44 @@
         <maven.compiler.release>17</maven.compiler.release>
       </properties>
     </profile>
+    <!-- Local development profiles -->
+    <profile>
+      <id>pre-commit</id>
+      <activation>
+        <activeByDefault>false</activeByDefault>
+      </activation>
+      <properties>
+        <activeProfile>spark35</activeProfile>
+      </properties>
+      <build>
+        <defaultGoal>verify</defaultGoal>
+      </build>
+    </profile>
+    <profile>
+      <id>format</id>
+      <activation>
+        <activeByDefault>false</activeByDefault>
+      </activation>
+      <properties>
+        <activeProfile>spark35</activeProfile>
+      </properties>
+      <build>
+        <defaultGoal>spotless:apply</defaultGoal>
+      </build>
+    </profile>
+    <profile>
+      <id>release-local</id>
+      <activation>
+        <activeByDefault>false</activeByDefault>
+      </activation>
+      <properties>
+        <activeProfile>spark35</activeProfile>
+      </properties>
+      <build>
+        <defaultGoal>clean install</defaultGoal>
+      </build>
+    </profile>
+    <!-- CI/CD release profiles -->
     <profile>
       <id>github-packages</id>
       <distributionManagement>

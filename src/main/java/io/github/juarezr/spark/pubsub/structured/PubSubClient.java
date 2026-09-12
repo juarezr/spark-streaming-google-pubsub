@@ -2,6 +2,7 @@ package io.github.juarezr.spark.pubsub.structured;
 
 import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.api.gax.grpc.GrpcCallContext;
+import com.google.api.gax.rpc.DeadlineExceededException;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
 import com.google.cloud.pubsub.v1.stub.GrpcSubscriberStub;
@@ -20,6 +21,7 @@ import io.github.juarezr.spark.pubsub.config.SeekMode;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.Serializable;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,7 +30,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.threeten.bp.Duration;
 
 /**
  * Thin wrapper around the Pub/Sub subscriber stub with pull/ack/nack, retries, and optional seek.
@@ -37,6 +38,11 @@ final class PubSubClient implements Closeable, Serializable {
 
   private static final long serialVersionUID = -3861530485L;
   private static final Logger LOG = LoggerFactory.getLogger(PubSubClient.class);
+
+  /** Extra client timeout so Pub/Sub can return an empty PullResponse before gRPC cancels. */
+  private static final long CLIENT_DEADLINE_SLACK_MIN_MS = 500L;
+
+  private static final long CLIENT_DEADLINE_SLACK_MAX_MS = 2_000L;
 
   private final RetryPolicy retryPolicy;
   private transient PubSubEmulator emulator;
@@ -102,7 +108,7 @@ final class PubSubClient implements Closeable, Serializable {
       }
       try (SubscriptionAdminClient admin = SubscriptionAdminClient.create(builder.build())) {
         LOG.warn(
-            "Applying seek={} on subscription {} (explicit rewind requested)",
+            "CONNECTION: Applying seek={} on subscription {} (explicit rewind requested)",
             this.config.seekMode(),
             this.config.subscriptionPath());
         admin.seek(seek.build());
@@ -142,7 +148,7 @@ final class PubSubClient implements Closeable, Serializable {
       try {
         start();
       } catch (IOException e) {
-        throw new IllegalStateException("Failed to start Pub/Sub client", e);
+        throw new IllegalStateException("CONNECTION: Failed to start Pub/Sub client", e);
       }
     }
   }
@@ -154,10 +160,10 @@ final class PubSubClient implements Closeable, Serializable {
         this.subscriberStub.shutdown();
         this.subscriberStub.awaitTermination(5, TimeUnit.SECONDS);
       } catch (InterruptedException e) {
-        LOG.warn("Interrupted while shutting down subscriber stub", e);
+        LOG.warn("CONNECTION: Interrupted while shutting down subscriber stub", e);
         Thread.currentThread().interrupt();
       } catch (Exception e) {
-        LOG.warn("Error shutting down subscriber stub", e);
+        LOG.warn("CONNECTION: Error shutting down subscriber stub", e);
       } finally {
         this.subscriberStub = null;
       }
@@ -168,26 +174,57 @@ final class PubSubClient implements Closeable, Serializable {
     }
   }
 
-  List<PulledMessage> pull(java.time.Duration deadline) {
+  List<PulledMessage> pull(Duration deadline) {
     return pull(deadline, config.pullMaxMessages());
   }
 
-  List<PulledMessage> pull(java.time.Duration deadline, int maxMessages) {
+  List<PulledMessage> pull(Duration deadline, int maxMessages) {
     ensureStarted();
     final int capped = Math.max(1, Math.min(this.config.pullMaxMessages(), maxMessages));
     return retryPolicy.execute("pull", () -> pullMessagesFromSubscription(deadline, capped));
   }
 
-  private List<PulledMessage> pullMessagesFromSubscription(
-      java.time.Duration deadline, int maxMessages) {
+  private List<PulledMessage> pullMessagesFromSubscription(Duration deadline, int maxMessages) {
+    try {
+      return pullSubscriptionMessages(deadline, maxMessages);
+    } catch (DeadlineExceededException e) {
+      LOG.debug(
+          "PULL: long-poll timed out after {}; treating as empty: {}",
+          asString(deadline),
+          e.toString());
+      return List.of();
+    }
+  }
+
+  /**
+   * Client RPC timeout slightly longer than the intended wait so the server can return an empty
+   * {@link PullResponse} instead of the client cancelling with {@link DeadlineExceededException}.
+   */
+  static Duration clientPullTimeout(Duration wait) {
+    final long waitMs = Math.max(1L, wait.toMillis());
+    final long slackMs =
+        Math.min(CLIENT_DEADLINE_SLACK_MAX_MS, Math.max(CLIENT_DEADLINE_SLACK_MIN_MS, waitMs / 10));
+    return Duration.ofMillis(waitMs + slackMs);
+  }
+
+  /**
+   * Convert a duration to a human-readable string.
+   *
+   * @param duration the duration to convert
+   * @return the human-readable string
+   */
+  public static String asString(final Duration duration) {
+    return duration.toString().substring(2).replaceAll("(\\d[HMS])(?!$)", "$1").toLowerCase();
+  }
+
+  private List<PulledMessage> pullSubscriptionMessages(Duration deadline, int maxMessages) {
     final PullRequest request =
         PullRequest.newBuilder()
             .setSubscription(this.config.subscriptionPath())
             .setMaxMessages(maxMessages)
             .build();
     final GrpcCallContext callContext =
-        GrpcCallContext.createDefault()
-            .withTimeout(Duration.ofMillis(Math.max(1L, deadline.toMillis())));
+        GrpcCallContext.createDefault().withTimeoutDuration(clientPullTimeout(deadline));
     final PullResponse response = subscriberStub.pullCallable().call(request, callContext);
     final int receivedCount = response.getReceivedMessagesCount();
     final List<PulledMessage> messages = new ArrayList<>(receivedCount);

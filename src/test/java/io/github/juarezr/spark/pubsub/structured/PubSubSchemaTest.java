@@ -99,7 +99,7 @@ class PubSubSchemaTest {
   }
 
   private static String[] names(MetadataColumn[] columns) {
-    return Arrays.stream(columns).map(MetadataColumn::name).toArray(String[]::new);
+    return Arrays.stream(columns).map(column -> column.name()).toArray(String[]::new);
   }
 
   private static PubSubConfig config(SchemaMode schemaMode, MetadataMode metadataMode) {
