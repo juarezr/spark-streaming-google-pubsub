@@ -9,6 +9,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Validated connector configuration for Structured Streaming. */
 public final class PubSubConfig implements Serializable {
@@ -43,6 +46,10 @@ public final class PubSubConfig implements Serializable {
   public static final Duration DEFAULT_PULL_DEADLINE = Duration.ofSeconds(20);
   public static final Duration DEFAULT_ACK_DEADLINE = Duration.ofSeconds(60);
   public static final long DEFAULT_BATCH_SIZE = 128L * 1024 * 1024;
+
+  private static final Logger LOG = LoggerFactory.getLogger(PubSubConfig.class);
+  private static final AtomicBoolean VERSION_LOGGED = new AtomicBoolean();
+  private static final AtomicBoolean CONFIG_LOGGED = new AtomicBoolean();
 
   private final String projectId;
   private final String subscription;
@@ -362,6 +369,28 @@ public final class PubSubConfig implements Serializable {
 
   public MetadataMode metadataMode() {
     return metadataMode;
+  }
+
+  public static void logVersionOnce() {
+    if (!VERSION_LOGGED.compareAndSet(false, true)) {
+      return;
+    }
+    LOG.info("format={}", PubSubConfig.SHORT_NAME);
+    LOG.info(
+        "version={} built={} git={}",
+        implementationVersion(),
+        PubSubBuildInfo.built(),
+        PubSubBuildInfo.git());
+  }
+
+  static String implementationVersion() {
+    return PubSubBuildInfo.version();
+  }
+
+  public void logStartupSummaryOnce() {
+    if (CONFIG_LOGGED.compareAndSet(false, true)) {
+      LOG.info("config {}", this.startupSummary());
+    }
   }
 
   /** One-line option snapshot for startup logs. Omits credentials. */

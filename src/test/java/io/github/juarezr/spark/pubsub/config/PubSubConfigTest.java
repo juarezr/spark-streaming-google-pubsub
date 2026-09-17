@@ -1,6 +1,8 @@
 package io.github.juarezr.spark.pubsub.config;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -180,5 +182,11 @@ class PubSubConfigTest {
     assertThrows(
         IllegalArgumentException.class,
         () -> PubSubConfig.parseSeekTime("2024-08-07 12:00:29.028"));
+  }
+
+  @Test
+  void implementationVersionDoesNotThrow() {
+    String version = assertDoesNotThrow(PubSubConfig::implementationVersion);
+    assertFalse(version == null || version.isBlank());
   }
 }

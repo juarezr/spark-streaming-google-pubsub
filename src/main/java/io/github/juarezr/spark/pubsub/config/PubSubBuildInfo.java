@@ -1,4 +1,4 @@
-package io.github.juarezr.spark.pubsub.structured;
+package io.github.juarezr.spark.pubsub.config;
 
 import java.io.InputStream;
 import java.util.Properties;
