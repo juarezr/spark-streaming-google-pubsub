@@ -172,10 +172,17 @@ until the trigger interval. Spark never aborts an in-flight micro-batch. Setting
 equal to the trigger leaves no slack for write and trips Spark's falling-behind warning.
 
 **Recommend omitting `batchTime`** when the query uses `Trigger.ProcessingTime`. The connector
-returns once with no Pull (an empty-gap probe) to measure the trigger interval `T`, then gathers
-`T/2` on the first real batch and `T - writeAvg - writeStdev - safety` after that. Write stats
-ignore empty batches. Idle gathers return after the first empty Pull. A gather loop also stops
-when the thread is interrupted so a graceful stop returns in about one `pullDeadline`.
+returns once with no Pull (an empty-gap probe) to seed `batchTime` from the next gather gap, then
+gathers `batchTime/2` on the first real batch and `batchTime - writeAvg - writeStdev - safety` after that. That
+first gap is a seed: checkpoint recovery can be ~10–20s, not the trigger. Later **idle**
+gather start-to-start gaps raise `batchTime` (never shrink it) so a watchdog restart does not stay
+locked at the recovery gap. Write stats ignore empty batches. Idle gathers return after the first
+empty Pull plus one 1s debounce Pull. A gather loop also stops when the thread is interrupted so a
+graceful stop returns in about one `pullDeadline`.
+
+If `batchTime` is unset and Spark's trigger looks like `ProcessingTime(0)` (three gather
+gaps under 1s), the connector uses gather `min(pullDeadline, 5s)` and warns once. Set `batchTime`
+explicitly to override. `gatherMode=pull` is the right choice for lowest latency.
 
 Set an explicit `batchTime` when using:
 
@@ -195,11 +202,11 @@ errors such as `UNAVAILABLE` retry only until that same remaining gather slice e
 and lease-extend still use `maxRetryTime` so commit can ack after a slow write.
 
 The options `pullDeadline`, `ackDeadline`, and `maxRetryTime` do **not** auto-follow `batchTime`
-or Spark's ProcessingTime `T`. Each Pull is already `min(pullDeadline, remaining gather)`;
+or Spark's ProcessingTime trigger time. Each Pull is already `min(pullDeadline, remaining gather)`;
 The option `ackDeadline` is a lease quantum renewed internally in the connector;
 Pull retries cannot outlive the current gather slice. Those options defaults therefore work for a 1s trigger
-and for a 10-minute trigger. Do not set `pullDeadline` equal to `T` (idle would wait a full
-trigger) or `ackDeadline` equal to `T/2` (lease shorter than write).
+and for a 10-minute trigger. Do not set `pullDeadline` equal to `batchTime` (idle would wait a full
+trigger) or `ackDeadline` equal to `batchTime/2` (lease shorter than write).
 
 The option `pullDeadline` bounds waiting **for** messages. `ackDeadline` bounds holding messages already
 delivered. The ack watchdog starts with the first non-empty Pull and renews leases during both

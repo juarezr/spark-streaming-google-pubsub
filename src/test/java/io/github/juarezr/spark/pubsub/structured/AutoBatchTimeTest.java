@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.github.juarezr.spark.pubsub.config.GatherMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
@@ -97,5 +98,56 @@ class AutoBatchTimeTest {
     Duration clamped =
         AutoBatchTime.clamp(Duration.ofSeconds(5), Duration.ofSeconds(1), Duration.ofSeconds(20));
     assertEquals(Duration.ofMillis(500), clamped);
+  }
+
+  @Test
+  void idleStartToStartRaisesSeededProcessingTime() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(16).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(16), auto.processingTime());
+    assertEquals(Duration.ofSeconds(8), auto.gatherWindow(null));
+
+    auto.onGatherFinished(Duration.ofSeconds(5).toNanos(), false);
+    now.addAndGet(Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertEquals(Duration.ofSeconds(30), auto.gatherWindow(null));
+  }
+
+  @Test
+  void busyShortGapDoesNotShrinkProcessingTime() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+    auto.shouldProbe();
+    now.set(Duration.ofSeconds(60).toNanos());
+    auto.shouldProbe();
+    auto.onGatherFinished(Duration.ofSeconds(8).toNanos(), true);
+
+    now.addAndGet(Duration.ofSeconds(2).toNanos());
+    auto.shouldProbe();
+
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+  }
+
+  @Test
+  void threeNoiseGapsAssumeZeroTrigger() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.addAndGet(TimeUnit.MILLISECONDS.toNanos(100));
+    assertTrue(auto.shouldProbe());
+    now.addAndGet(TimeUnit.MILLISECONDS.toNanos(100));
+    assertTrue(auto.shouldProbe());
+    now.addAndGet(TimeUnit.MILLISECONDS.toNanos(100));
+    assertFalse(auto.shouldProbe());
+
+    assertEquals(AutoBatchTime.Mode.ZERO, auto.mode());
+    assertEquals(Duration.ofSeconds(5), auto.gatherWindow(null));
   }
 }

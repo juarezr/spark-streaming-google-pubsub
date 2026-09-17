@@ -10,20 +10,24 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Sizes {@code batchTime} when the option is omitted: one empty-gap probe for Spark {@code
- * Trigger.ProcessingTime}, then {@code T/2}, then {@code T - writeAvg - writeStdev - safety}.
+ * Trigger.ProcessingTime}, then {@code T/2}, then {@code T - writeAvg - writeStdev - safety}. The
+ * first gap is a seed; later idle {@code latestOffset} start-to-start gaps may raise {@code T}.
  */
 final class AutoBatchTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoBatchTime.class);
 
   static final long PROBE_NOISE_NANOS = TimeUnit.SECONDS.toNanos(1);
+  static final int ZERO_TRIGGER_NOISE_CYCLES = 3;
   static final int WRITE_WINDOW = 8;
   static final double SAFETY_FRACTION = 0.005;
   static final long OVERRUN_SEED_NANOS = TimeUnit.MILLISECONDS.toNanos(500);
+  static final Duration ZERO_TRIGGER_MAX_GATHER = Duration.ofSeconds(5);
 
   enum Mode {
     FIXED,
     PROBE,
-    AUTO
+    AUTO,
+    ZERO
   }
 
   private final LongSupplier nanoTime;
@@ -38,9 +42,13 @@ final class AutoBatchTime {
   private int writeIndex;
   private long lastGatherNanos;
   private long lastReturnNanos;
+  private long lastOffsetStartNanos;
+  private boolean lastGatherEmpty;
   private boolean lastNonEmpty;
   private boolean pendingWrite;
   private int finishedNonEmpty;
+  private int probeNoiseCount;
+  private boolean zeroTriggerWarned;
   private Long lastOverrunNanos;
 
   static AutoBatchTime create(PubSubConfig config) {
@@ -80,34 +88,53 @@ final class AutoBatchTime {
    */
   boolean shouldProbe() {
     long now = nanoTime.getAsLong();
-    if (mode != Mode.PROBE) {
+    if (mode == Mode.AUTO) {
+      maybeRaiseFromIdleStart(now);
+      lastOffsetStartNanos = now;
       observeCycle(now);
+      return false;
+    }
+    if (mode != Mode.PROBE) {
+      lastOffsetStartNanos = now;
       return false;
     }
     if (probeStartedNanos == null) {
       probeStartedNanos = now;
+      lastOffsetStartNanos = now;
       LOG.warn(
           "batchTime is unset; inferring Spark ProcessingTime from the next idle gap (one empty"
               + " cycle, no Pull). Trigger.Once() requires an explicit batchTime or the probe"
               + " consumes the only micro-batch.");
       return true;
     }
-    long gap = now - probeStartedNanos;
-    if (gap < PROBE_NOISE_NANOS) {
+    long gapFromStart = now - probeStartedNanos;
+    lastOffsetStartNanos = now;
+    if (gapFromStart < PROBE_NOISE_NANOS) {
+      probeNoiseCount++;
+      if (probeNoiseCount >= ZERO_TRIGGER_NOISE_CYCLES) {
+        enterZeroTrigger();
+        return false;
+      }
       return true;
     }
-    processingTime = Duration.ofNanos(gap);
+    probeNoiseCount = 0;
+    processingTime = Duration.ofNanos(gapFromStart);
     currentGather = firstGather(processingTime);
     mode = Mode.AUTO;
     LOG.info(
-        "BATCH: inferred processingTime={} first gather={}",
+        "BATCH: inferred processingTime={} first gather={} (seed; idle cycles may raise T)",
         format(processingTime),
         format(currentGather));
     return false;
   }
 
   Duration gatherWindow(Duration admissionWait) {
-    Duration base = mode == Mode.FIXED ? fixedBatchTime : currentGather;
+    Duration base;
+    if (mode == Mode.FIXED) {
+      base = fixedBatchTime;
+    } else {
+      base = currentGather;
+    }
     if (base == null) {
       base = pullDeadline;
     }
@@ -120,12 +147,13 @@ final class AutoBatchTime {
   void onGatherFinished(long gatherNanos, boolean nonEmpty) {
     lastGatherNanos = gatherNanos;
     lastNonEmpty = nonEmpty;
+    lastGatherEmpty = !nonEmpty;
     lastReturnNanos = nanoTime.getAsLong();
     pendingWrite = nonEmpty;
   }
 
   void onCommit() {
-    if (!pendingWrite || processingTime == null) {
+    if (!pendingWrite || processingTime == null || mode != Mode.AUTO) {
       return;
     }
     long write = nanoTime.getAsLong() - lastReturnNanos;
@@ -141,6 +169,34 @@ final class AutoBatchTime {
     pendingWrite = false;
     finishedNonEmpty++;
     refreshGather();
+  }
+
+  private void maybeRaiseFromIdleStart(long now) {
+    if (!lastGatherEmpty || lastOffsetStartNanos == 0L || processingTime == null) {
+      return;
+    }
+    long gap = now - lastOffsetStartNanos;
+    if (gap > processingTime.toNanos() + PROBE_NOISE_NANOS) {
+      processingTime = Duration.ofNanos(gap);
+      refreshGather();
+      LOG.info(
+          "BATCH: revised processingTime={} gather={}",
+          format(processingTime),
+          format(currentGather));
+    }
+  }
+
+  private void enterZeroTrigger() {
+    mode = Mode.ZERO;
+    processingTime = null;
+    currentGather = min(pullDeadline, ZERO_TRIGGER_MAX_GATHER);
+    if (!zeroTriggerWarned) {
+      zeroTriggerWarned = true;
+      LOG.warn(
+          "batchTime is unset and Spark trigger looks like ProcessingTime(0); using gather={}."
+              + " Set batchTime explicitly to override.",
+          format(currentGather));
+    }
   }
 
   private void observeCycle(long now) {
