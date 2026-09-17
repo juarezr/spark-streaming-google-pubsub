@@ -35,110 +35,14 @@ The authentication defaults to **Application Default Credentials (ADC)**.
 | 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.6.2` |
 | 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.6.2` |
 
-Prefer `--packages` (or a Maven/Gradle dependency) so Google client libraries resolve as transitives.
-
-Fat JAR (`*-all.jar`, Google client deps bundled) are **not** published to Maven Central.
-You can build locally with `mvn package`, or find them attached to [GitHub Releases](https://github.com/juarezr/spark-streaming-google-pubsub/releases).
-
-### Schema (Structured Streaming)
-
-`schemaMode` controls `SELECT *`. Default is `basic`. Names are lowercase.
-
-| `schemaMode` | Table columns |
-|:-------------|:--------------|
-| `raw` | `body` (binary) |
-| `basic` (default) | `body`, `messageid`, `publishtime` |
-| `slim` | `body`, `messageid`, `publishtime`, `orderingkey` |
-| `dynamic` | fields from the topic Avro schema (JSON encoding only) |
-| `mixed` | topic Avro fields plus `messageid`, `publishtime` |
-
-`metadataMode` adds opt-in columns that are **not** in `SELECT *`. Users must name them. A metadata
-name that already exists on the table is omitted (no duplicate columns).
-
-| `metadataMode` | Candidate columns (then minus table names) |
-|:---------------|:-------------------------------------------|
-| `none` (default) | (none) |
-| `basic` | `messageid`, `publishtime` |
-| `slim` | `messageid`, `publishtime`, `orderingkey`, `ackid` |
-| `full` | same as `slim` plus `attributes` (`map<string,string>`) |
-
-`ackid` is never a table column. Spark projects unused columns away; the reader emits only what the
-query requests. After subtract, some combinations leave no metadata columns; that is legal:
-
-| `schemaMode` | `metadataMode` | Leftover metadata |
-|:-------------|:---------------|:------------------|
-| `basic` | `basic` | (none) |
-| `mixed` | `basic` | (none) |
-| `slim` | `slim` | `ackid` |
-| `dynamic` | `basic` | `messageid`, `publishtime` |
-
-`publishtime` is event time. With `schemaMode=basic` (default), `slim`, or `mixed`:
-
-```scala
-.withWatermark("publishtime", "10 minutes")
-```
-
-For `raw` or `dynamic`, set `metadataMode=basic` (or higher) and select `publishtime` first.
-
-`schemaMode=dynamic` and `mixed` fetch the topic schema (JSON encoding + Avro type only). Grant
-`pubsub.schemas.get` and either `pubsub.topics.get` or `pubsub.subscriptions.get` (if `topic` is
-omitted). BINARY and Protocol Buffer schemas fail fast. A user-supplied
-`readStream.schema(...)` becomes the table schema in every mode; extra fields are JSON-decoded
-from `body`.
-
-### How it works
-
-Pub/Sub Pull RPCs run on the **Spark driver**. Executors only process in-memory slices of messages
-that the driver already gathered. With `gatherMode=batch`, one Spark micro-batch can contain several
-Pull responses. An idle gather returns the previous offset, so Spark does not run an empty
-micro-batch or create an empty output file.
-
-```mermaid
-sequenceDiagram
-  participant Spark
-  participant Driver
-  participant PubSub
-  participant Executor
-  Spark->>Driver: latestOffset after trigger
-  loop until batchTime batchSize or batchCount
-    Driver->>PubSub: Pull pullMaxMessages
-    PubSub-->>Driver: messages
-  end
-  Driver-->>Spark: new batchId when non empty
-  Spark->>Executor: numWriters task slices
-  Executor-->>Spark: sink write completes
-  Spark->>Driver: commit
-  Driver->>PubSub: chunked acknowledge
-```
-
-The timing controls apply at different points:
-
-| Control | What it bounds |
-|:--------|:---------------|
-| Spark trigger | When Spark asks for the next offset after the previous micro-batch finishes |
-| Spark `ReadLimit` | `maxRowsPerTrigger` / `maxBytesPerTrigger` (Spark 4+) composed with `batchCount` / `batchSize` |
-| `batchTime` | How long one `latestOffset` gathers Pull responses |
-| `pullDeadline` | How long one healthy Pull RPC waits for messages |
-| `ackDeadline` | How long Pub/Sub leases a delivered message; renewed until Spark commits |
-| `maxRetryTime` | How long failed Pub/Sub RPCs are retried |
-
-Spark trigger and `batchTime` are sequential waits. For example, a 10-second trigger plus a
-10-second gather can approach 20 seconds between batches. Prefer a short trigger and use
-`batchTime` to control grouping. In batch gathering, every Pull uses the smaller of `pullDeadline`
-and the remaining `batchTime`. A client `DEADLINE_EXCEEDED` on Pull is an empty long-poll, not a
-retried failure. `maxRetryTime` still applies to transient RPC errors such as `UNAVAILABLE`.
-
-`pullDeadline` bounds waiting **for** messages. `ackDeadline` bounds holding messages already
-delivered. The ack watchdog starts with the first non-empty Pull and renews leases during both
-gathering and sink processing.
+- Prefer `--packages` (or a Maven/Gradle dependency) so Google client libraries resolve as transitives.
+- Fat JAR (`*-all.jar`, Google client deps bundled) are **not** published to Maven Central.
+- You can build locally with `mvn package`, or find them attached to [GitHub Releases](https://github.com/juarezr/spark-streaming-google-pubsub/releases).
 
 ### Options
 
-Bare duration values are seconds. Duration suffixes are `ms`, `s`, and `m`. Size suffixes `k`, `m`,
-and `g` use multiples of 1024.
-
 | Option | Default | Description |
-|:-------|:--------|:------------|
+| :------- | :-------- | :------------ |
 | `projectId` | required | GCP project id |
 | `subscription` | required | Subscription id or full resource name |
 | `credentialsFile` | ADC | Optional service-account JSON path |
@@ -151,29 +55,161 @@ and `g` use multiples of 1024.
 | `ackMode` | `afterCommit` | `afterCommit` or `early` |
 | `ackDeadline` | `60s` | Message lease, renewed about every third of this duration |
 | `gatherMode` | `batch` | `batch` gathers Pulls; `pull` emits one Pull per micro-batch |
-| `batchTime` | `10s` | Maximum gather time in `batch` mode |
+| `batchTime` | | Maximum gather time in `batch` mode. If omitted will be auto infered from `Trigger.ProcessingTime` |
 | `batchSize` | `128m` | Maximum gathered payload bytes; blank/0 disables. Effective cap is the min of this and Spark `maxBytesPerTrigger` (Spark 4+) |
 | `batchCount` | | Maximum gathered message count; blank/0 disables. Effective cap is the min of this and Spark `maxRowsPerTrigger` |
 | `numWriters` | `1` | Spark task slices; integer ≥1 or `auto` for driver CPU count |
-| `topic` | subscription's topic | Topic id or full resource name; used by `schemaMode=dynamic`/`mixed` to skip `GetSubscription` |
 | `schemaMode` | `basic` | `raw`, `basic`, `slim`, `dynamic`, or `mixed` |
 | `metadataMode` | `none` | `none`, `basic`, `slim`, or `full`. Metadata never repeats a table field |
+| `topic` | | Topic id or full resource name (Optional) |
 | `emulatorHost` | | Emulator address such as `localhost:8085` |
 
-Pub/Sub seek timestamps represent UTC instants. A local wall-clock value must include its offset,
-for example `2024-08-07T12:00:29.028-03:00`; naive datetimes are rejected.
+Used formats:
+
+- The following suffixes can be used:
+  - Time and deadline suffixes: `ms`, `s`, and `m`.
+  - Size suffixes: `k`, `m`, and `g` use multiples of 1024.
+- Bare time and deadline values are interpreted as seconds.
+- Pub/Sub seek timestamps represent UTC instants.
+  - A local wall-clock value must include its offset, for example `2024-08-07T12:00:29.028-03:00`.
+
+### Schema (Structured Streaming)
+
+The option `schemaMode` controls how each PubSub message is interpreted/transforme and which fields
+are available in a `SELECT *` statement or in a Dataframe.
+
+| `schemaMode` | Table columns |
+| :----------- | :------------ |
+| `raw` | `body` (binary) |
+| `basic` | `body`, `messageid`, `publishtime` (default) |
+| `slim` | `body`, `messageid`, `publishtime`, `orderingkey` |
+| `dynamic` | fields from the topic Avro schema (JSON encoding only) |
+| `mixed` | topic Avro fields plus `messageid`, `publishtime` |
+
+The option `metadataMode` adds opt-in fields that are sent as metadata.
+
+| `metadataMode` | Candidate columns (then minus table names) |
+| :------------- | :------------------------------------------- |
+| `none` | none (this is the default value) |
+| `basic` | `messageid`, `publishtime` |
+| `slim` | `messageid`, `publishtime`, `orderingkey`, `ackid` |
+| `full` | same as `slim` plus `attributes` (`map<string,string>`) |
+
+These metadata fields above are **not** available for a `SELECT *` statement over the dataframe columns. Users must retrieve them by name.
+
+**Schema/metadata combinations**:
+
+ A metadata field that already exists as field on the schema/dataframe is omitted to avlid generating duplicated columns.
+
+When using some combinations of this options, the deduplication could leave no metadata columns; that is legal:
+
+| `schemaMode` | `metadataMode` | Leftover metadata |
+| :----------- | :------------- | :------------------ |
+| `basic` | `basic` | (none) |
+| `mixed` | `basic` | (none) |
+| `slim` | `slim` | `ackid` |
+| `dynamic` | `basic` | `messageid`, `publishtime` |
+
+**Other Details**:
+
+Spark projects unused columns away; the reader emits only what the query requests.
+
+You  can use the column `publishtime` to do watermarking with `schemaMode=basic` (default), `slim`, or `mixed`:
+
+```scala
+.withWatermark("publishtime", "10 minutes")
+```
+
+For `raw` or `dynamic`, set `metadataMode=basic` (or higher) and select `publishtime` first.
+
+When using the `schemaMode=dynamic` and `mixed` the connector will fetch the topic schema (JSON encoding + Avro type only).
+Grant `pubsub.schemas.get` and either `pubsub.topics.get` or `pubsub.subscriptions.get` (if `topic` is
+omitted).
+
+A user-supplied `readStream.schema(...)` becomes the table schema in every mode; extra fields are JSON-decoded from `body`.
+
+### How it works
+
+Pub/Sub Pull RPCs run on the **Spark driver**. Executors only process in-memory slices of messages
+that the driver already gathered. With `gatherMode=batch`, one Spark micro-batch can contain several
+Pull responses.
+
+```mermaid
+sequenceDiagram
+  participant PubSub
+  participant Driver
+  participant Spark
+  participant Executor
+  Spark->>Driver: starts micro-batch after trigger
+  loop until batchTime batchSize batchCount or empty Pull
+    Driver->>PubSub: Pull pullMaxMessages
+    PubSub-->>Driver: messages
+  end
+  Driver-->>Spark: new batchId when non empty
+  Spark->>Executor: numWriters task slices
+  Executor-->>Spark: sink write completes
+  Spark->>Driver: commit
+  Driver->>PubSub: chunked acknowledge
+```
+
+An idle gather returns the previous offset, so Spark does not run an empty micro-batch or create an empty output file.
+
+### Timing controls
+
+The timing controls apply at different points:
+
+| Component | Control | What it bounds |
+| :---------- | :-------- | :--------------- |
+| Spark | `Trigger.ProcessingTime` | When Spark asks for the next offset after the previous micro-batch finishes |
+| Spark | `ReadLimit` | `maxRowsPerTrigger` / `maxBytesPerTrigger` (Spark 4+) composed with `batchCount` / `batchSize` |
+| Connector | `batchTime` | How long one batch gathers Pull responses. Omit to auto-infer from `Trigger.ProcessingTime` |
+| Connector | `pullDeadline` | How long one healthy Pull RPC waits for messages |
+| Connector | `ackDeadline` | How long Pub/Sub leases a delivered message; renewed until Spark commits |
+| Connector | `maxRetryTime` | How long failed Pub/Sub RPCs are retried |
+
+Spark trigger and `batchTime` are sequential waits: gather, then sink write, then optional sleep
+until the trigger interval. Spark never aborts an in-flight micro-batch. Setting `batchTime`
+equal to the trigger leaves no slack for write and trips Spark's falling-behind warning.
+
+**Recommend omitting `batchTime`** when the query uses `Trigger.ProcessingTime`. The connector
+returns once with no Pull (an empty-gap probe) to measure the trigger interval `T`, then gathers
+`T/2` on the first real batch and `T - writeAvg - writeStdev - safety` after that. Write stats
+ignore empty batches. Idle gathers return after the first empty Pull. A gather loop also stops
+when the thread is interrupted so a graceful stop returns in about one `pullDeadline`.
+
+Set an explicit `batchTime` when using:
+
+- **`Trigger.Once()`** — the cannot infer it from the micro-batch; without `batchTime` the job can stop
+  without Pulling.
+- **Low latency** — `gatherMode=pull` or a short gather (more sink files).
+- **Intentional pull duty cycle** — short `batchTime` and a longer trigger (messages wait on the
+  subscription during Spark's sleep).
+- **Short trigger, long gather** — grouping is only `batchTime` / `batchSize`; the falling-behind
+  warning emitted from Spark on every batch is expected.
+
+The Spark triggers `Trigger.AvailableNow` and `Trigger.Continuous` are not supported.
+
+In batch gathering, every Pull uses the smaller of `pullDeadline` and the remaining `batchTime`.
+A client `DEADLINE_EXCEEDED` on Pull is an empty long-poll, not a retried failure. `maxRetryTime`
+still applies to transient RPC errors such as `UNAVAILABLE`.
+
+The option `pullDeadline` bounds waiting **for** messages. `ackDeadline` bounds holding messages already
+delivered. The ack watchdog starts with the first non-empty Pull and renews leases during both
+gathering and sink processing.
 
 ### Operational tuning
 
-- **Low latency:** use `gatherMode=pull` or a short `batchTime`. This creates more sink files.
-- **Higher throughput:** use `gatherMode=batch`, allowing several Pulls in each Spark micro-batch.
-- **Fewer parquet files:** increase `batchTime`, keep `numWriters=1`, use a short Spark trigger, and
-  partition in the application. `numWriters=2` means two Spark tasks for one gathered batch, not two
-  Pull loops.
+- **Low latency:** use `gatherMode=pull` or a short explicit `batchTime`. This creates more sink files.
+- **Higher throughput:** use `gatherMode=batch` and omit `batchTime` so gather fills the ProcessingTime
+  trigger (minus write). Several Pulls can run in each Spark micro-batch.
+- **Fewer parquet files:** omit `batchTime` (or set it slightly under the trigger), keep `numWriters=1`,
+  and partition in the application. `numWriters=2` means two Spark tasks for one gathered batch, not
+  two Pull loops.
+- **`Trigger.Once()`:** set `batchTime` explicitly. AvailableNow is not supported.
 
 The driver holds message byte arrays, ack ids, attributes, and serialization copies.
-Reserve roughly 3–5 times the configured payload batch size as temporary driver-heap headroom.
-The option `batchSize` limits gathered payload bytes; it is not a Spark heap setting.
+Reserve roughly 3–5 times the configured payload batch size as temporary driver-heap memory headroom.
+The option `batchSize` limits gathered payload bytes; when it is reached, then the connector will finish the batch.
 
 ## Examples
 
@@ -192,7 +228,7 @@ Dataset<Row> messages = spark.readStream()
 messages
     .writeStream()
     .format("parquet")
-    .trigger(Trigger.ProcessingTime("1 second"))
+    .trigger(Trigger.ProcessingTime("60 second"))
     .option("path", "gs://bucket/tables/event")
     .option("checkpointLocation", "gs://bucket/checkpoints/event")
     .start()
@@ -255,9 +291,9 @@ same `.format("google-pubsub")` options as above. Use a durable `checkpointLocat
 
 ## Reliability
 
-- **`ackMode=afterCommit` (default):** messages are acknowledged after Spark commits the micro-batch.
+- With the option **`ackMode=afterCommit` (default):** messages are acknowledged after Spark commits the micro-batch.
   Failures before commit lead to redelivery (at-least-once).
-- **`ackMode=early`:** ack soon after pull. Faster ack release, higher loss risk on crash.
+- With the option **`ackMode=early`:** ack soon after pull. Faster ack release, higher loss risk on crash.
 - With `ackMode=afterCommit`, deadlines are extended periodically on the driver (about every
   `ackDeadline / 3`) from the first Pull until commit.
 - A replaced or stopped uncommitted batch is nacked so it can redeliver promptly.
@@ -268,16 +304,20 @@ same `.format("google-pubsub")` options as above. Use a durable `checkpointLocat
   After driver failure, unacknowledged messages redeliver from Pub/Sub (at-least-once).
 - With `seek=none` (default), restart never rewinds the subscription.
 
-Monitor custom metrics on `StreamingQueryProgress` (Spark UI): last-pull count/payload bytes,
-`lastPullMessageAgeMs` (age of the newest publish time in the last gather; `-` when empty),
-outstanding payload bytes, batch ids, `pubsubRetryAttempts`, and
-`pubsubRetryAttemptsTotal`. These are **not** the Pub/Sub subscription backlog.
+### Recommendations
+
+- Monitor custom metrics on `StreamingQueryProgress` (Spark UI)
+- Look for: last-pull count/payload bytes, `lastPullMessageAgeMs` (age of the newest publish time in the last gather; `-` when empty),
+  outstanding payload bytes, batch ids, `pubsubRetryAttempts`, and `pubsubRetryAttemptsTotal`.
+- These are **not** the Pub/Sub subscription backlog.
 
 ### Limitations
 
 This connector is a **read-only Structured Streaming (micro-batch)** source. The following Spark features are not implemented:
 
 - **Spark 4.1 Real-time Mode** — does not fit this source's driver-side Pull and lease/ack model.
+- **Trigger.Once** — works only with an explicit `batchTime`. If `batchTime` is unset, the empty-gap
+  probe is the only micro-batch and the query can stop without Pulling.
 - **Trigger.AvailableNow** (“drain then stop”) — a subscription has no durable log-end offset.
   Rate limits via `SupportsAdmissionControl` (`maxRowsPerTrigger`, `maxBytesPerTrigger` on Spark 4+)
   are implemented; AvailableNow still is not.
