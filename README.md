@@ -50,8 +50,8 @@ The authentication defaults to **Application Default Credentials (ADC)**.
 | `seekTime` | | Epoch milliseconds or RFC-3339 instant with `Z`/offset |
 | `seekSnapshot` | | Snapshot resource for `seek=snapshot` |
 | `pullMaxMessages` | `1000` | Messages requested by each Pull RPC (1–1000) |
-| `maxRetryTime` | `90s` | Retry window for transient RPC failures |
-| `pullDeadline` | `20s` | Deadline for one Pull long-poll |
+| `maxRetryTime` | `90s` | Retry window for ack/nack/lease-extend. Pull retries stop at remaining gather |
+| `pullDeadline` | `20s` | Deadline for one Pull long-poll. Idle gather returns after one empty Pull |
 | `ackMode` | `afterCommit` | `afterCommit` or `early` |
 | `ackDeadline` | `60s` | Message lease, renewed about every third of this duration |
 | `gatherMode` | `batch` | `batch` gathers Pulls; `pull` emits one Pull per micro-batch |
@@ -156,16 +156,16 @@ An idle gather returns the previous offset, so Spark does not run an empty micro
 
 ### Timing controls
 
-The timing controls apply at different points:
+The timing controls apply at different points for PubSub pulls and acks:
 
 | Component | Control | What it bounds |
 | :---------- | :-------- | :--------------- |
 | Spark | `Trigger.ProcessingTime` | When Spark asks for the next offset after the previous micro-batch finishes |
 | Spark | `ReadLimit` | `maxRowsPerTrigger` / `maxBytesPerTrigger` (Spark 4+) composed with `batchCount` / `batchSize` |
 | Connector | `batchTime` | How long one batch gathers Pull responses. Omit to auto-infer from `Trigger.ProcessingTime` |
-| Connector | `pullDeadline` | How long one healthy Pull RPC waits for messages |
-| Connector | `ackDeadline` | How long Pub/Sub leases a delivered message; renewed until Spark commits |
-| Connector | `maxRetryTime` | How long failed Pub/Sub RPCs are retried |
+| Connector | `pullDeadline` | How long one healthy Pull RPC waits for messages. Idle gather returns after one empty Pull |
+| Connector | `ackDeadline` | How long Pub/Sub leases a delivered message; renewed every `ackDeadline/3` until Spark commits |
+| Connector | `maxRetryTime` | Retry window for ack/nack/lease-extend. Pull retries stop at remaining gather (`min(pullDeadline, remaining batchTime)`) |
 
 Spark trigger and `batchTime` are sequential waits: gather, then sink write, then optional sleep
 until the trigger interval. Spark never aborts an in-flight micro-batch. Setting `batchTime`
@@ -190,8 +190,16 @@ Set an explicit `batchTime` when using:
 The Spark triggers `Trigger.AvailableNow` and `Trigger.Continuous` are not supported.
 
 In batch gathering, every Pull uses the smaller of `pullDeadline` and the remaining `batchTime`.
-A client `DEADLINE_EXCEEDED` on Pull is an empty long-poll, not a retried failure. `maxRetryTime`
-still applies to transient RPC errors such as `UNAVAILABLE`.
+A client `DEADLINE_EXCEEDED` on Pull is an empty long-poll, not a retried failure. Transient Pull
+errors such as `UNAVAILABLE` retry only until that same remaining gather slice elapses. Ack, nack,
+and lease-extend still use `maxRetryTime` so commit can ack after a slow write.
+
+The options `pullDeadline`, `ackDeadline`, and `maxRetryTime` do **not** auto-follow `batchTime`
+or Spark's ProcessingTime `T`. Each Pull is already `min(pullDeadline, remaining gather)`;
+The option `ackDeadline` is a lease quantum renewed internally in the connector;
+Pull retries cannot outlive the current gather slice. Those options defaults therefore work for a 1s trigger
+and for a 10-minute trigger. Do not set `pullDeadline` equal to `T` (idle would wait a full
+trigger) or `ackDeadline` equal to `T/2` (lease shorter than write).
 
 The option `pullDeadline` bounds waiting **for** messages. `ackDeadline` bounds holding messages already
 delivered. The ack watchdog starts with the first non-empty Pull and renews leases during both
@@ -298,8 +306,10 @@ same `.format("google-pubsub")` options as above. Use a durable `checkpointLocat
   `ackDeadline / 3`) from the first Pull until commit.
 - A replaced or stopped uncommitted batch is nacked so it can redeliver promptly.
 - Acknowledgement, nack, and lease-extension requests are chunked.
-- Transient failures use exponential backoff for at most `maxRetryTime`. Retry warnings are
-  rate-limited (at most every 15s) while counters continue to increase.
+- Transient **Pull** failures retry only until remaining gather elapses. They cannot outlive
+  the current gather slice. Ack, nack, and lease-extend use exponential backoff for at most
+  `maxRetryTime`. Retry warnings are rate-limited (at most every 15s) while counters continue
+  to increase.
 - Checkpoint offsets contain only a synthetic batch id. Payloads and ack ids stay in driver memory.
   After driver failure, unacknowledged messages redeliver from Pub/Sub (at-least-once).
 - With `seek=none` (default), restart never rewinds the subscription.

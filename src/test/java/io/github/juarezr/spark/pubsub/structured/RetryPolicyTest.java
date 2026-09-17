@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -66,6 +67,42 @@ class RetryPolicyTest {
     assertTrue(
         RetryPolicy.isRetryable(
             new RuntimeException("wrap", new RuntimeException("timeout waiting"))));
+  }
+
+  @Test
+  void pullBudgetCapsRetriesBelowMaxRetryTime() {
+    RetryPolicy policy = new RetryPolicy(1L, 5L, 1000, 10_000L);
+    AtomicInteger attempts = new AtomicInteger();
+    assertThrows(
+        RuntimeException.class,
+        () ->
+            policy.execute(
+                "pull",
+                () -> {
+                  attempts.incrementAndGet();
+                  throw new RuntimeException("UNAVAILABLE");
+                },
+                Duration.ZERO));
+    assertEquals(1, attempts.get());
+    assertEquals(0, policy.retryAttempts());
+  }
+
+  @Test
+  void executeWithoutBudgetStillRetries() {
+    RetryPolicy policy = new RetryPolicy(1L, 5L, 5, 10_000L);
+    AtomicInteger attempts = new AtomicInteger();
+    String result =
+        policy.execute(
+            "acknowledge",
+            () -> {
+              if (attempts.incrementAndGet() < 3) {
+                throw new RuntimeException("UNAVAILABLE");
+              }
+              return "acked";
+            });
+    assertEquals("acked", result);
+    assertEquals(3, attempts.get());
+    assertEquals(2, policy.retryAttempts());
   }
 
   @Test

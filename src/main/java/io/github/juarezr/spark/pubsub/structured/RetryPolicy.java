@@ -51,6 +51,22 @@ final class RetryPolicy {
   }
 
   <T> T execute(String operation, RetryableCallable<T> callable) {
+    return execute(operation, callable, this.maxRetryTimeMs);
+  }
+
+  /**
+   * Same as {@link #execute(String, RetryableCallable)} but the retry window cannot exceed {@code
+   * budget} (used by Pull so retries cannot outlive remaining gather).
+   */
+  <T> T execute(String operation, RetryableCallable<T> callable, Duration budget) {
+    long budgetMs = this.maxRetryTimeMs;
+    if (budget != null) {
+      budgetMs = Math.min(budgetMs, Math.max(0L, budget.toMillis()));
+    }
+    return execute(operation, callable, budgetMs);
+  }
+
+  private <T> T execute(String operation, RetryableCallable<T> callable, long budgetMs) {
     RuntimeException last = null;
     long backoff = this.initialBackoffMs;
     long startedAt = System.nanoTime();
@@ -64,13 +80,13 @@ final class RetryPolicy {
         last = e;
         final boolean retryable = isRetryable(e);
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
-        if (attempt == this.maxAttempts || !retryable || elapsedMs >= maxRetryTimeMs) {
+        if (attempt == this.maxAttempts || !retryable || elapsedMs >= budgetMs) {
           throw e;
         }
         retryAttempts.incrementAndGet();
         final long jitterBound = Math.max(1, backoff / 4);
         final long nextBackoffMs = backoff + ThreadLocalRandom.current().nextLong(0, jitterBound);
-        final long remainingRetryMs = Math.max(0L, maxRetryTimeMs - elapsedMs);
+        final long remainingRetryMs = Math.max(0L, budgetMs - elapsedMs);
         final long sleep = Math.min(Math.min(nextBackoffMs, this.maxBackoffMs), remainingRetryMs);
         backoff = Math.min(backoff * 2, this.maxBackoffMs);
         if (attempt == 1 || elapsedMs - lastWarnAt >= 15_000L) {

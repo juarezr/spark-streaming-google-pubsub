@@ -1,6 +1,7 @@
 package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -93,8 +94,17 @@ class PubSubClientPullTimeoutTest {
     assertEquals(0L, client.retryAttempts());
   }
 
+  @Test
+  void pullUnavailableDoesNotRetryPastPullDeadline() throws Exception {
+    SubscriberStub stub = stubThatThrowsOnPull(new RuntimeException("UNAVAILABLE"));
+    PubSubClient client = clientWithStub(stub);
+
+    assertThrows(RuntimeException.class, () -> client.pull(Duration.ZERO, 10));
+    assertEquals(0L, client.retryAttempts());
+  }
+
   @SuppressWarnings("unchecked")
-  private static SubscriberStub stubThatThrowsOnPull(DeadlineExceededException error) {
+  private static SubscriberStub stubThatThrowsOnPull(RuntimeException error) {
     SubscriberStub stub = mock(SubscriberStub.class);
     UnaryCallable<PullRequest, PullResponse> pull = mock(UnaryCallable.class);
     when(stub.pullCallable()).thenReturn(pull);
