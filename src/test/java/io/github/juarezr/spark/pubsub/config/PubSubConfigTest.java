@@ -25,7 +25,7 @@ class PubSubConfigTest {
     assertEquals(AckMode.AFTER_COMMIT, config.ackMode());
     assertEquals(SeekMode.NONE, config.seekMode());
     assertEquals(GatherMode.BATCH, config.gatherMode());
-    assertEquals(Duration.ofSeconds(10), config.batchTime());
+    assertEquals(null, config.batchTime());
     assertEquals(128L * 1024 * 1024, config.batchSize());
     assertEquals(1, config.numWriters());
     assertEquals(SchemaMode.BASIC, config.schemaMode());
@@ -152,6 +152,14 @@ class PubSubConfigTest {
                 .projectId("p")
                 .subscription("s")
                 .ackDeadline(Duration.ofSeconds(5))
+                .build());
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            PubSubConfig.builder()
+                .projectId("p")
+                .subscription("s")
+                .batchTime(Duration.ZERO)
                 .build());
     assertThrows(IllegalArgumentException.class, () -> PubSubConfig.parseDuration("test", "10x"));
     assertThrows(
