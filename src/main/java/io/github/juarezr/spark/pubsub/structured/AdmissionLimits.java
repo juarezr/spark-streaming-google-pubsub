@@ -37,7 +37,8 @@ final class AdmissionLimits {
     long maxRows = minPositive(config.batchCount(), spark.maxRows);
     long maxBytes = minPositive(config.batchSize(), spark.maxBytes);
     Duration waitTime = config.batchTime();
-    if (spark.maxTriggerDelayMs > 0 && spark.maxTriggerDelayMs < waitTime.toMillis()) {
+    if (spark.maxTriggerDelayMs > 0
+        && (waitTime == null || spark.maxTriggerDelayMs < waitTime.toMillis())) {
       waitTime = Duration.ofMillis(spark.maxTriggerDelayMs);
     }
     boolean singlePull = config.gatherMode() == GatherMode.PULL && spark.minRows <= 0;
@@ -58,6 +59,10 @@ final class AdmissionLimits {
 
   Duration waitTime() {
     return waitTime;
+  }
+
+  AdmissionLimits withWaitTime(Duration waitTime) {
+    return new AdmissionLimits(maxRows, maxBytes, minRows, waitTime, singlePull);
   }
 
   boolean singlePull() {

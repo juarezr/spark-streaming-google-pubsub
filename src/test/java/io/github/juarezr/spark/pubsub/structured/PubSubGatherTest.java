@@ -317,14 +317,14 @@ class PubSubGatherTest {
   }
 
   @Test
-  void idleBatchGatherKeepsTheCurrentOffset() {
+  void idleBatchGatherReturnsAfterFirstEmptyPull() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.pull(any(Duration.class), anyInt())).thenReturn(Collections.emptyList());
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .batchTime(Duration.ofMillis(80))
+            .batchTime(Duration.ofSeconds(10))
             .pullDeadline(Duration.ofMillis(20))
             .build();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
@@ -333,7 +333,49 @@ class PubSubGatherTest {
     Offset latest = stream.latestOffset();
 
     assertEquals(initial, latest);
-    verify(client, atLeast(1)).pull(any(Duration.class), anyInt());
+    verify(client, times(1)).pull(any(Duration.class), anyInt());
+  }
+
+  @Test
+  void unsetBatchTimeProbesWithoutPulling() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt())).thenReturn(messages(0, 1));
+    PubSubConfig config = PubSubConfig.builder().projectId("p").subscription("s").build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
+    Offset second = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
+
+    assertNull(first);
+    assertNull(second);
+    verify(client, never()).pull(any(Duration.class), anyInt());
+  }
+
+  @Test
+  void interruptAbortsGatherAndNacks() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.pull(any(Duration.class), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              Thread.currentThread().interrupt();
+              return messages(0, 2);
+            });
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .batchTime(Duration.ofSeconds(10))
+            .pullDeadline(Duration.ofSeconds(1))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    try {
+      Offset latest = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
+      assertNull(latest);
+      verify(client).nack(List.of("ack-0", "ack-1"));
+    } finally {
+      Thread.interrupted();
+    }
   }
 
   @Test

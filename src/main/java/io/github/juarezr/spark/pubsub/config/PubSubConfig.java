@@ -42,7 +42,6 @@ public final class PubSubConfig implements Serializable {
   public static final Duration DEFAULT_MAX_RETRY_TIME = Duration.ofSeconds(90);
   public static final Duration DEFAULT_PULL_DEADLINE = Duration.ofSeconds(20);
   public static final Duration DEFAULT_ACK_DEADLINE = Duration.ofSeconds(60);
-  public static final Duration DEFAULT_BATCH_TIME = Duration.ofSeconds(10);
   public static final long DEFAULT_BATCH_SIZE = 128L * 1024 * 1024;
 
   private final String projectId;
@@ -100,7 +99,7 @@ public final class PubSubConfig implements Serializable {
     if (pullMaxMessages <= 0 || pullMaxMessages > 1000) {
       throw new IllegalArgumentException("pullMaxMessages must be between 1 and 1000");
     }
-    if (batchTime == null || batchTime.isZero() || batchTime.isNegative()) {
+    if (batchTime != null && (batchTime.isZero() || batchTime.isNegative())) {
       throw new IllegalArgumentException("batchTime must be > 0");
     }
     if (batchSize != 0 && batchSize < 1024L * 1024L) {
@@ -395,7 +394,7 @@ public final class PubSubConfig implements Serializable {
     private Duration pullDeadline = DEFAULT_PULL_DEADLINE;
     private Duration ackDeadline = DEFAULT_ACK_DEADLINE;
     private GatherMode gatherMode = GatherMode.BATCH;
-    private Duration batchTime = DEFAULT_BATCH_TIME;
+    private Duration batchTime;
     private long batchSize = DEFAULT_BATCH_SIZE;
     private long batchCount;
     private String numWriters = "1";

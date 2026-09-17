@@ -51,6 +51,8 @@ final class PubSubMicroBatchStream
   private volatile PublishTimeWindow lastGatheredWindow;
   private final ConcurrentMap<Long, List<PulledMessage>> messagesByBatch =
       new ConcurrentHashMap<>();
+  private final AutoBatchTime autoBatchTime;
+  private volatile boolean cancelled;
 
   PubSubMicroBatchStream(PubSubConfig config, int numPartitions) {
     this(config, numPartitions, PubSubSchema.tableSchema(config, null));
@@ -75,6 +77,7 @@ final class PubSubMicroBatchStream
     this.readSchema = readSchema == null ? PubSubSchema.tableSchema(config, null) : readSchema;
     this.client = client;
     this.ackCoordinator = new AckCoordinator(config.ackMode());
+    this.autoBatchTime = AutoBatchTime.create(config);
     this.numPartitions = Math.max(1, numPartitions);
     if (!startClient) {
       return;
@@ -119,7 +122,17 @@ final class PubSubMicroBatchStream
     if (lastProduced != null && !startConsumed(startOffset, lastProduced)) {
       return lastProduced;
     }
-    List<PulledMessage> pulled = gatherMessages(limits);
+    if (autoBatchTime.shouldProbe()) {
+      lastPullMessageCount.set(0);
+      lastPullPayloadBytes.set(0);
+      lastPullMessageAgeMs = null;
+      return nullIfEmpty ? null : currentOffset;
+    }
+    AdmissionLimits gatherLimits =
+        limits.withWaitTime(autoBatchTime.gatherWindow(limits.waitTime()));
+    long gatherStarted = System.nanoTime();
+    List<PulledMessage> pulled = gatherMessages(gatherLimits);
+    autoBatchTime.onGatherFinished(System.nanoTime() - gatherStarted, !pulled.isEmpty());
     if (pulled.isEmpty()) {
       lastPullMessageCount.set(0);
       lastPullPayloadBytes.set(0);
@@ -170,6 +183,9 @@ final class PubSubMicroBatchStream
   private List<PulledMessage> gatherMessages(AdmissionLimits limits) {
     List<PulledMessage> messages = new ArrayList<>();
     if (limits.singlePull()) {
+      if (gatherAborted()) {
+        return messages;
+      }
       int maxMessages = limits.messagesForNextPull(0, config.pullMaxMessages());
       if (maxMessages > 0) {
         messages.addAll(client.pull(config.pullDeadline(), maxMessages));
@@ -177,11 +193,16 @@ final class PubSubMicroBatchStream
       return messages;
     }
 
-    final long waitNanos = limits.waitTime().toNanos();
+    Duration wait = limits.waitTime();
+    final long waitNanos = wait == null ? config.pullDeadline().toNanos() : wait.toNanos();
     final long deadlineNanos = System.nanoTime() + waitNanos;
     long payloadBytes = 0L;
     try {
       while (System.nanoTime() < deadlineNanos) {
+        if (gatherAborted()) {
+          abortGather(messages);
+          return List.of();
+        }
         if (limits.reachedMax(messages.size(), payloadBytes)) {
           break;
         }
@@ -192,6 +213,11 @@ final class PubSubMicroBatchStream
           break;
         }
         List<PulledMessage> pulled = client.pull(rpcDeadline, maxMessages);
+        if (gatherAborted()) {
+          messages.addAll(pulled);
+          abortGather(messages);
+          return List.of();
+        }
         if (!pulled.isEmpty()) {
           messages.addAll(pulled);
           payloadBytes += PulledMessage.payloadBytes(pulled);
@@ -215,6 +241,8 @@ final class PubSubMicroBatchStream
               leaseWatchdog.update(ids);
             }
           }
+        } else if (config.gatherMode() == GatherMode.BATCH || limits.minRowsMet(messages.size())) {
+          break;
         }
         if (limits.reachedMax(messages.size(), payloadBytes)) {
           break;
@@ -224,19 +252,27 @@ final class PubSubMicroBatchStream
         }
       }
     } catch (RuntimeException e) {
-      leaseWatchdog.stop();
-      if (config.ackMode() == AckMode.AFTER_COMMIT && !messages.isEmpty()) {
-        try {
-          client.nack(PulledMessage.ackIds(messages));
-        } catch (RuntimeException nackError) {
-          LOG.warn("BATCH: Failed to nack messages after gather failure", nackError.getMessage());
-        } finally {
-          client.releaseMessages(messages);
-        }
-      }
+      abortGather(messages);
       throw e;
     }
     return messages;
+  }
+
+  private boolean gatherAborted() {
+    return cancelled || Thread.currentThread().isInterrupted();
+  }
+
+  private void abortGather(List<PulledMessage> messages) {
+    leaseWatchdog.stop();
+    if (config.ackMode() == AckMode.AFTER_COMMIT && !messages.isEmpty()) {
+      try {
+        client.nack(PulledMessage.ackIds(messages));
+      } catch (RuntimeException nackError) {
+        LOG.warn("BATCH: Failed to nack messages after gather abort: {}", nackError.getMessage());
+      } finally {
+        client.releaseMessages(messages);
+      }
+    }
   }
 
   private static Duration min(Duration left, Duration right) {
@@ -361,10 +397,12 @@ final class PubSubMicroBatchStream
       currentOffset = endOffset;
     }
     LOG.debug("BATCH: Committed offset batchId={}", endOffset.batchId());
+    autoBatchTime.onCommit();
   }
 
   @Override
   public void stop() {
+    cancelled = true;
     try {
       leaseWatchdog.stop();
       int uncommitted = 0;

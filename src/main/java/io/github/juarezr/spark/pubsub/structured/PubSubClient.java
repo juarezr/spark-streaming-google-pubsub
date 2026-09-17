@@ -181,7 +181,8 @@ final class PubSubClient implements Closeable, Serializable {
   List<PulledMessage> pull(Duration deadline, int maxMessages) {
     ensureStarted();
     final int capped = Math.max(1, Math.min(this.config.pullMaxMessages(), maxMessages));
-    return retryPolicy.execute("pull", () -> pullMessagesFromSubscription(deadline, capped));
+    return retryPolicy.execute(
+        "pull", () -> pullMessagesFromSubscription(deadline, capped), deadline);
   }
 
   private List<PulledMessage> pullMessagesFromSubscription(Duration deadline, int maxMessages) {
