@@ -51,7 +51,7 @@ The authentication defaults to **Application Default Credentials (ADC)**.
 | `seekSnapshot` | | Snapshot resource for `seek=snapshot` |
 | `pullMaxMessages` | `1000` | Messages requested by each Pull RPC (1–1000) |
 | `maxRetryTime` | `90s` | Retry window for ack/nack/lease-extend. Pull retries stop at remaining gather |
-| `pullDeadline` | `20s` | Deadline for one Pull long-poll. Idle gather returns after one empty Pull |
+| `pullDeadline` | `20s` | Deadline for one Pull long-poll. Idle gather returns after one empty Pull plus a 1s debounce |
 | `ackMode` | `afterCommit` | `afterCommit` or `early` |
 | `ackDeadline` | `60s` | Message lease, renewed about every third of this duration |
 | `gatherMode` | `batch` | `batch` gathers Pulls; `pull` emits one Pull per micro-batch |
@@ -163,7 +163,7 @@ The timing controls apply at different points for PubSub pulls and acks:
 | Spark | `Trigger.ProcessingTime` | When Spark asks for the next offset after the previous micro-batch finishes |
 | Spark | `ReadLimit` | `maxRowsPerTrigger` / `maxBytesPerTrigger` (Spark 4+) composed with `batchCount` / `batchSize` |
 | Connector | `batchTime` | How long one batch gathers Pull responses. Omit to auto-infer from `Trigger.ProcessingTime` |
-| Connector | `pullDeadline` | How long one healthy Pull RPC waits for messages. Idle gather returns after one empty Pull |
+| Connector | `pullDeadline` | How long one healthy Pull RPC waits for messages. Idle gather returns after one empty Pull plus a 1s debounce |
 | Connector | `ackDeadline` | How long Pub/Sub leases a delivered message; renewed every `ackDeadline/3` until Spark commits |
 | Connector | `maxRetryTime` | Retry window for ack/nack/lease-extend. Pull retries stop at remaining gather (`min(pullDeadline, remaining batchTime)`) |
 

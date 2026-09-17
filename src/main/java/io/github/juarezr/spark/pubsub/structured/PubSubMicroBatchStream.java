@@ -197,6 +197,7 @@ final class PubSubMicroBatchStream
     final long waitNanos = wait == null ? config.pullDeadline().toNanos() : wait.toNanos();
     final long deadlineNanos = System.nanoTime() + waitNanos;
     long payloadBytes = 0L;
+    boolean debounced = false;
     try {
       while (System.nanoTime() < deadlineNanos) {
         if (gatherAborted()) {
@@ -240,6 +241,35 @@ final class PubSubMicroBatchStream
             } else {
               leaseWatchdog.update(ids);
             }
+          }
+        } else if (config.gatherMode() == GatherMode.BATCH && messages.isEmpty() && !debounced) {
+          debounced = true;
+          Duration remainingDebounce =
+              Duration.ofNanos(Math.max(1L, deadlineNanos - System.nanoTime()));
+          Duration debounceDeadline = min(Duration.ofSeconds(1), remainingDebounce);
+          pulled = client.pull(debounceDeadline, maxMessages);
+          if (gatherAborted()) {
+            messages.addAll(pulled);
+            abortGather(messages);
+            return List.of();
+          }
+          if (pulled.isEmpty()) {
+            break;
+          }
+          messages.addAll(pulled);
+          payloadBytes += PulledMessage.payloadBytes(pulled);
+          if (config.ackMode() == AckMode.EARLY) {
+            client.acknowledge(PulledMessage.ackIds(pulled));
+            client.releaseMessages(pulled);
+          } else {
+            try {
+              client.extendAckDeadline(PulledMessage.ackIds(pulled), ackDeadlineSeconds());
+            } catch (RuntimeException e) {
+              LOG.warn(
+                  "BATCH: Failed to extend initial ack deadline while gathering: {}",
+                  e.getMessage());
+            }
+            leaseWatchdog.start(client, PulledMessage.ackIds(messages), ackDeadlineSeconds());
           }
         } else if (config.gatherMode() == GatherMode.BATCH || limits.minRowsMet(messages.size())) {
           break;
