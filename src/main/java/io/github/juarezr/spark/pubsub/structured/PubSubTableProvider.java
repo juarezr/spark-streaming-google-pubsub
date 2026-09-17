@@ -19,6 +19,7 @@ public final class PubSubTableProvider implements TableProvider, DataSourceRegis
 
   private static final Logger LOG = LoggerFactory.getLogger(PubSubTableProvider.class);
   private static final AtomicBoolean VERSION_LOGGED = new AtomicBoolean();
+  private static final AtomicBoolean CONFIG_LOGGED = new AtomicBoolean();
 
   @Override
   public String shortName() {
@@ -36,6 +37,9 @@ public final class PubSubTableProvider implements TableProvider, DataSourceRegis
       StructType schema, Transform[] partitioning, Map<String, String> properties) {
     logVersionOnce();
     PubSubConfig config = PubSubConfig.fromOptions(properties);
+    if (CONFIG_LOGGED.compareAndSet(false, true)) {
+      LOG.info("config {}", config.startupSummary());
+    }
     StructType table =
         schema != null && schema.length() > 0 ? schema : PubSubSchema.inferTableSchema(config);
     return new PubSubTable(config, table);
@@ -55,19 +59,15 @@ public final class PubSubTableProvider implements TableProvider, DataSourceRegis
     if (!VERSION_LOGGED.compareAndSet(false, true)) {
       return;
     }
-    LOG.info("{} {}", PubSubConfig.SHORT_NAME, implementationVersion());
+    LOG.info("format={}", PubSubConfig.SHORT_NAME);
+    LOG.info(
+        "version={} built={} git={}",
+        implementationVersion(),
+        PubSubBuildInfo.built(),
+        PubSubBuildInfo.git());
   }
 
   static String implementationVersion() {
-    try {
-      Package pkg = PubSubTableProvider.class.getPackage();
-      String version = pkg == null ? null : pkg.getImplementationVersion();
-      if (version == null || version.isBlank()) {
-        return "unknown";
-      }
-      return version;
-    } catch (Exception e) {
-      return "unknown";
-    }
+    return PubSubBuildInfo.version();
   }
 }

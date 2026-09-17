@@ -364,6 +364,47 @@ public final class PubSubConfig implements Serializable {
     return metadataMode;
   }
 
+  /** One-line option snapshot for startup logs. Omits credentials. */
+  public String startupSummary() {
+    String batch = batchTime == null ? "auto" : formatDuration(batchTime);
+    String size = batchSize <= 0 ? "off" : batchSize + "b";
+    String count = batchCount <= 0 ? "off" : Long.toString(batchCount);
+    StringBuilder line = new StringBuilder();
+    line.append("gatherMode=")
+        .append(gatherMode)
+        .append(" batchTime=")
+        .append(batch)
+        .append(" pullDeadline=")
+        .append(formatDuration(pullDeadline))
+        .append(" ackDeadline=")
+        .append(formatDuration(ackDeadline))
+        .append(" maxRetryTime=")
+        .append(formatDuration(maxRetryTime))
+        .append(" ackMode=")
+        .append(ackMode)
+        .append(" seek=")
+        .append(seekMode)
+        .append(" pullMaxMessages=")
+        .append(pullMaxMessages)
+        .append(" batchSize=")
+        .append(size)
+        .append(" batchCount=")
+        .append(count);
+    emulatorHost().ifPresent(host -> line.append(" emulatorHost=").append(host));
+    return line.toString();
+  }
+
+  private static String formatDuration(Duration duration) {
+    if (duration == null) {
+      return "-";
+    }
+    long ms = duration.toMillis();
+    if (ms % 1000L == 0L) {
+      return (ms / 1000L) + "s";
+    }
+    return ms + "ms";
+  }
+
   public String subscriptionPath() {
     if (subscription.startsWith("projects/")) {
       return subscription;
