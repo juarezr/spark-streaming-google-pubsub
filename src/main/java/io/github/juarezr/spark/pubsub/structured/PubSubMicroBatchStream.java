@@ -154,37 +154,33 @@ final class PubSubMicroBatchStream
       return lastProduced;
     }
     if (this.limitReached) {
-      this.lastPullMessageCount.set(0);
-      this.lastPullPayloadBytes.set(0);
-      this.lastPullMessageAgeMs = null;
+      resetMetrics();
       if (lastProduced != null && startConsumed(startOffset, lastProduced)) {
         commit(lastProduced);
       }
       return nullIfEmpty ? null : this.currentOffset;
     }
     if (!availableNow && autoBatchTime.shouldProbe()) {
-      lastPullMessageCount.set(0);
-      lastPullPayloadBytes.set(0);
-      lastPullMessageAgeMs = null;
+      resetMetrics();
       return nullIfEmpty ? null : currentOffset;
     }
-    AdmissionLimits gatherLimits =
-        availableNow
-            ? limits.withDrainUntilIdle()
-            : limits.withWaitTime(autoBatchTime.gatherWindow(limits.waitTime()));
-    long gatherStarted = System.nanoTime();
-    List<PulledMessage> pulled = gatherMessages(gatherLimits);
-    autoBatchTime.onGatherFinished(System.nanoTime() - gatherStarted, !pulled.isEmpty());
+    List<PulledMessage> pulled = gatherMessages(limits);
     if (pulled.isEmpty()) {
-      lastPullMessageCount.set(0);
-      lastPullPayloadBytes.set(0);
-      lastPullMessageAgeMs = null;
+      resetMetrics();
       if (lastProduced != null && startConsumed(startOffset, lastProduced)) {
         commit(lastProduced);
       }
       return nullIfEmpty ? null : currentOffset;
     }
     long batchId = nextBatchId.getAndIncrement();
+    PubSubOffset offset = produceNextOffset(pulled, batchId);
+    this.lastProduced = offset;
+    updateMetrics(pulled, batchId);
+    retainGatheredWindow(batchId, pulled);
+    return offset;
+  }
+
+  private PubSubOffset produceNextOffset(List<PulledMessage> pulled, long batchId) {
     PubSubOffset offset = new PubSubOffset(batchId);
     String batchKey = Long.toString(batchId);
     messagesByBatch.put(batchId, pulled);
@@ -209,113 +205,103 @@ final class PubSubMicroBatchStream
       }
       leaseWatchdog.start(client, ids, ackDeadlineSeconds());
     }
-    lastProduced = offset;
-    final int pulledSize = pulled.size();
-    final long pulledBytes = PulledMessage.payloadBytes(pulled);
-    lastPullMessageCount.set(pulledSize);
-    lastPullPayloadBytes.set(pulledBytes);
-    lastPullMessageAgeMs =
-        PubSubSourceMetrics.newestMessageAgeMs(pulled, System.currentTimeMillis());
-    retainGatheredWindow(batchId, pulled);
-    LOG.debug(
-        "BATCH: latestOffset batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
     return offset;
   }
 
-  private List<PulledMessage> gatherMessages(AdmissionLimits limits) {
-    if (limits.drainUntilIdle()) {
-      return gatherUntilIdleOrMax(limits);
+  private void resetMetrics() {
+    updateMetrics(null, -1L);
+  }
+
+  private void updateMetrics(List<PulledMessage> pulled, long batchId) {
+    if (pulled == null) {
+      this.lastPullMessageCount.set(0);
+      this.lastPullPayloadBytes.set(0);
+      this.lastPullMessageAgeMs = null;
+    } else {
+      final int pulledSize = pulled.size();
+      final long pulledBytes = PulledMessage.payloadBytes(pulled);
+      this.lastPullMessageCount.set(pulledSize);
+      this.lastPullPayloadBytes.set(pulledBytes);
+      long now = System.currentTimeMillis();
+      this.lastPullMessageAgeMs = PubSubSourceMetrics.newestMessageAgeMs(pulled, now);
+      LOG.debug(
+          "BATCH: latestOffset batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
     }
+  }
+
+  private List<PulledMessage> gatherMessages(AdmissionLimits gatherLimits) {
+    AdmissionLimits limits =
+        availableNow
+            ? gatherLimits.withDrainUntilIdle()
+            : gatherLimits.withWaitTime(this.autoBatchTime.gatherWindow(gatherLimits.waitTime()));
+
+    long gatherStarted = System.nanoTime();
+    List<PulledMessage> pulled =
+        limits.drainUntilIdle()
+            ? gatherUntilIdleOrMax(limits)
+            : limits.singlePull()
+                ? gatherMessagesFromSinglePull(limits)
+                : gatherMessagesUntilDeadline(limits);
+    long gatherFinished = System.nanoTime();
+
+    this.autoBatchTime.onGatherFinished(gatherFinished - gatherStarted, !pulled.isEmpty());
+    return pulled;
+  }
+
+  private List<PulledMessage> gatherMessagesFromSinglePull(AdmissionLimits limits) {
+
     List<PulledMessage> messages = new ArrayList<>();
-    if (limits.singlePull()) {
-      if (gatherAborted()) {
-        return messages;
-      }
-      int maxMessages = limits.messagesForNextPull(0, config.pullMaxMessages());
-      if (maxMessages > 0) {
-        messages.addAll(client.pull(config.pullDeadline(), maxMessages));
-      }
+    if (gatherAborted()) {
       return messages;
     }
+    int maxMessages = limits.messagesForNextPull(0, config.pullMaxMessages());
+    if (maxMessages > 0) {
+      messages.addAll(client.pull(config.pullDeadline(), maxMessages));
+    }
+    return messages;
+  }
 
+  private List<PulledMessage> gatherMessagesUntilDeadline(AdmissionLimits limits) {
+
+    List<PulledMessage> messages = new ArrayList<>();
     Duration wait = limits.waitTime();
-    final long waitNanos = wait == null ? config.pullDeadline().toNanos() : wait.toNanos();
+    Duration pullDeadline = config.pullDeadline();
+    final long waitNanos = wait == null ? pullDeadline.toNanos() : wait.toNanos();
     final long deadlineNanos = System.nanoTime() + waitNanos;
     long payloadBytes = 0L;
     boolean debounced = false;
     try {
       while (System.nanoTime() < deadlineNanos) {
         if (gatherAborted()) {
-          abortGather(messages);
-          return List.of();
+          return stopLeaseNackAndRelease(messages, null);
         }
         if (limits.reachedMax(messages.size(), payloadBytes)) {
           break;
         }
-        Duration remaining = Duration.ofNanos(Math.max(1L, deadlineNanos - System.nanoTime()));
-        final Duration rpcDeadline = min(config.pullDeadline(), remaining);
         int maxMessages = limits.messagesForNextPull(messages.size(), config.pullMaxMessages());
         if (maxMessages <= 0) {
           break;
         }
+        final Duration rpcDeadline = calcRpcDeadline(pullDeadline, deadlineNanos);
         List<PulledMessage> pulled = client.pull(rpcDeadline, maxMessages);
         if (gatherAborted()) {
-          messages.addAll(pulled);
-          abortGather(messages);
-          return List.of();
+          return stopLeaseNackAndRelease(messages, pulled);
         }
         if (!pulled.isEmpty()) {
-          messages.addAll(pulled);
-          payloadBytes += PulledMessage.payloadBytes(pulled);
-          if (config.ackMode() == AckMode.EARLY) {
-            client.acknowledge(PulledMessage.ackIds(pulled));
-            client.releaseMessages(pulled);
-          } else {
-            try {
-              client.extendAckDeadline(PulledMessage.ackIds(pulled), ackDeadlineSeconds());
-            } catch (RuntimeException e) {
-              final String amount = PubSubClient.asString(rpcDeadline);
-              LOG.warn(
-                  "BATCH: Failed to extend initial ack deadline ({} remaining) while gathering: {}",
-                  amount,
-                  e.getMessage());
-            }
-            List<String> ids = PulledMessage.ackIds(messages);
-            if (messages.size() == pulled.size()) {
-              leaseWatchdog.start(client, ids, ackDeadlineSeconds());
-            } else {
-              leaseWatchdog.update(ids);
-            }
-          }
+          payloadBytes += extendMessagesOrAckEarlier(messages, pulled, rpcDeadline);
         } else if (config.gatherMode() == GatherMode.BATCH && messages.isEmpty() && !debounced) {
           debounced = true;
-          Duration remainingDebounce =
-              Duration.ofNanos(Math.max(1L, deadlineNanos - System.nanoTime()));
-          Duration debounceDeadline = min(Duration.ofSeconds(1), remainingDebounce);
-          pulled = client.pull(debounceDeadline, maxMessages);
+          Duration debounceDeadline = Duration.ofSeconds(1);
+
+          final Duration rpcDeadline2 = calcRpcDeadline(debounceDeadline, deadlineNanos);
+          List<PulledMessage> pulled2 = client.pull(rpcDeadline2, maxMessages);
           if (gatherAborted()) {
-            messages.addAll(pulled);
-            abortGather(messages);
-            return List.of();
+            return stopLeaseNackAndRelease(messages, pulled2);
           }
-          if (pulled.isEmpty()) {
+          if (pulled2.isEmpty()) {
             break;
           }
-          messages.addAll(pulled);
-          payloadBytes += PulledMessage.payloadBytes(pulled);
-          if (config.ackMode() == AckMode.EARLY) {
-            client.acknowledge(PulledMessage.ackIds(pulled));
-            client.releaseMessages(pulled);
-          } else {
-            try {
-              client.extendAckDeadline(PulledMessage.ackIds(pulled), ackDeadlineSeconds());
-            } catch (RuntimeException e) {
-              LOG.warn(
-                  "BATCH: Failed to extend initial ack deadline while gathering: {}",
-                  e.getMessage());
-            }
-            leaseWatchdog.start(client, PulledMessage.ackIds(messages), ackDeadlineSeconds());
-          }
+          payloadBytes += extendMessagesOrAckEarlier(messages, pulled2, rpcDeadline2);
         } else if (config.gatherMode() == GatherMode.BATCH || limits.minRowsMet(messages.size())) {
           break;
         }
@@ -327,10 +313,45 @@ final class PubSubMicroBatchStream
         }
       }
     } catch (RuntimeException e) {
-      abortGather(messages);
+      stopLeaseNackAndRelease(messages, null);
       throw e;
     }
     return messages;
+  }
+
+  private long extendMessagesOrAckEarlier(
+      List<PulledMessage> messages, List<PulledMessage> pulled, Duration rpcDeadline) {
+
+    messages.addAll(pulled);
+    long payloadBytes = PulledMessage.payloadBytes(pulled);
+    if (config.ackMode() == AckMode.EARLY) {
+      client.acknowledge(PulledMessage.ackIds(pulled));
+      client.releaseMessages(pulled);
+    } else {
+      try {
+        client.extendAckDeadline(PulledMessage.ackIds(pulled), ackDeadlineSeconds());
+      } catch (RuntimeException e) {
+        final String amount = PubSubClient.asString(rpcDeadline);
+        LOG.warn(
+            "BATCH: Failed to extend initial ack deadline ({} remaining) while gathering: {}",
+            amount,
+            e.getMessage());
+      }
+      List<String> ids = PulledMessage.ackIds(messages);
+      boolean sameSize = messages.size() == pulled.size();
+      if (sameSize) {
+        leaseWatchdog.start(client, ids, ackDeadlineSeconds());
+      } else {
+        leaseWatchdog.update(ids);
+      }
+    }
+    return payloadBytes;
+  }
+
+  private Duration calcRpcDeadline(Duration pullDeadline, final long deadlineNanos) {
+    Duration remaining = Duration.ofNanos(Math.max(1L, deadlineNanos - System.nanoTime()));
+    final Duration rpcDeadline = min(pullDeadline, remaining);
+    return rpcDeadline;
   }
 
   /**
@@ -345,8 +366,7 @@ final class PubSubMicroBatchStream
     try {
       while (true) {
         if (gatherAborted()) {
-          abortGather(messages);
-          return List.of();
+          return stopLeaseNackAndRelease(messages, null);
         }
         if (limits.reachedMax(messages.size(), payloadBytes)) {
           break;
@@ -357,9 +377,7 @@ final class PubSubMicroBatchStream
         }
         List<PulledMessage> pulled = client.pull(config.pullDeadline(), maxMessages);
         if (gatherAborted()) {
-          messages.addAll(pulled);
-          abortGather(messages);
-          return List.of();
+          return stopLeaseNackAndRelease(messages, pulled);
         }
         if (pulled.isEmpty()) {
           emptyStreak++;
@@ -381,6 +399,7 @@ final class PubSubMicroBatchStream
               config.limitTime().orElse("-"),
               split.inRange.size(),
               split.overLimit.size());
+
           if (!split.inRange.isEmpty()) {
             payloadBytes += retainDrainPull(messages, split.inRange);
           }
@@ -390,7 +409,7 @@ final class PubSubMicroBatchStream
         payloadBytes += retainDrainPull(messages, split.inRange);
       }
     } catch (RuntimeException e) {
-      abortGather(messages);
+      stopLeaseNackAndRelease(messages, null);
       throw e;
     }
     return messages;
@@ -464,7 +483,12 @@ final class PubSubMicroBatchStream
     return cancelled || Thread.currentThread().isInterrupted();
   }
 
-  private void abortGather(List<PulledMessage> messages) {
+  private List<PulledMessage> stopLeaseNackAndRelease(
+      List<PulledMessage> messages, List<PulledMessage> pulled) {
+
+    if (pulled != null) {
+      messages.addAll(pulled);
+    }
     leaseWatchdog.stop();
     if (config.ackMode() == AckMode.AFTER_COMMIT && !messages.isEmpty()) {
       try {
@@ -475,6 +499,7 @@ final class PubSubMicroBatchStream
         client.releaseMessages(messages);
       }
     }
+    return List.of();
   }
 
   private static Duration min(Duration left, Duration right) {
