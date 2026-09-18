@@ -5,6 +5,7 @@ import io.github.juarezr.spark.pubsub.config.GatherMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import java.io.IOException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -60,6 +61,7 @@ final class PubSubMicroBatchStream
   private final AutoBatchTime autoBatchTime;
   private volatile boolean cancelled;
   private volatile boolean availableNow;
+  private volatile boolean limitReached;
 
   PubSubMicroBatchStream(PubSubConfig config, int numPartitions) {
     this(config, numPartitions, PubSubSchema.tableSchema(config, null));
@@ -99,10 +101,18 @@ final class PubSubMicroBatchStream
   @Override
   public void prepareForTriggerAvailableNow() {
     this.availableNow = true;
-    LOG.info(
-        "BATCH: AvailableNow drain enabled; stop after {} consecutive empty Pulls"
-            + " (Pub/Sub has no log-end offset; use seek=snapshot for recovery)",
-        AVAILABLE_NOW_IDLE_PULLS);
+    if (config.limitTime().isPresent()) {
+      LOG.info(
+          "BATCH: AvailableNow recovery drain; limitTime={} exclusive; stop at bound or {}"
+              + " consecutive empty Pulls",
+          config.limitTime().get(),
+          AVAILABLE_NOW_IDLE_PULLS);
+    } else {
+      LOG.info(
+          "BATCH: AvailableNow drain enabled; stop after {} consecutive empty Pulls"
+              + " (Pub/Sub has no log-end offset; use seek=snapshot for recovery)",
+          AVAILABLE_NOW_IDLE_PULLS);
+    }
   }
 
   @Override
@@ -135,8 +145,22 @@ final class PubSubMicroBatchStream
    * the watchdog renews the first batch.
    */
   private Offset latestOffset(Offset startOffset, AdmissionLimits limits, boolean nullIfEmpty) {
+
+    if (config.limitTime().isPresent() && !this.availableNow) {
+      throw new IllegalStateException(
+          "limitTime requires Trigger.AvailableNow(); ProcessingTime cannot stop at the bound");
+    }
     if (lastProduced != null && !startConsumed(startOffset, lastProduced)) {
       return lastProduced;
+    }
+    if (this.limitReached) {
+      this.lastPullMessageCount.set(0);
+      this.lastPullPayloadBytes.set(0);
+      this.lastPullMessageAgeMs = null;
+      if (lastProduced != null && startConsumed(startOffset, lastProduced)) {
+        commit(lastProduced);
+      }
+      return nullIfEmpty ? null : this.currentOffset;
     }
     if (!availableNow && autoBatchTime.shouldProbe()) {
       lastPullMessageCount.set(0);
@@ -348,33 +372,92 @@ final class PubSubMicroBatchStream
           }
           continue;
         }
-        emptyStreak = 0;
-        boolean first = messages.isEmpty();
-        messages.addAll(pulled);
-        payloadBytes += PulledMessage.payloadBytes(pulled);
-        if (config.ackMode() == AckMode.EARLY) {
-          client.acknowledge(PulledMessage.ackIds(pulled));
-          client.releaseMessages(pulled);
-        } else {
-          try {
-            client.extendAckDeadline(PulledMessage.ackIds(pulled), ackDeadlineSeconds());
-          } catch (RuntimeException e) {
-            LOG.warn(
-                "BATCH: Failed to extend initial ack deadline while draining: {}", e.getMessage());
+        BoundSplit split = splitAtLimit(pulled);
+        if (!split.overLimit.isEmpty()) {
+          this.limitReached = true;
+          nackOverLimit(split.overLimit);
+          LOG.info(
+              "BATCH: AvailableNow reached limitTime={}; inRange={} overLimit={}",
+              config.limitTime().orElse("-"),
+              split.inRange.size(),
+              split.overLimit.size());
+          if (!split.inRange.isEmpty()) {
+            payloadBytes += retainDrainPull(messages, split.inRange);
           }
-          List<String> ids = PulledMessage.ackIds(messages);
-          if (first) {
-            leaseWatchdog.start(client, ids, ackDeadlineSeconds());
-          } else {
-            leaseWatchdog.update(ids);
-          }
+          break;
         }
+        emptyStreak = 0;
+        payloadBytes += retainDrainPull(messages, split.inRange);
       }
     } catch (RuntimeException e) {
       abortGather(messages);
       throw e;
     }
     return messages;
+  }
+
+  private static final class BoundSplit {
+    final List<PulledMessage> inRange;
+    final List<PulledMessage> overLimit;
+
+    BoundSplit(List<PulledMessage> inRange, List<PulledMessage> overLimit) {
+      this.inRange = inRange;
+      this.overLimit = overLimit;
+    }
+  }
+
+  private BoundSplit splitAtLimit(List<PulledMessage> pulled) {
+    Optional<Instant> limit = config.limitTimeAsInstant();
+    if (limit.isEmpty()) {
+      return new BoundSplit(pulled, List.of());
+    }
+    long boundMillis = limit.get().toEpochMilli();
+    List<PulledMessage> inRange = new ArrayList<>();
+    List<PulledMessage> overLimit = new ArrayList<>();
+    for (PulledMessage message : pulled) {
+      if (message.publishTimeMillis() >= boundMillis) {
+        overLimit.add(message);
+      } else {
+        inRange.add(message);
+      }
+    }
+    return new BoundSplit(inRange, overLimit);
+  }
+
+  private void nackOverLimit(List<PulledMessage> overLimit) {
+    if (overLimit.isEmpty()) {
+      return;
+    }
+    try {
+      client.nack(PulledMessage.ackIds(overLimit));
+    } catch (RuntimeException e) {
+      LOG.warn(
+          "BATCH: Failed to nack {} over-limit messages: {}", overLimit.size(), e.getMessage());
+    } finally {
+      client.releaseMessages(overLimit);
+    }
+  }
+
+  private long retainDrainPull(List<PulledMessage> messages, List<PulledMessage> pulled) {
+    boolean first = messages.isEmpty();
+    messages.addAll(pulled);
+    if (config.ackMode() == AckMode.EARLY) {
+      client.acknowledge(PulledMessage.ackIds(pulled));
+      client.releaseMessages(pulled);
+      return PulledMessage.payloadBytes(pulled);
+    }
+    try {
+      client.extendAckDeadline(PulledMessage.ackIds(pulled), ackDeadlineSeconds());
+    } catch (RuntimeException e) {
+      LOG.warn("BATCH: Failed to extend initial ack deadline while draining: {}", e.getMessage());
+    }
+    List<String> ids = PulledMessage.ackIds(messages);
+    if (first) {
+      leaseWatchdog.start(client, ids, ackDeadlineSeconds());
+    } else {
+      leaseWatchdog.update(ids);
+    }
+    return PulledMessage.payloadBytes(pulled);
   }
 
   private boolean gatherAborted() {
@@ -565,7 +648,8 @@ final class PubSubMicroBatchStream
         uncommitted <= 0
             ? "BATCH: Stopping stream; 0 uncommitted messages found; Last batch is:"
             : String.format(
-                "BATCH: Stopping stream; %d uncommitted messages will redeliver if not committed; Last batch is:",
+                "BATCH: Stopping stream; %d uncommitted messages will redeliver if not committed;"
+                    + " Last batch is:",
                 uncommitted);
     LOG.info(window.formatStats(batchId, prefix));
   }
@@ -584,6 +668,10 @@ final class PubSubMicroBatchStream
 
   boolean availableNow() {
     return availableNow;
+  }
+
+  boolean limitReached() {
+    return limitReached;
   }
 
   @Override

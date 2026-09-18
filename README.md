@@ -49,6 +49,7 @@ The authentication defaults to **Application Default Credentials (ADC)**.
 | `seek` | `none` | `none`, `beginning`, `timestamp`, or `snapshot` |
 | `seekTime` | | Epoch milliseconds or RFC-3339 instant with `Z`/offset |
 | `seekSnapshot` | | Snapshot resource for `seek=snapshot` |
+| `limitTime` | | Exclusive Pub/Sub `publishTime` upper bound (same formats as `seekTime`). Requires `Trigger.AvailableNow()`. Window is `[seekTime, limitTime)` when `seek=timestamp` |
 | `pullMaxMessages` | `1000` | Messages requested by each Pull RPC (1–1000) |
 | `maxRetryTime` | `90s` | Retry window for ack/nack/lease-extend. Pull retries stop at remaining gather |
 | `pullDeadline` | `20s` | Deadline for one Pull long-poll. Idle gather returns after one empty Pull plus a 1s debounce |
@@ -229,8 +230,9 @@ gathering and sink processing.
   two Pull loops.
 - **`Trigger.Once()`:** set `batchTime` explicitly.
 - **`Trigger.AvailableNow()`:** skip auto `batchTime`. Keep `batchCount` or `batchSize` so the drain
-  is chunked. Use `seek=snapshot` on a recovery subscription; shorten `pullDeadline` if a 3-Pull
-  idle wait is too long.
+  is chunked. Use `seek=snapshot` (or `seek=timestamp`) on a recovery subscription; set `limitTime`
+  to stop at an exclusive publish-time bound. Shorten `pullDeadline` if a 3-Pull idle wait is too
+  long. `limitTime` throws unless the trigger is AvailableNow.
 
 The driver holds message byte arrays, ack ids, attributes, and serialization copies.
 Reserve roughly 3–5 times the configured payload batch size as temporary driver-heap memory headroom.
@@ -260,31 +262,6 @@ messages
     .awaitTermination();
 ```
 
-Snapshot recovery with `Trigger.AvailableNow` (dedicated subscription; seek once at start):
-
-```java
-Dataset<Row> recovered = spark.readStream()
-    .format("google-pubsub")
-    .option("projectId", "my-project")
-    .option("subscription", "recovery-subscription")
-    .option("seek", "snapshot")
-    .option("seekSnapshot", "projects/my-project/snapshots/recovery")
-    .option("ackMode", "afterCommit")
-    .option("gatherMode", "batch")
-    .option("batchCount", "5000")
-    .option("pullDeadline", "2s")
-    .load();
-
-recovered
-    .writeStream()
-    .format("parquet")
-    .trigger(Trigger.AvailableNow())
-    .option("path", "gs://bucket/tables/event-recovered")
-    .option("checkpointLocation", "gs://bucket/checkpoints/event-recovered")
-    .start()
-    .awaitTermination();
-```
-
 ### Structured Streaming (Scala)
 
 See [`examples/scala/StructuredStreamingExample.scala`](examples/scala/StructuredStreamingExample.scala).
@@ -304,6 +281,64 @@ messages = (
 ```
 
 Full script: [`examples/python/structured_streaming_example.py`](examples/python/structured_streaming_example.py).
+
+### Failure Recovery (Java)
+
+For recoverying from failures and errors while still running a continuos streaming read from a subscription, follow this procedure:
+
+1. Make a snapshot from the subscription
+2. Create a script or application for the recovery task
+3. Set the following settings:
+    1. In Spark use the trigger mode: `Trigger.AvailableNow`
+    2. Set the following parameters of the connector with the time range desired: `seekMode`, `seekTime`, and `limitTime`.
+    3. Start the streaming. The connector will run until the timestamp indicated by `limitTime` and will exit after.
+
+```mermaid
+flowchart LR
+  subgraph recoveryPath [Recovery Behavior]
+    rStart[seek or current cursor]
+    rPull[Pull]
+    rSplit[Split by publishTime]
+    rWrite[Spark write and commit]
+    rStop[latestOffset null]
+    rStart --> rPull --> rSplit
+    rSplit -->|in-range under caps| rWrite
+    rWrite --> rPull
+    rSplit -->|publishTime greater or equal limitTime| rNack[Nack over-limit]
+    rNack --> rLast[Write leftover in-range]
+    rLast --> rStop
+    rSplit -->|3 empty Pulls| rStop
+  end
+```
+
+Recovery drains in micro-batches (`batchCount` / `batchSize`), then Spark stops when the micro-batch returns null: either 3 consecutive empty Pulls, or the first Pull that contains a message with `publishTime >= limitTime` (exclusive).
+Over-limit messages are nacked and left on the subscription. Pub/Sub Pull order is not a publish-time log; older stragglers after that bound Pull are not read.
+
+Code example for recovery from snapshot with `Trigger.AvailableNow` (same subscription; using snapshot; seek once at start):
+
+```java
+Dataset<Row> recovered = spark.readStream()
+    .format("google-pubsub")
+    .option("projectId", "my-project")
+    .option("subscription", "my-subscription")
+    .option("seek", "snapshot")
+    .option("seekSnapshot", "projects/my-project/snapshots/recovery")
+    .option("limitTime", "2026-09-18T12:34:45Z")
+    .option("ackMode", "afterCommit")
+    .option("gatherMode", "batch")
+    .option("batchCount", "25000")
+    .option("pullDeadline", "2s")
+    .load();
+
+recovered
+    .writeStream()
+    .format("parquet")
+    .trigger(Trigger.AvailableNow())
+    .option("path", "gs://bucket/tables/event-recovered")
+    .option("checkpointLocation", "gs://bucket/checkpoints/event-recovered")
+    .start()
+    .awaitTermination();
+```
 
 ## Platform Usage
 
@@ -371,9 +406,10 @@ This connector is a **read-only Structured Streaming (micro-batch)** source. The
 - **Trigger.Once** — works only with an explicit `batchTime`. If `batchTime` is unset, the empty-gap
   probe is the only micro-batch and the query can stop without Pulling.
 - **Trigger.AvailableNow** — implemented as drain-until-idle (`SupportsTriggerAvailableNow`). There
-  is no durable log-end offset. The query stops after 3 consecutive empty Pulls. Rate limits via
+  is no durable log-end offset. The query stops after 3 consecutive empty Pulls, or sooner when
+  `limitTime` is set and a Pull contains `publishTime >= limitTime`. Rate limits via
   `SupportsAdmissionControl` (`batchCount` / `batchSize`, plus `maxRowsPerTrigger` /
-  `maxBytesPerTrigger` on Spark 4+) still split the drain.
+  `maxBytesPerTrigger` on Spark 4+) still split the drain. `limitTime` requires this trigger.
 - **Continuous Processing** — experimental; Spark recommends Real-time Mode instead. Same lease-model mismatch.
 - **Streaming sink and batch `spark.read`** — a subscription is a queue, not a table. Rewind/replay uses explicit `seek` / snapshot **options**, not a batch scan.
 - **SQL filter pushdown that seeks** — a `WHERE publishtime >= …` must not rewind a **shared** subscription. Filter on attributes with a GCP subscription filter; rewind with explicit `seek`.

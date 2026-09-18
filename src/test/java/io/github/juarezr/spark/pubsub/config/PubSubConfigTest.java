@@ -185,6 +185,61 @@ class PubSubConfigTest {
   }
 
   @Test
+  void fromOptionsParsesLimitTime() {
+    Map<String, String> options = new HashMap<>();
+    options.put("projectId", "p");
+    options.put("subscription", "s");
+    options.put("limitTime", "2024-08-07T15:00:29.028Z");
+
+    PubSubConfig config = PubSubConfig.fromOptions(options);
+
+    assertEquals("2024-08-07T15:00:29.028Z", config.limitTime().orElseThrow());
+    assertEquals(
+        Instant.parse("2024-08-07T15:00:29.028Z"), config.limitTimeAsInstant().orElseThrow());
+    assertTrue(config.startupSummary().contains("limitTime=2024-08-07T15:00:29.028Z"));
+  }
+
+  @Test
+  void blankLimitTimeStaysUnset() {
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").limitTime("  ").build();
+    assertTrue(config.limitTime().isEmpty());
+    assertTrue(config.startupSummary().contains("limitTime=-"));
+  }
+
+  @Test
+  void limitTimeMustBeAfterSeekTime() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            PubSubConfig.builder()
+                .projectId("p")
+                .subscription("s")
+                .seekMode(SeekMode.TIMESTAMP)
+                .seekTime("2000")
+                .limitTime("2000")
+                .build());
+    assertDoesNotThrow(
+        () ->
+            PubSubConfig.builder()
+                .projectId("p")
+                .subscription("s")
+                .seekMode(SeekMode.TIMESTAMP)
+                .seekTime("2000")
+                .limitTime("2001")
+                .build());
+  }
+
+  @Test
+  void parseInstantNamesTheOption() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> PubSubConfig.parseInstant(PubSubConfig.LIMIT_TIME, "not-a-time"));
+    assertTrue(ex.getMessage().contains("limitTime"));
+  }
+
+  @Test
   void implementationVersionDoesNotThrow() {
     String version = assertDoesNotThrow(PubSubConfig::implementationVersion);
     assertFalse(version == null || version.isBlank());

@@ -36,6 +36,7 @@ public final class PubSubConfig implements Serializable {
   public static final String SEEK = "seek";
   public static final String SEEK_TIME = "seekTime";
   public static final String SEEK_SNAPSHOT = "seekSnapshot";
+  public static final String LIMIT_TIME = "limitTime";
   public static final String CREDENTIALS_FILE = "credentialsFile";
   public static final String EMULATOR_HOST = "emulatorHost";
   public static final String SCHEMA_MODE = "schemaMode";
@@ -67,6 +68,7 @@ public final class PubSubConfig implements Serializable {
   private final SeekMode seekMode;
   private final String seekTime;
   private final String seekSnapshot;
+  private final String limitTime;
   private final String credentialsFile;
   private final String emulatorHost;
   private final SchemaMode schemaMode;
@@ -89,6 +91,7 @@ public final class PubSubConfig implements Serializable {
     this.seekMode = builder.seekMode == null ? SeekMode.NONE : builder.seekMode;
     this.seekTime = builder.seekTime;
     this.seekSnapshot = builder.seekSnapshot;
+    this.limitTime = builder.limitTime;
     this.credentialsFile = builder.credentialsFile;
     this.emulatorHost = builder.emulatorHost;
     this.schemaMode = builder.schemaMode == null ? SchemaMode.BASIC : builder.schemaMode;
@@ -151,6 +154,15 @@ public final class PubSubConfig implements Serializable {
     if (seekMode == SeekMode.SNAPSHOT && (seekSnapshot == null || seekSnapshot.isBlank())) {
       throw new IllegalArgumentException("seek=snapshot requires seekSnapshot");
     }
+    if (limitTime != null && !limitTime.isBlank()) {
+      Instant limit = parseInstant(LIMIT_TIME, limitTime);
+      if (seekMode == SeekMode.TIMESTAMP) {
+        Instant seek = parseSeekTime(seekTime);
+        if (!limit.isAfter(seek)) {
+          throw new IllegalArgumentException("limitTime must be > seekTime");
+        }
+      }
+    }
   }
 
   public static PubSubConfig fromOptions(Map<String, String> options) {
@@ -208,6 +220,7 @@ public final class PubSubConfig implements Serializable {
     }
     b.seekTime(first(normalized, "seektime"));
     b.seekSnapshot(first(normalized, "seeksnapshot"));
+    b.limitTime(first(normalized, "limittime"));
     b.credentialsFile(first(normalized, "credentialsfile", "credentials"));
     b.emulatorHost(first(normalized, "emulatorhost"));
     String schemaMode = first(normalized, "schemamode");
@@ -263,6 +276,10 @@ public final class PubSubConfig implements Serializable {
   }
 
   static Instant parseSeekTime(String raw) {
+    return parseInstant(SEEK_TIME, raw);
+  }
+
+  static Instant parseInstant(String option, String raw) {
     String value = raw == null ? "" : raw.trim();
     try {
       if (!value.isEmpty() && value.chars().allMatch(Character::isDigit)) {
@@ -271,7 +288,8 @@ public final class PubSubConfig implements Serializable {
       return OffsetDateTime.parse(value).toInstant();
     } catch (Exception e) {
       throw new IllegalArgumentException(
-          "Invalid seekTime '" + raw + "'. Use epoch milliseconds or RFC-3339 with Z/offset.", e);
+          "Invalid " + option + " '" + raw + "'. Use epoch milliseconds or RFC-3339 with Z/offset.",
+          e);
     }
   }
 
@@ -355,6 +373,15 @@ public final class PubSubConfig implements Serializable {
     return Optional.ofNullable(seekSnapshot).filter(t -> !t.isBlank());
   }
 
+  public Optional<String> limitTime() {
+    return Optional.ofNullable(limitTime).filter(t -> !t.isBlank());
+  }
+
+  /** Parsed {@link #limitTime()} value; empty when unset. */
+  public Optional<Instant> limitTimeAsInstant() {
+    return limitTime().map(t -> parseInstant(LIMIT_TIME, t));
+  }
+
   public Optional<String> credentialsFile() {
     return Optional.ofNullable(credentialsFile).filter(t -> !t.isBlank());
   }
@@ -387,14 +414,14 @@ public final class PubSubConfig implements Serializable {
     return PubSubBuildInfo.version();
   }
 
+  /** One-line option snapshot for startup logs. Omits credentials. */
   public void logStartupSummaryOnce() {
     if (CONFIG_LOGGED.compareAndSet(false, true)) {
       LOG.info("config {}", this.startupSummary());
     }
   }
 
-  /** One-line option snapshot for startup logs. Omits credentials. */
-  public String startupSummary() {
+  String startupSummary() {
     String batch = batchTime == null ? "auto" : formatDuration(batchTime);
     String size = batchSize <= 0 ? "off" : batchSize + "b";
     String count = batchCount <= 0 ? "off" : Long.toString(batchCount);
@@ -413,6 +440,8 @@ public final class PubSubConfig implements Serializable {
         .append(ackMode)
         .append(" seek=")
         .append(seekMode)
+        .append(" limitTime=")
+        .append(limitTime().orElse("-"))
         .append(" pullMaxMessages=")
         .append(pullMaxMessages)
         .append(" batchSize=")
@@ -428,7 +457,9 @@ public final class PubSubConfig implements Serializable {
       return "-";
     }
     long ms = duration.toMillis();
-    if (ms % 1000L == 0L) {
+    if (ms % 60000L == 0L) {
+      return (ms / 60000L) + "min";
+    } else if (ms % 1000L == 0L) {
       return (ms / 1000L) + "s";
     }
     return ms + "ms";
@@ -471,6 +502,7 @@ public final class PubSubConfig implements Serializable {
     private SeekMode seekMode = SeekMode.NONE;
     private String seekTime;
     private String seekSnapshot;
+    private String limitTime;
     private String credentialsFile;
     private String emulatorHost;
     private SchemaMode schemaMode = SchemaMode.BASIC;
@@ -553,6 +585,11 @@ public final class PubSubConfig implements Serializable {
 
     public Builder seekSnapshot(String seekSnapshot) {
       this.seekSnapshot = seekSnapshot;
+      return this;
+    }
+
+    public Builder limitTime(String limitTime) {
+      this.limitTime = limitTime;
       return this;
     }
 
