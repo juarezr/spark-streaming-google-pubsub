@@ -1,6 +1,6 @@
 // Minimal Scala Structured Streaming example (illustrative).
-// spark-shell --packages io.github.juarezr:spark-streaming-google-pubsub_2.12:0.6.3
-// Spark 4.x: spark-streaming-google-pubsub_2.13:0.6.3
+// spark-shell --packages io.github.juarezr:spark-streaming-google-pubsub_2.12:0.7.0
+// Spark 4.x: spark-streaming-google-pubsub_2.13:0.7.0
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.streaming.Trigger

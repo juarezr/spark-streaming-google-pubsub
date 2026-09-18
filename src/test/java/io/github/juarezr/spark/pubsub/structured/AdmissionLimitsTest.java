@@ -90,4 +90,20 @@ class AdmissionLimitsTest {
     assertTrue(limits.singlePull());
     assertEquals(10, limits.messagesForNextPull(0, 1000));
   }
+
+  @Test
+  void drainUntilIdleDisablesSinglePull() {
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .gatherMode(GatherMode.PULL)
+            .batchSize(0)
+            .build();
+    AdmissionLimits limits =
+        AdmissionLimits.from(config, ReadLimit.maxRows(10)).withDrainUntilIdle();
+
+    assertFalse(limits.singlePull());
+    assertTrue(limits.drainUntilIdle());
+  }
 }

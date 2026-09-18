@@ -4,7 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.api.gax.grpc.GrpcStatusCode;
@@ -95,6 +97,48 @@ class PubSubClientPullTimeoutTest {
   }
 
   @Test
+  void idleDebounceSecondEmptyReturnsWithoutBatch() throws Exception {
+    SubscriberStub stub =
+        stubThatPullsThenTimesOut(PullResponse.getDefaultInstance(), deadlineExceeded());
+    PubSubClient client = clientWithStub(stub);
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .batchTime(Duration.ofMillis(80))
+            .pullDeadline(Duration.ofMillis(20))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset initial = stream.initialOffset();
+    Offset latest = stream.latestOffset();
+
+    assertEquals(initial, latest);
+    verify(stub.pullCallable(), atLeast(2)).call(any(PullRequest.class), any());
+  }
+
+  @Test
+  void idleDebounceSecondPullContinuesGather() throws Exception {
+    SubscriberStub stub = stubThatPullsEmptyThenMessagesThenTimeout();
+    stubModifyAck(stub);
+    PubSubClient client = clientWithStub(stub);
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .batchCount(100)
+            .batchTime(Duration.ofMillis(80))
+            .pullDeadline(Duration.ofMillis(20))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset latest = stream.latestOffset();
+    InputPartition[] partitions = stream.planInputPartitions(stream.initialOffset(), latest);
+
+    assertEquals(2, ((PubSubInputPartition) partitions[0]).messages().size());
+  }
+
+  @Test
   void pullUnavailableDoesNotRetryPastPullDeadline() throws Exception {
     SubscriberStub stub = stubThatThrowsOnPull(new RuntimeException("UNAVAILABLE"));
     PubSubClient client = clientWithStub(stub);
@@ -109,6 +153,18 @@ class PubSubClientPullTimeoutTest {
     UnaryCallable<PullRequest, PullResponse> pull = mock(UnaryCallable.class);
     when(stub.pullCallable()).thenReturn(pull);
     when(pull.call(any(PullRequest.class), any())).thenThrow(error);
+    return stub;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static SubscriberStub stubThatPullsEmptyThenMessagesThenTimeout() {
+    SubscriberStub stub = mock(SubscriberStub.class);
+    UnaryCallable<PullRequest, PullResponse> pull = mock(UnaryCallable.class);
+    when(stub.pullCallable()).thenReturn(pull);
+    when(pull.call(any(PullRequest.class), any()))
+        .thenReturn(PullResponse.getDefaultInstance())
+        .thenReturn(messagesResponse(2))
+        .thenThrow(deadlineExceeded());
     return stub;
   }
 

@@ -1,6 +1,8 @@
 package io.github.juarezr.spark.pubsub.config;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -180,5 +182,66 @@ class PubSubConfigTest {
     assertThrows(
         IllegalArgumentException.class,
         () -> PubSubConfig.parseSeekTime("2024-08-07 12:00:29.028"));
+  }
+
+  @Test
+  void fromOptionsParsesLimitTime() {
+    Map<String, String> options = new HashMap<>();
+    options.put("projectId", "p");
+    options.put("subscription", "s");
+    options.put("limitTime", "2024-08-07T15:00:29.028Z");
+
+    PubSubConfig config = PubSubConfig.fromOptions(options);
+
+    assertEquals("2024-08-07T15:00:29.028Z", config.limitTime().orElseThrow());
+    assertEquals(
+        Instant.parse("2024-08-07T15:00:29.028Z"), config.limitTimeAsInstant().orElseThrow());
+    assertTrue(config.startupSummary().contains("limitTime=2024-08-07T15:00:29.028Z"));
+  }
+
+  @Test
+  void blankLimitTimeStaysUnset() {
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").limitTime("  ").build();
+    assertTrue(config.limitTime().isEmpty());
+    assertTrue(config.startupSummary().contains("limitTime=-"));
+  }
+
+  @Test
+  void limitTimeMustBeAfterSeekTime() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            PubSubConfig.builder()
+                .projectId("p")
+                .subscription("s")
+                .seekMode(SeekMode.TIMESTAMP)
+                .seekTime("2000")
+                .limitTime("2000")
+                .build());
+    assertDoesNotThrow(
+        () ->
+            PubSubConfig.builder()
+                .projectId("p")
+                .subscription("s")
+                .seekMode(SeekMode.TIMESTAMP)
+                .seekTime("2000")
+                .limitTime("2001")
+                .build());
+  }
+
+  @Test
+  void parseInstantNamesTheOption() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> PubSubConfig.parseInstant(PubSubConfig.LIMIT_TIME, "not-a-time"));
+    assertTrue(ex.getMessage().contains("limitTime"));
+  }
+
+  @Test
+  void implementationVersionDoesNotThrow() {
+    String version = assertDoesNotThrow(PubSubConfig::implementationVersion);
+    assertFalse(version == null || version.isBlank());
   }
 }

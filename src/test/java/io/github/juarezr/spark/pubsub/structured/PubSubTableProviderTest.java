@@ -1,9 +1,7 @@
 package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import java.util.Map;
 import org.apache.spark.sql.connector.catalog.CatalogV2Util;
@@ -42,11 +40,5 @@ class PubSubTableProviderTest {
     assertEquals("pubsub:projects/p/subscriptions/s", table.name());
     assertEquals(table.name(), table.toString());
     assertEquals("google-pubsub", provider.toString());
-  }
-
-  @Test
-  void implementationVersionDoesNotThrow() {
-    String version = assertDoesNotThrow(PubSubTableProvider::implementationVersion);
-    assertFalse(version == null || version.isBlank());
   }
 }

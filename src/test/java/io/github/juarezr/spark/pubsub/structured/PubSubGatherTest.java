@@ -333,7 +333,7 @@ class PubSubGatherTest {
     Offset latest = stream.latestOffset();
 
     assertEquals(initial, latest);
-    verify(client, times(1)).pull(any(Duration.class), anyInt());
+    verify(client, times(2)).pull(any(Duration.class), anyInt());
   }
 
   @Test

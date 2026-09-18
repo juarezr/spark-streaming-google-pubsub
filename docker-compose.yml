@@ -1,0 +1,31 @@
+#!/usr/bin/env -S bash -x -c 'docker compose --file docker-compose.yml run --rm -it emulator bash'
+
+#? Run tests using the container as emulator:
+
+#$ docker compose up --detach
+#
+#$ PUBSUB_EMULATOR_HOST=localhost:8085 mvn -Pspark35 verify
+#
+#$ docker compose down --remove-orphans -v
+
+#? Run a shell inside the container manually using docker compose:
+#
+#$ docker compose run --rm -it emulator bash
+
+services:
+  emulator:
+    container_name: pubsub-emulator
+    hostname: emulator
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
+    ports:
+      - 8085:8085
+    stdin_open: true # docker run -i
+    tty: true # docker run -t
+    restart: unless-stopped
+    environment:
+      - PUBSUB_EMULATOR_HOST=localhost:8085
+    volumes:
+      - type: bind
+        source: .
+        target: /src
