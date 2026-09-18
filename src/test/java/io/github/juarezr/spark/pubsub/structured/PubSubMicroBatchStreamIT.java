@@ -1,5 +1,7 @@
 package io.github.juarezr.spark.pubsub.structured;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.google.api.gax.core.NoCredentialsProvider;
@@ -239,5 +241,96 @@ class PubSubMicroBatchStreamIT {
     boolean active = query.isActive();
     query.stop();
     assumeTrue(active, "Idle batch gather should leave the query running");
+  }
+
+  @Test
+  void availableNowDrainsAndStops(@TempDir Path tempDir) throws Exception {
+    String topic = "it-available-now-topic";
+    String subscription = "it-available-now-subscription";
+    int published = 15;
+    ProjectTopicName topicName = ProjectTopicName.of(PROJECT, topic);
+    ProjectSubscriptionName subName = ProjectSubscriptionName.of(PROJECT, subscription);
+    FixedTransportChannelProvider channelProvider =
+        FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
+    NoCredentialsProvider credentialsProvider = NoCredentialsProvider.create();
+    TopicAdminSettings topicSettings =
+        TopicAdminSettings.newBuilder()
+            .setTransportChannelProvider(channelProvider)
+            .setCredentialsProvider(credentialsProvider)
+            .build();
+    SubscriptionAdminSettings subSettings =
+        SubscriptionAdminSettings.newBuilder()
+            .setTransportChannelProvider(channelProvider)
+            .setCredentialsProvider(credentialsProvider)
+            .build();
+    try (TopicAdminClient topicAdmin = TopicAdminClient.create(topicSettings);
+        SubscriptionAdminClient subAdmin = SubscriptionAdminClient.create(subSettings)) {
+      try {
+        subAdmin.deleteSubscription(subName.toString());
+      } catch (Exception ignored) {
+        // first run
+      }
+      try {
+        topicAdmin.deleteTopic(topicName.toString());
+      } catch (Exception ignored) {
+        // first run
+      }
+      topicAdmin.createTopic(topicName.toString());
+      subAdmin.createSubscription(
+          subName.toString(), topicName.toString(), PushConfig.getDefaultInstance(), 60);
+    }
+    Publisher publisher =
+        Publisher.newBuilder(topicName.toString())
+            .setChannelProvider(channelProvider)
+            .setCredentialsProvider(credentialsProvider)
+            .build();
+    try {
+      byte[] payload = examplePayload();
+      for (int i = 0; i < published; i++) {
+        publisher
+            .publish(
+                PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFrom(payload))
+                    .putAttributes("idx", Integer.toString(i))
+                    .build())
+            .get(30, TimeUnit.SECONDS);
+      }
+    } finally {
+      publisher.shutdown();
+      publisher.awaitTermination(30, TimeUnit.SECONDS);
+    }
+
+    Path checkpoint = Files.createDirectory(tempDir.resolve("checkpoint"));
+    Path output = Files.createDirectory(tempDir.resolve("output"));
+    Dataset<Row> stream =
+        spark
+            .readStream()
+            .format("google-pubsub")
+            .option(PubSubConfig.PROJECT_ID, PROJECT)
+            .option(PubSubConfig.SUBSCRIPTION, subscription)
+            .option(PubSubConfig.EMULATOR_HOST, emulatorHost)
+            .option(PubSubConfig.ACK_MODE, AckMode.AFTER_COMMIT.name())
+            .option(PubSubConfig.PULL_DEADLINE, "1s")
+            .option(PubSubConfig.PULL_MAX_MESSAGES, "10")
+            .option(PubSubConfig.GATHER_MODE, "batch")
+            .option(PubSubConfig.BATCH_COUNT, "8")
+            .load();
+
+    AtomicInteger seen = new AtomicInteger();
+    StreamingQuery query =
+        stream
+            .writeStream()
+            .foreachBatch(
+                (Dataset<Row> batch, Long id) -> {
+                  seen.addAndGet((int) batch.count());
+                  batch.write().mode("append").json(output.toString());
+                })
+            .option("checkpointLocation", checkpoint.toString())
+            .trigger(Trigger.AvailableNow())
+            .start();
+
+    query.awaitTermination(30_000L);
+    assertFalse(query.isActive(), "AvailableNow should terminate after the subscription is idle");
+    assertEquals(published, seen.get());
   }
 }

@@ -19,7 +19,7 @@ import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
 import org.apache.spark.sql.connector.read.streaming.Offset;
 import org.apache.spark.sql.connector.read.streaming.ReadLimit;
 import org.apache.spark.sql.connector.read.streaming.ReportsSourceMetrics;
-import org.apache.spark.sql.connector.read.streaming.SupportsAdmissionControl;
+import org.apache.spark.sql.connector.read.streaming.SupportsTriggerAvailableNow;
 import org.apache.spark.sql.types.StructType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,8 +30,14 @@ import org.slf4j.LoggerFactory;
  * configured).
  */
 final class PubSubMicroBatchStream
-    implements MicroBatchStream, ReportsSourceMetrics, SupportsAdmissionControl {
+    implements MicroBatchStream, ReportsSourceMetrics, SupportsTriggerAvailableNow {
   private static final Logger LOG = LoggerFactory.getLogger(PubSubMicroBatchStream.class);
+
+  /**
+   * Pub/Sub has no log-end offset. AvailableNow treats this many consecutive empty Pulls as idle
+   * and returns {@code null} so Spark stops.
+   */
+  static final int AVAILABLE_NOW_IDLE_PULLS = 3;
 
   private final PubSubConfig config;
   private final StructType readSchema;
@@ -53,6 +59,7 @@ final class PubSubMicroBatchStream
       new ConcurrentHashMap<>();
   private final AutoBatchTime autoBatchTime;
   private volatile boolean cancelled;
+  private volatile boolean availableNow;
 
   PubSubMicroBatchStream(PubSubConfig config, int numPartitions) {
     this(config, numPartitions, PubSubSchema.tableSchema(config, null));
@@ -90,6 +97,15 @@ final class PubSubMicroBatchStream
   }
 
   @Override
+  public void prepareForTriggerAvailableNow() {
+    this.availableNow = true;
+    LOG.info(
+        "BATCH: AvailableNow drain enabled; stop after {} consecutive empty Pulls"
+            + " (Pub/Sub has no log-end offset; use seek=snapshot for recovery)",
+        AVAILABLE_NOW_IDLE_PULLS);
+  }
+
+  @Override
   public ReadLimit getDefaultReadLimit() {
     if (config.batchCount() > 0) {
       return ReadLimit.maxRows(config.batchCount());
@@ -122,14 +138,16 @@ final class PubSubMicroBatchStream
     if (lastProduced != null && !startConsumed(startOffset, lastProduced)) {
       return lastProduced;
     }
-    if (autoBatchTime.shouldProbe()) {
+    if (!availableNow && autoBatchTime.shouldProbe()) {
       lastPullMessageCount.set(0);
       lastPullPayloadBytes.set(0);
       lastPullMessageAgeMs = null;
       return nullIfEmpty ? null : currentOffset;
     }
     AdmissionLimits gatherLimits =
-        limits.withWaitTime(autoBatchTime.gatherWindow(limits.waitTime()));
+        availableNow
+            ? limits.withDrainUntilIdle()
+            : limits.withWaitTime(autoBatchTime.gatherWindow(limits.waitTime()));
     long gatherStarted = System.nanoTime();
     List<PulledMessage> pulled = gatherMessages(gatherLimits);
     autoBatchTime.onGatherFinished(System.nanoTime() - gatherStarted, !pulled.isEmpty());
@@ -181,6 +199,9 @@ final class PubSubMicroBatchStream
   }
 
   private List<PulledMessage> gatherMessages(AdmissionLimits limits) {
+    if (limits.drainUntilIdle()) {
+      return gatherUntilIdleOrMax(limits);
+    }
     List<PulledMessage> messages = new ArrayList<>();
     if (limits.singlePull()) {
       if (gatherAborted()) {
@@ -279,6 +300,74 @@ final class PubSubMicroBatchStream
         }
         if (config.gatherMode() == GatherMode.PULL && limits.minRowsMet(messages.size())) {
           break;
+        }
+      }
+    } catch (RuntimeException e) {
+      abortGather(messages);
+      throw e;
+    }
+    return messages;
+  }
+
+  /**
+   * AvailableNow gather: keep Pulling until {@code batchCount}/{@code batchSize} or {@link
+   * #AVAILABLE_NOW_IDLE_PULLS} consecutive empty Pulls. Does not treat the first empty Pull as
+   * query-stop (that is the ProcessingTime idle path).
+   */
+  private List<PulledMessage> gatherUntilIdleOrMax(AdmissionLimits limits) {
+    List<PulledMessage> messages = new ArrayList<>();
+    long payloadBytes = 0L;
+    int emptyStreak = 0;
+    try {
+      while (true) {
+        if (gatherAborted()) {
+          abortGather(messages);
+          return List.of();
+        }
+        if (limits.reachedMax(messages.size(), payloadBytes)) {
+          break;
+        }
+        int maxMessages = limits.messagesForNextPull(messages.size(), config.pullMaxMessages());
+        if (maxMessages <= 0) {
+          break;
+        }
+        List<PulledMessage> pulled = client.pull(config.pullDeadline(), maxMessages);
+        if (gatherAborted()) {
+          messages.addAll(pulled);
+          abortGather(messages);
+          return List.of();
+        }
+        if (pulled.isEmpty()) {
+          emptyStreak++;
+          if (emptyStreak >= AVAILABLE_NOW_IDLE_PULLS) {
+            LOG.info(
+                "BATCH: AvailableNow idle after {} consecutive empty Pulls; gathered={}",
+                emptyStreak,
+                messages.size());
+            break;
+          }
+          continue;
+        }
+        emptyStreak = 0;
+        boolean first = messages.isEmpty();
+        messages.addAll(pulled);
+        payloadBytes += PulledMessage.payloadBytes(pulled);
+        if (config.ackMode() == AckMode.EARLY) {
+          client.acknowledge(PulledMessage.ackIds(pulled));
+          client.releaseMessages(pulled);
+        } else {
+          try {
+            client.extendAckDeadline(PulledMessage.ackIds(pulled), ackDeadlineSeconds());
+          } catch (RuntimeException e) {
+            LOG.warn(
+                "BATCH: Failed to extend initial ack deadline while draining: {}", e.getMessage());
+          }
+          List<String> ids = PulledMessage.ackIds(messages);
+          if (first) {
+            leaseWatchdog.start(client, ids, ackDeadlineSeconds());
+          } else {
+            leaseWatchdog.update(ids);
+          }
         }
       }
     } catch (RuntimeException e) {
@@ -491,6 +580,10 @@ final class PubSubMicroBatchStream
 
   Long lastGatheredBatchId() {
     return lastGatheredBatchId;
+  }
+
+  boolean availableNow() {
+    return availableNow;
   }
 
   @Override

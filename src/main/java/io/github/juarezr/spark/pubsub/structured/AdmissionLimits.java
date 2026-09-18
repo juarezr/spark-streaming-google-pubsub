@@ -22,14 +22,26 @@ final class AdmissionLimits {
   private final long minRows;
   private final Duration waitTime;
   private final boolean singlePull;
+  private final boolean drainUntilIdle;
 
   private AdmissionLimits(
       long maxRows, long maxBytes, long minRows, Duration waitTime, boolean singlePull) {
+    this(maxRows, maxBytes, minRows, waitTime, singlePull, false);
+  }
+
+  private AdmissionLimits(
+      long maxRows,
+      long maxBytes,
+      long minRows,
+      Duration waitTime,
+      boolean singlePull,
+      boolean drainUntilIdle) {
     this.maxRows = maxRows;
     this.maxBytes = maxBytes;
     this.minRows = minRows;
     this.waitTime = waitTime;
     this.singlePull = singlePull;
+    this.drainUntilIdle = drainUntilIdle;
   }
 
   static AdmissionLimits from(PubSubConfig config, ReadLimit limit) {
@@ -62,11 +74,23 @@ final class AdmissionLimits {
   }
 
   AdmissionLimits withWaitTime(Duration waitTime) {
-    return new AdmissionLimits(maxRows, maxBytes, minRows, waitTime, singlePull);
+    return new AdmissionLimits(maxRows, maxBytes, minRows, waitTime, singlePull, drainUntilIdle);
+  }
+
+  /**
+   * AvailableNow drain: ignore {@code batchTime} / single-Pull early exit; stop at caps or
+   * consecutive empty Pulls.
+   */
+  AdmissionLimits withDrainUntilIdle() {
+    return new AdmissionLimits(maxRows, maxBytes, minRows, waitTime, false, true);
   }
 
   boolean singlePull() {
     return singlePull;
+  }
+
+  boolean drainUntilIdle() {
+    return drainUntilIdle;
   }
 
   boolean reachedMax(int rows, long payloadBytes) {

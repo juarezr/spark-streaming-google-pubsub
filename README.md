@@ -161,6 +161,7 @@ The timing controls apply at different points for PubSub pulls and acks:
 | Component | Control | What it bounds |
 | :---------- | :-------- | :--------------- |
 | Spark | `Trigger.ProcessingTime` | When Spark asks for the next offset after the previous micro-batch finishes |
+| Spark | `Trigger.AvailableNow` | Drain until idle, then stop. Idle is 3 consecutive empty Pulls (not a log-end offset) |
 | Spark | `ReadLimit` | `maxRowsPerTrigger` / `maxBytesPerTrigger` (Spark 4+) composed with `batchCount` / `batchSize` |
 | Connector | `batchTime` | How long one batch gathers Pull responses. Omit to auto-infer from `Trigger.ProcessingTime` |
 | Connector | `pullDeadline` | How long one healthy Pull RPC waits for messages. Idle gather returns after one empty Pull plus a 1s debounce |
@@ -194,7 +195,13 @@ Set an explicit `batchTime` when using:
 - **Short trigger, long gather** — grouping is only `batchTime` / `batchSize`; the falling-behind
   warning emitted from Spark on every batch is expected.
 
-The Spark triggers `Trigger.AvailableNow` and `Trigger.Continuous` are not supported.
+`Trigger.AvailableNow` skips the empty-gap probe and the idle first-empty-as-stop path. Each
+micro-batch gathers until `batchCount` / `batchSize` (or Spark `ReadLimit`) or until **3 consecutive
+empty Pulls**. When a gather is empty after those Pulls, `latestOffset` returns null and Spark
+stops. A subscription has no durable log-end offset: this is drain-until-idle. Pair it with
+`seek=snapshot` on a **dedicated recovery subscription**. Do not point AvailableNow at a live 24x7
+feed that never goes idle. Idle detection costs about `3 × pullDeadline`; use a short `pullDeadline`
+when you want a faster stop. `Trigger.Continuous` is not supported.
 
 In batch gathering, every Pull uses the smaller of `pullDeadline` and the remaining `batchTime`.
 A client `DEADLINE_EXCEEDED` on Pull is an empty long-poll, not a retried failure. Transient Pull
@@ -220,7 +227,10 @@ gathering and sink processing.
 - **Fewer parquet files:** omit `batchTime` (or set it slightly under the trigger), keep `numWriters=1`,
   and partition in the application. `numWriters=2` means two Spark tasks for one gathered batch, not
   two Pull loops.
-- **`Trigger.Once()`:** set `batchTime` explicitly. AvailableNow is not supported.
+- **`Trigger.Once()`:** set `batchTime` explicitly.
+- **`Trigger.AvailableNow()`:** skip auto `batchTime`. Keep `batchCount` or `batchSize` so the drain
+  is chunked. Use `seek=snapshot` on a recovery subscription; shorten `pullDeadline` if a 3-Pull
+  idle wait is too long.
 
 The driver holds message byte arrays, ack ids, attributes, and serialization copies.
 Reserve roughly 3–5 times the configured payload batch size as temporary driver-heap memory headroom.
@@ -246,6 +256,31 @@ messages
     .trigger(Trigger.ProcessingTime("60 second"))
     .option("path", "gs://bucket/tables/event")
     .option("checkpointLocation", "gs://bucket/checkpoints/event")
+    .start()
+    .awaitTermination();
+```
+
+Snapshot recovery with `Trigger.AvailableNow` (dedicated subscription; seek once at start):
+
+```java
+Dataset<Row> recovered = spark.readStream()
+    .format("google-pubsub")
+    .option("projectId", "my-project")
+    .option("subscription", "recovery-subscription")
+    .option("seek", "snapshot")
+    .option("seekSnapshot", "projects/my-project/snapshots/recovery")
+    .option("ackMode", "afterCommit")
+    .option("gatherMode", "batch")
+    .option("batchCount", "5000")
+    .option("pullDeadline", "2s")
+    .load();
+
+recovered
+    .writeStream()
+    .format("parquet")
+    .trigger(Trigger.AvailableNow())
+    .option("path", "gs://bucket/tables/event-recovered")
+    .option("checkpointLocation", "gs://bucket/checkpoints/event-recovered")
     .start()
     .awaitTermination();
 ```
@@ -335,9 +370,10 @@ This connector is a **read-only Structured Streaming (micro-batch)** source. The
 - **Spark 4.1 Real-time Mode** — does not fit this source's driver-side Pull and lease/ack model.
 - **Trigger.Once** — works only with an explicit `batchTime`. If `batchTime` is unset, the empty-gap
   probe is the only micro-batch and the query can stop without Pulling.
-- **Trigger.AvailableNow** (“drain then stop”) — a subscription has no durable log-end offset.
-  Rate limits via `SupportsAdmissionControl` (`maxRowsPerTrigger`, `maxBytesPerTrigger` on Spark 4+)
-  are implemented; AvailableNow still is not.
+- **Trigger.AvailableNow** — implemented as drain-until-idle (`SupportsTriggerAvailableNow`). There
+  is no durable log-end offset. The query stops after 3 consecutive empty Pulls. Rate limits via
+  `SupportsAdmissionControl` (`batchCount` / `batchSize`, plus `maxRowsPerTrigger` /
+  `maxBytesPerTrigger` on Spark 4+) still split the drain.
 - **Continuous Processing** — experimental; Spark recommends Real-time Mode instead. Same lease-model mismatch.
 - **Streaming sink and batch `spark.read`** — a subscription is a queue, not a table. Rewind/replay uses explicit `seek` / snapshot **options**, not a batch scan.
 - **SQL filter pushdown that seeks** — a `WHERE publishtime >= …` must not rewind a **shared** subscription. Filter on attributes with a GCP subscription filter; rewind with explicit `seek`.
