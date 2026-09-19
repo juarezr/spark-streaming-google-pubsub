@@ -101,6 +101,24 @@ class AutoBatchTimeTest {
   }
 
   @Test
+  void firstInferredGapUnderTenSecondsIsProbeNoise() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(4).toNanos());
+    assertTrue(auto.shouldProbe());
+    assertEquals(AutoBatchTime.Mode.PROBE, auto.mode());
+
+    now.set(Duration.ofSeconds(4).toNanos() + Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    assertEquals(AutoBatchTime.Mode.AUTO, auto.mode());
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertEquals(Duration.ofSeconds(30), auto.gatherWindow(null));
+  }
+
+  @Test
   void idleStartToStartRaisesSeededProcessingTime() {
     AtomicLong now = new AtomicLong(0);
     AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);

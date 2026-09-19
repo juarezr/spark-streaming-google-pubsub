@@ -10,13 +10,18 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Sizes {@code batchTime} when the option is omitted: one empty-gap probe for Spark {@code
- * Trigger.ProcessingTime}, then {@code T/2}, then {@code T - writeAvg - writeStdev - safety}. The
- * first gap is a seed; later idle {@code latestOffset} start-to-start gaps may raise {@code T}.
+ * Trigger.ProcessingTime}, then {@code T/2}, then {@code T - writeAvg - writeStdev - safety}. A
+ * first gap under 10s is startup noise (do not seed). Later idle {@code latestOffset}
+ * start-to-start gaps may raise {@code T}.
  */
 final class AutoBatchTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoBatchTime.class);
 
   static final long PROBE_NOISE_NANOS = TimeUnit.SECONDS.toNanos(1);
+
+  /** First inferred T below this is startup noise; keep probing instead of seeding. */
+  static final long SEED_MIN_NANOS = TimeUnit.SECONDS.toNanos(10);
+
   static final int ZERO_TRIGGER_NOISE_CYCLES = 3;
   static final int WRITE_WINDOW = 8;
   static final double SAFETY_FRACTION = 0.005;
@@ -115,6 +120,14 @@ final class AutoBatchTime {
         enterZeroTrigger();
         return false;
       }
+      return true;
+    }
+    if (gapFromStart < SEED_MIN_NANOS) {
+      probeStartedNanos = now;
+      lastOffsetStartNanos = now;
+      LOG.warn(
+          "BATCH: startup gap {} is under 10s; not seeding processingTime (keep probing)",
+          format(Duration.ofNanos(gapFromStart)));
       return true;
     }
     probeNoiseCount = 0;
