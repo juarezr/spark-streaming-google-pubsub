@@ -463,7 +463,8 @@
             <configuration>
               <publishingServerId>central</publishingServerId>
               <autoPublish>true</autoPublish>
-              <waitUntil>published</waitUntil>
+              <waitUntil>validated</waitUntil>
+              <waitMaxTime>3600</waitMaxTime>
             </configuration>
           </plugin>
         </plugins>
