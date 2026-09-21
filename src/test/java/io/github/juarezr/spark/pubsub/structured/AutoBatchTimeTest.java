@@ -158,6 +158,26 @@ class AutoBatchTimeTest {
   }
 
   @Test
+  void busyNearOverrunDoesNotRaiseProcessingTime() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+
+    auto.onGatherFinished(Duration.ofSeconds(59).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(3).toNanos());
+    auto.onCommit();
+
+    now.set(Duration.ofSeconds(60).toNanos() + Duration.ofMillis(63400).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+  }
+
+  @Test
   void busyOverrunDoesNotRaiseProcessingTime() {
     AtomicLong now = new AtomicLong(0);
     AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);

@@ -107,6 +107,11 @@ final class AutoBatchTime {
 
   static final long PROBE_NOISE_NANOS = TimeUnit.SECONDS.toNanos(1);
 
+  /** Busy start-to-start must exceed work and T by this floor so wal/planning is not a wait. */
+  static final long BUSY_WAIT_MIN_NANOS = TimeUnit.SECONDS.toNanos(5);
+
+  static final double BUSY_WAIT_FRACTION = 0.10;
+
   /**
    * First inferred Trigger.ProcessingTime below this is startup noise; keep probing instead of
    * seeding.
@@ -283,10 +288,11 @@ final class AutoBatchTime {
       return;
     }
     long gap = now - lastOffsetStartNanos;
-    if (gap <= processingTime.toNanos() + PROBE_NOISE_NANOS) {
+    long slack = lastGatherEmpty ? PROBE_NOISE_NANOS : busyWaitSlackNanos();
+    if (gap <= processingTime.toNanos() + slack) {
       return;
     }
-    if (!sparkWaited(now, gap)) {
+    if (!sparkWaited(now, gap, slack)) {
       return;
     }
     processingTime = Duration.ofNanos(gap);
@@ -297,7 +303,7 @@ final class AutoBatchTime {
         format(currentGather));
   }
 
-  private boolean sparkWaited(long now, long gap) {
+  private boolean sparkWaited(long now, long gap, long slack) {
     if (lastGatherEmpty) {
       return true;
     }
@@ -305,7 +311,14 @@ final class AutoBatchTime {
         pendingWrite && lastReturnNanos != 0L
             ? Math.max(0L, now - lastReturnNanos)
             : lastWriteNanos;
-    return gap > lastGatherNanos + write + PROBE_NOISE_NANOS;
+    return gap > lastGatherNanos + write + slack;
+  }
+
+  private long busyWaitSlackNanos() {
+    if (processingTime == null) {
+      return BUSY_WAIT_MIN_NANOS;
+    }
+    return Math.max(BUSY_WAIT_MIN_NANOS, (long) (BUSY_WAIT_FRACTION * processingTime.toNanos()));
   }
 
   private void enterZeroTrigger() {
