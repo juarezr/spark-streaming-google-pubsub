@@ -14,6 +14,93 @@ import org.slf4j.LoggerFactory;
  * Trigger.ProcessingTime - writeAvg - writeStdev - safety}. A first gap under 10s is startup noise
  * (do not seed). Later {@code latestOffset} start-to-start gaps may raise {@code autoBatchTime}
  * when Spark waited (idle or busy). Never shrinks {@code autoBatchTime}.
+ *
+ * <pre>
+ * @startuml
+ * title Auto batchTime: PROBE then Mode.AUTO
+ *
+ * participant App
+ * participant Spark
+ * participant Stream as PubSubMicroBatchStream
+ * participant Auto as AutoBatchTime
+ *
+ * App -> Spark : format("google-pubsub")\noption(gatherMode=batch)\nbatchTime omitted\ntrigger(ProcessingTime)
+ * Spark -> Stream : new(config)
+ * Stream -> Auto : create(config)
+ * note right of Auto
+ *   gatherMode=batch and batchTime unset
+ *   starts Mode.PROBE, not AUTO
+ * end note
+ *
+ * == PROBE: one empty latestOffset, no Pull ==
+ *
+ * Spark -> Stream : latestOffset()
+ * Stream -> Auto : shouldProbe()
+ * note right of Auto
+ *   First call starts the gap timer
+ *   and returns true (empty, no Pull)
+ * end note
+ * Auto --> Stream : true
+ * Stream --> Spark : empty Offset
+ *
+ * Spark -> Stream : latestOffset()
+ * Stream -> Auto : shouldProbe()
+ * alt gap < 1s
+ *   note right of Auto
+ *     Trigger noise. After 3 consecutive
+ *     cycles: Mode.ZERO, gather =
+ *     min(pullDeadline, 5s)
+ *   end note
+ *   Auto --> Stream : true (stay PROBE)
+ * else 1s <= gap < 10s
+ *   note right of Auto
+ *     Startup noise: do not seed T.
+ *     Reset the probe start; stay PROBE
+ *   end note
+ *   Auto --> Stream : true (stay PROBE)
+ * else gap >= 10s
+ *   Auto -> Auto : T = gap\ngather = T / 2\nmode = AUTO
+ *   Auto --> Stream : false
+ * end
+ *
+ * == AUTO: Pull, raise T only, size gather from write cost ==
+ *
+ * loop each later latestOffset
+ *   Spark -> Stream : latestOffset()
+ *   Stream -> Auto : shouldProbe()
+ *   note right of Auto
+ *     Always false (does Pull).
+ *     Raise T when start-to-start gap
+ *     > T + 1s AND Spark waited:
+ *     last gather empty, or
+ *     gap > gather + write + 1s.
+ *     Never shrink T.
+ *   end note
+ *   Auto --> Stream : false
+ *   Stream -> Auto : gatherWindow(admissionWait)
+ *   note right of Auto
+ *     No write samples: gather = T / 2
+ *     Else: T - writeAvg - writeStdev - safety
+ *     safety = 0.5% * T + overrun
+ *     (500ms overrun seed after first write)
+ *     clamp [min(pullDeadline, 5s) .. T - 1s]
+ *     window = min(admissionWait, gather)
+ *   end note
+ *   Stream -> Stream : Pull until gather window
+ *   Stream -> Auto : onGatherFinished(nanos, nonEmpty)
+ *   Stream --> Spark : Offset
+ *
+ *   Spark -> Stream : commit()
+ *   Stream -> Auto : onCommit()
+ *   note right of Auto
+ *     Non-empty gather only:
+ *     record write sample, store overrun
+ *     if gather + write > T, then
+ *     refreshGather()
+ *   end note
+ * end
+ * @enduml
+ * </pre>
  */
 final class AutoBatchTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoBatchTime.class);

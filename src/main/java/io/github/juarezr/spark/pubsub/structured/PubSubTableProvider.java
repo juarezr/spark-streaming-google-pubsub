@@ -11,6 +11,30 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 /**
  * Entry point for {@code spark.readStream().format("pubsub")} / {@code format("google-pubsub")}.
+ *
+ * <pre>
+ * @startuml
+ * title PubSubTableProvider
+ * Application -> SparkSession : readStream()
+ * SparkSession -> Application : DataStreamReader reader
+ * Application -> DataStreamReader : load()
+ * DataStreamReader -> Application : Dataset<Row> messages
+ * Application -> Dataset : writeStream()
+ * Dataset -> Application : DataStreamWriter<Row> writer
+ * Application -> DataStreamWriter : start()
+ * DataStreamWriter -> Application : StreamingQuery query
+ * Application -> DataStreamWriter : awaitTermination()
+ * DataStreamWriter -> Spark : load(PubSubTableProvider)
+ * Spark -> PubSubTableProvider : shortName()
+ * PubSubTableProvider -> Spark : return PubSubConfig.SHORT_NAME
+ * Spark -> PubSubTableProvider : inferSchema(CaseInsensitiveStringMap)
+ * PubSubTableProvider -> PubSubSchema : inferTableSchema(PubSubConfig)
+ * PubSubSchema -> PubSubTableProvider : return StructType
+ * Spark -> PubSubTableProvider : getTable(StructType, Transform[], Map<String, String>)
+ * PubSubTableProvider -> PubSubTable : new(PubSubConfig, StructType)
+ * PubSubTable -> Spark : return Table
+ * @enduml
+ * </pre>
  */
 public final class PubSubTableProvider implements TableProvider, DataSourceRegister {
 
