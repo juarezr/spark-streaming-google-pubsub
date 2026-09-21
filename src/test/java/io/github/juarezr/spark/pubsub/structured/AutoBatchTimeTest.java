@@ -101,6 +101,24 @@ class AutoBatchTimeTest {
   }
 
   @Test
+  void firstInferredGapUnderTenSecondsIsProbeNoise() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(4).toNanos());
+    assertTrue(auto.shouldProbe());
+    assertEquals(AutoBatchTime.Mode.PROBE, auto.mode());
+
+    now.set(Duration.ofSeconds(4).toNanos() + Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    assertEquals(AutoBatchTime.Mode.AUTO, auto.mode());
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertEquals(Duration.ofSeconds(30), auto.gatherWindow(null));
+  }
+
+  @Test
   void idleStartToStartRaisesSeededProcessingTime() {
     AtomicLong now = new AtomicLong(0);
     AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
@@ -117,6 +135,65 @@ class AutoBatchTimeTest {
 
     assertEquals(Duration.ofSeconds(60), auto.processingTime());
     assertEquals(Duration.ofSeconds(30), auto.gatherWindow(null));
+  }
+
+  @Test
+  void busyWaitRaisesSeededProcessingTime() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(16).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(16), auto.processingTime());
+
+    auto.onGatherFinished(Duration.ofSeconds(8).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(2).toNanos());
+    auto.onCommit();
+
+    now.set(Duration.ofSeconds(16).toNanos() + Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+  }
+
+  @Test
+  void busyOverrunDoesNotRaiseProcessingTime() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+
+    auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(20).toNanos());
+    auto.onCommit();
+
+    now.set(Duration.ofSeconds(60).toNanos() + Duration.ofSeconds(70).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+  }
+
+  @Test
+  void busyMatchingTriggerDoesNotRaiseProcessingTime() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(5).toNanos());
+    auto.onCommit();
+
+    now.set(Duration.ofSeconds(60).toNanos() + Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
   }
 
   @Test
