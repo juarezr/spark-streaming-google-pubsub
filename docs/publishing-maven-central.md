@@ -49,8 +49,8 @@ flowchart LR
 Create a version tag (and optionally a GitHub Release) in the GitHub Portal, or push a `v*` tag:
 
 ```bash
-git tag v0.8.0
-git push origin v0.8.0
+git tag v0.8.2
+git push origin v0.8.2
 ```
 
 Creating a Release in the GitHub UI with a new `v*` tag pushes the tag and starts [`release.yml`](../.github/workflows/release.yml). Prefer that Portal-first path: the workflow then **uploads** `*-all.jar` onto the existing Release. If only the tag is pushed and no Release exists yet, the workflow creates one.
@@ -83,11 +83,11 @@ Repository URL: `https://maven.pkg.github.com/juarezr/spark-streaming-google-pub
 After Central validates the bundle, auto-publish continues in the background. Appearance on search.maven.org can still take minutes to a few hours after the Portal shows **Published**:
 
 ```text
-io.github.juarezr:spark-streaming-google-pubsub_2.12:0.8.0
-io.github.juarezr:spark-streaming-google-pubsub_2.13:0.8.0
+io.github.juarezr:spark-streaming-google-pubsub_2.12:0.8.2
+io.github.juarezr:spark-streaming-google-pubsub_2.13:0.8.2
 ```
 
-The same coordinates should appear under the repo’s GitHub Packages. The same tag’s GitHub Release should list `spark-streaming-google-pubsub_2.12-0.8.0-all.jar` and `spark-streaming-google-pubsub_2.13-0.8.0-all.jar`.
+The same coordinates should appear under the repo’s GitHub Packages. The same tag’s GitHub Release should list `spark-streaming-google-pubsub_2.12-0.8.2-all.jar` and `spark-streaming-google-pubsub_2.13-0.8.2-all.jar`.
 
 Do not republish an already-released version without the fat JAR (or with a different set of files). Central is immutable; the next cut must be a new version.
 
@@ -97,5 +97,5 @@ The published POM pins `google-cloud-pubsub`, `google-auth-library-oauth2-http`,
 
 ### Snapshot builds
 
-Snapshots are useful internally (`0.8.0-SNAPSHOT`) but are **not** published to Maven Central.
+Snapshots are useful internally (`0.8.2-SNAPSHOT`) but are **not** published to Maven Central.
 Use GitHub Packages or GCS for snapshot distribution if needed (`-Pgithub-packages`).
