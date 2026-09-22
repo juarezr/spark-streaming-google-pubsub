@@ -64,7 +64,7 @@ jobs:
             target/*.sha*
             target/*.md5
 
-      - name: Upload fat JARs to GitHub Release ${TAG}
+      - name: Upload fat JARs to GitHub Release ${{ github.ref_name }}
         id: upload-release-artifacts
         env:
           GH_TOKEN: ${{ github.token }}
