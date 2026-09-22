@@ -138,6 +138,29 @@ class AutoBatchTimeTest {
   }
 
   @Test
+  void raiseAfterOverrunDoesNotPinGatherAtFloor() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(16).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(16), auto.processingTime());
+
+    auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(25).toNanos());
+    auto.onCommit();
+
+    now.set(Duration.ofSeconds(16).toNanos() + Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertTrue(
+        auto.currentGather().compareTo(Duration.ofSeconds(5)) > 0,
+        "stale overrun vs 16s T must not clamp gather to 5s after raise");
+  }
+
+  @Test
   void busyWaitRaisesSeededProcessingTime() {
     AtomicLong now = new AtomicLong(0);
     AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
@@ -228,6 +251,106 @@ class AutoBatchTimeTest {
     now.addAndGet(Duration.ofSeconds(2).toNanos());
     auto.shouldProbe();
 
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+  }
+
+  @Test
+  void smallSeedDoesNotFreezeBeforeRaise() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    long lastStart = Duration.ofSeconds(16).toNanos();
+    now.set(lastStart);
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(16), auto.processingTime());
+
+    for (int i = 0; i < AutoBatchTime.STABLE_NO_RAISE_BATCHES; i++) {
+      now.set(lastStart + Duration.ofSeconds(5).toNanos());
+      auto.onGatherFinished(Duration.ofSeconds(4).toNanos(), true);
+      now.addAndGet(Duration.ofSeconds(1).toNanos());
+      auto.onCommit();
+      lastStart += Duration.ofSeconds(16).toNanos();
+      now.set(lastStart);
+      assertFalse(auto.shouldProbe());
+    }
+
+    assertFalse(auto.raiseFrozen());
+    assertEquals(Duration.ofSeconds(16), auto.processingTime());
+
+    now.set(lastStart + Duration.ofSeconds(10).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(8).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(2).toNanos());
+    auto.onCommit();
+    now.set(lastStart + Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+  }
+
+  @Test
+  void matchingBatchesAfterSixtySecondSeedFreezeRaises() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    long lastStart = Duration.ofSeconds(60).toNanos();
+    now.set(lastStart);
+    assertFalse(auto.shouldProbe());
+
+    for (int i = 0; i < AutoBatchTime.STABLE_NO_RAISE_BATCHES; i++) {
+      now.set(lastStart + Duration.ofSeconds(25).toNanos());
+      auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
+      now.addAndGet(Duration.ofSeconds(5).toNanos());
+      auto.onCommit();
+      lastStart += Duration.ofSeconds(60).toNanos();
+      now.set(lastStart);
+      assertFalse(auto.shouldProbe());
+    }
+
+    assertTrue(auto.raiseFrozen());
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+
+    auto.onGatherFinished(Duration.ofSeconds(5).toNanos(), false);
+    now.addAndGet(Duration.ofSeconds(120).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+  }
+
+  @Test
+  void fiveMatchesAfterRaiseFreezeFurtherRaises() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+
+    assertTrue(auto.shouldProbe());
+    long lastStart = Duration.ofSeconds(16).toNanos();
+    now.set(lastStart);
+    assertFalse(auto.shouldProbe());
+
+    now.set(lastStart + Duration.ofSeconds(10).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(8).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(2).toNanos());
+    auto.onCommit();
+    lastStart += Duration.ofSeconds(60).toNanos();
+    now.set(lastStart);
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertFalse(auto.raiseFrozen());
+
+    for (int i = 0; i < AutoBatchTime.STABLE_NO_RAISE_BATCHES; i++) {
+      now.set(lastStart + Duration.ofSeconds(25).toNanos());
+      auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
+      now.addAndGet(Duration.ofSeconds(5).toNanos());
+      auto.onCommit();
+      lastStart += Duration.ofSeconds(60).toNanos();
+      now.set(lastStart);
+      assertFalse(auto.shouldProbe());
+    }
+
+    assertTrue(auto.raiseFrozen());
+    auto.onGatherFinished(Duration.ofSeconds(5).toNanos(), false);
+    now.addAndGet(Duration.ofSeconds(120).toNanos());
+    assertFalse(auto.shouldProbe());
     assertEquals(Duration.ofSeconds(60), auto.processingTime());
   }
 

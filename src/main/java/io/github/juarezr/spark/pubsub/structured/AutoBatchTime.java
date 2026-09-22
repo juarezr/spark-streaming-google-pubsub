@@ -9,15 +9,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Sizes {@code batchTime} when the option is omitted: one empty-gap probe for Spark {@code
- * Trigger.ProcessingTime}, then {@code Trigger.ProcessingTime/2}, then {@code
- * Trigger.ProcessingTime - writeAvg - writeStdev - safety}. A first gap under 10s is startup noise
- * (do not seed). Later {@code latestOffset} start-to-start gaps may raise {@code autoBatchTime}
- * when Spark waited (idle or busy). Never shrinks {@code autoBatchTime}.
+ * Sizes {@code batchTime} when the option is omitted: empty-gap probe for Spark {@code
+ * Trigger.ProcessingTime} until one gap is at least 10s (or 3 sub-second gaps assume 0), then
+ * {@code T/2}, then {@code T - writeAvg - writeStdev - safety}. Start-to-start gaps may raise
+ * {@code T} when Spark waited (idle 1s slack; busy {@code max(5s, 10% T)}). A raise clears stale
+ * overrun. After T is at least 30s or after any raise, five matching no-raise batches freeze
+ * further raises. Never shrinks {@code T}. Never re-enters PROBE.
  *
  * <pre>
  * @startuml
- * title Auto batchTime: PROBE then Mode.AUTO
+ * !theme vibrant
+ * title Auto batchTime: PROBE then AUTO then freeze raises
  *
  * participant App
  * participant Spark
@@ -32,13 +34,13 @@ import org.slf4j.LoggerFactory;
  *   starts Mode.PROBE, not AUTO
  * end note
  *
- * == PROBE: one empty latestOffset, no Pull ==
+ * == PROBE: empty latestOffset, no Pull; finite ==
  *
  * Spark -> Stream : latestOffset()
  * Stream -> Auto : shouldProbe()
  * note right of Auto
- *   First call starts the gap timer
- *   and returns true (empty, no Pull)
+ *   probeAttempt=1 starts the gap timer
+ *   returns true (empty, no Pull)
  * end note
  * Auto --> Stream : true
  * Stream --> Spark : empty Offset
@@ -49,7 +51,7 @@ import org.slf4j.LoggerFactory;
  *   note right of Auto
  *     Trigger noise. After 3 consecutive
  *     cycles: Mode.ZERO, gather =
- *     min(pullDeadline, 5s)
+ *     min(pullDeadline, 5s). Leave PROBE.
  *   end note
  *   Auto --> Stream : true (stay PROBE)
  * else 1s <= gap < 10s
@@ -60,22 +62,39 @@ import org.slf4j.LoggerFactory;
  *   Auto --> Stream : true (stay PROBE)
  * else gap >= 10s
  *   Auto -> Auto : T = gap\ngather = T / 2\nmode = AUTO
+ *   note right of Auto
+ *     PROBE ends. Later latestOffset
+ *     always Pulls. Never re-enter PROBE.
+ *   end note
  *   Auto --> Stream : false
  * end
  *
- * == AUTO: Pull, raise T only, size gather from write cost ==
+ * == AUTO: Pull; raise T only until 5 matching batches ==
  *
- * loop each later latestOffset
+ * loop each later latestOffset until raiseFrozen
  *   Spark -> Stream : latestOffset()
  *   Stream -> Auto : shouldProbe()
  *   note right of Auto
  *     Always false (does Pull).
- *     Raise T when start-to-start gap
- *     > T + 1s AND Spark waited:
+ *     If raiseFrozen: skip raise.
+ *     Else slack = 1s if last gather
+ *     empty, else max(5s, 10% of T).
+ *     Raise when gap > T + slack
+ *     AND Spark waited:
  *     last gather empty, or
- *     gap > gather + write + 1s.
- *     Never shrink T.
+ *     gap > gather + write + slack.
+ *     On raise: T = gap, clear
+ *     lastOverrunNanos, reset
+ *     matching count. Never shrink T.
  *   end note
+ *   alt no raise
+ *     note right of Auto
+ *       If armed (T >= 30s or
+ *       raiseCount >= 1): matching++.
+ *       After 5 matching: raiseFrozen.
+ *       A 16s seed is not armed.
+ *     end note
+ *   end
  *   Auto --> Stream : false
  *   Stream -> Auto : gatherWindow(admissionWait)
  *   note right of Auto
@@ -124,6 +143,12 @@ final class AutoBatchTime {
   static final long OVERRUN_SEED_NANOS = TimeUnit.MILLISECONDS.toNanos(500);
   static final Duration ZERO_TRIGGER_MAX_GATHER = Duration.ofSeconds(5);
 
+  /** Consecutive no-raise AUTO batches after T is armed, then freeze raises. */
+  static final int STABLE_NO_RAISE_BATCHES = 5;
+
+  /** Arm the stability counter once T is at least this, or after any raise. */
+  static final long STABLE_ARM_MIN_NANOS = TimeUnit.SECONDS.toNanos(30);
+
   enum Mode {
     FIXED,
     PROBE,
@@ -150,8 +175,12 @@ final class AutoBatchTime {
   private boolean pendingWrite;
   private int finishedNonEmpty;
   private int probeNoiseCount;
+  private int probeAttempts;
   private boolean zeroTriggerWarned;
   private Long lastOverrunNanos;
+  private int raiseCount;
+  private int stableNoRaiseCount;
+  private boolean raiseFrozen;
 
   static AutoBatchTime create(PubSubConfig config) {
     return create(config, System::nanoTime);
@@ -203,16 +232,24 @@ final class AutoBatchTime {
     if (probeStartedNanos == null) {
       probeStartedNanos = now;
       lastOffsetStartNanos = now;
+      probeAttempts = 1;
       LOG.warn(
-          "batchTime is unset; inferring Spark ProcessingTime from the next idle gap (one empty"
-              + " cycle, no Pull). Trigger.Once() requires an explicit batchTime or the probe"
-              + " consumes the only micro-batch.");
+          "batchTime is unset; inferring Spark ProcessingTime from idle gaps (empty latestOffset,"
+              + " no Pull) until one gap is at least 10s. In a 3 sub-second gap sequence assume"
+              + " ProcessingTime(0). probeAttempt=1");
       return true;
     }
+    probeAttempts++;
     long gapFromStart = now - probeStartedNanos;
     lastOffsetStartNanos = now;
     if (gapFromStart < PROBE_NOISE_NANOS) {
       probeNoiseCount++;
+      LOG.info(
+          "BATCH: probeAttempt={} gap {} is under 1s ({}/{} noise); keep probing",
+          probeAttempts,
+          format(Duration.ofNanos(gapFromStart)),
+          probeNoiseCount,
+          ZERO_TRIGGER_NOISE_CYCLES);
       if (probeNoiseCount >= ZERO_TRIGGER_NOISE_CYCLES) {
         enterZeroTrigger();
         return false;
@@ -223,7 +260,9 @@ final class AutoBatchTime {
       probeStartedNanos = now;
       lastOffsetStartNanos = now;
       LOG.warn(
-          "BATCH: startup gap {} is under 10s; not seeding processingTime (keep probing)",
+          "BATCH: probeAttempt={} inferred processingTime={} is under 10s; not seeding (keep"
+              + " probing)",
+          probeAttempts,
           format(Duration.ofNanos(gapFromStart)));
       return true;
     }
@@ -232,10 +271,11 @@ final class AutoBatchTime {
     currentGather = firstGather(processingTime);
     mode = Mode.AUTO;
     LOG.info(
-        "BATCH: inferred processingTime={} first gather={} (seed; start-to-start wait may raise"
-            + " Trigger.ProcessingTime)",
+        "BATCH: inferred processingTime={} first gather={} (seed probeAttempt={}; start-to-start"
+            + " wait may raise Trigger.ProcessingTime)",
         format(processingTime),
-        format(currentGather));
+        format(currentGather),
+        probeAttempts);
     return false;
   }
 
@@ -284,23 +324,55 @@ final class AutoBatchTime {
   }
 
   private void maybeRaiseFromStart(long now) {
-    if (lastOffsetStartNanos == 0L || processingTime == null) {
+    if (raiseFrozen || lastOffsetStartNanos == 0L || processingTime == null) {
       return;
     }
     long gap = now - lastOffsetStartNanos;
     long slack = lastGatherEmpty ? PROBE_NOISE_NANOS : busyWaitSlackNanos();
-    if (gap <= processingTime.toNanos() + slack) {
-      return;
-    }
-    if (!sparkWaited(now, gap, slack)) {
+    long processingSlack = processingTime.toNanos() + slack;
+    boolean waited = sparkWaited(now, gap, slack);
+    if (gap <= processingSlack || !waited) {
+      noteStableNoRaise();
       return;
     }
     processingTime = Duration.ofNanos(gap);
+    lastOverrunNanos = null;
+    raiseCount++;
+    stableNoRaiseCount = 0;
     refreshGather();
     LOG.info(
-        "BATCH: revised processingTime={} gather={}",
+        "BATCH: inferred processingTime={} gather={} (raise #{}; start-to-start wait may raise"
+            + " Trigger.ProcessingTime again until {} matching batches)",
         format(processingTime),
-        format(currentGather));
+        format(currentGather),
+        raiseCount,
+        STABLE_NO_RAISE_BATCHES);
+  }
+
+  private void noteStableNoRaise() {
+    if (!raiseArmed()) {
+      return;
+    }
+    stableNoRaiseCount++;
+    if (stableNoRaiseCount < STABLE_NO_RAISE_BATCHES) {
+      return;
+    }
+    raiseFrozen = true;
+    LOG.info(
+        "BATCH: processingTime={} stable after {} matching batches; stop raising T",
+        format(processingTime),
+        stableNoRaiseCount);
+  }
+
+  private boolean raiseArmed() {
+    if (raiseCount >= 1) {
+      return true;
+    }
+    return processingTime != null && processingTime.toNanos() >= STABLE_ARM_MIN_NANOS;
+  }
+
+  boolean raiseFrozen() {
+    return raiseFrozen;
   }
 
   private boolean sparkWaited(long now, long gap, long slack) {

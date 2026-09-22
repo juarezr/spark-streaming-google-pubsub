@@ -14,6 +14,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
  *
  * <pre>
  * @startuml
+ * !theme vibrant
  * title PubSubTableProvider
  * Application -> SparkSession : readStream()
  * SparkSession -> Application : DataStreamReader reader
