@@ -24,8 +24,8 @@ Authentication uses **Application Default Credentials (ADC)** unless you set `cr
 
 | Spark   | Scala | Artifact                                                     |
 |---------|-------|--------------------------------------------------------------|
-| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.8.2` |
-| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.8.2` |
+| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.0` |
+| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.9.0` |
 
 Prefer `--packages` or a Maven/Gradle dependency so Google client libraries come in as transitives.
 Fat JARs (`*-all.jar`) are not on Maven Central; build with `mvn package` or download them from
@@ -217,8 +217,8 @@ until commit. `maxRetryTime` omitted is `min(90s, ackDeadline)`.
 | Fewer files | omit `receiveTime`, keep `numWriters=1`, partition in the application |
 | Recovery drain | `Trigger.AvailableNow`, `seek=snapshot` or `seek=timestamp`, optional `limitTime` |
 
-`numWriters` only splits the already-gathered batch into Spark tasks. It does not start more Pull
-loops.
+`numWriters` only splits the already-received batch into Spark tasks. It does not start more
+receive loops.
 
 The driver holds payloads, ack ids, and attributes. Leave about 3–5× `batchSize` as heap headroom.
 
@@ -278,7 +278,6 @@ Dataset<Row> recovered = spark.readStream()
     .option("ackMode", "afterCommit")
     .option("gatherMode", "batch")
     .option("batchCount", "25000")
-    .option("pullDeadline", "2s")
     .load();
 
 recovered
@@ -307,7 +306,7 @@ recovered
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.8.2 \
+  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.0 \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -316,7 +315,7 @@ gcloud dataproc jobs submit spark \
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.8.2-all.jar \
+  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.9.0-all.jar \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -375,7 +374,7 @@ mvn -Pspark35 -DskipTests package
 
 spark-submit \
   --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
-  --jars target/spark-streaming-google-pubsub_2.12-0.8.2-SNAPSHOT-all.jar \
+  --jars target/spark-streaming-google-pubsub_2.12-0.9.0-all.jar \
   examples/java/JavaStructuredStreamingExample.java \
   YOUR_PROJECT YOUR_SUBSCRIPTION /tmp/pubsub-cp /tmp/pubsub-out
 ```
