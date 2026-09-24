@@ -223,10 +223,12 @@ class PubSubAvailableNowTest {
 
     Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.maxRows(4));
     assertEquals(4, partitionSize(stream, stream.initialOffset(), first));
+    verify(client, never()).acknowledge(anyList());
+    stream.commit(first);
+    verify(client).acknowledge(List.of("ack-0", "ack-1", "ack-2", "ack-3"));
 
     Offset second = stream.latestOffset(first, ReadLimit.maxRows(4));
     assertEquals(3, partitionSize(stream, first, second));
-    verify(client).acknowledge(List.of("ack-0", "ack-1", "ack-2", "ack-3"));
   }
 
   @Test

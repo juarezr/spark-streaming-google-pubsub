@@ -124,12 +124,12 @@ final class PubSubClient implements Closeable, Serializable {
 
   private FlowControlSettings flowControl() {
     long bytes = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
+    long outstandingBytes = bytes > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : bytes * 2;
     FlowControlSettings.Builder flow =
         FlowControlSettings.newBuilder()
-            .setMaxOutstandingRequestBytes(bytes)
+            .setMaxOutstandingRequestBytes(outstandingBytes)
             .setLimitExceededBehavior(FlowController.LimitExceededBehavior.Block);
     if (config.batchCount() > 0) {
-      // One extra batch can sit in the queue while Spark still holds the previous one unacked.
       long count = config.batchCount();
       long elements = count > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : count * 2;
       flow.setMaxOutstandingElementCount(elements);

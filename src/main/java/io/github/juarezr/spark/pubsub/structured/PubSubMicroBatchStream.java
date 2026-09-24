@@ -157,28 +157,15 @@ final class PubSubMicroBatchStream
     }
     if (this.limitReached) {
       resetMetrics();
-      if (lastProduced != null && startConsumed(startOffset, lastProduced)) {
-        commit(lastProduced);
-      }
       return nullIfEmpty ? null : this.currentOffset;
     }
     if (!availableNow && autoBatchTime.shouldProbe()) {
       resetMetrics();
       return nullIfEmpty ? null : currentOffset;
     }
-    // Streaming pull flow control holds at most one batch. Spark has finished that batch
-    // (start offset caught up) but calls source commit only after the next offset is built.
-    // Ack first so the subscriber can deliver the rest; otherwise the following empty polls
-    // look like the end of an AvailableNow drain and the query stops with a partial backlog.
-    if (lastProduced != null && startConsumed(startOffset, lastProduced)) {
-      commit(lastProduced);
-    }
     List<PulledMessage> pulled = gatherMessages(limits);
     if (pulled.isEmpty()) {
       resetMetrics();
-      if (lastProduced != null && startConsumed(startOffset, lastProduced)) {
-        commit(lastProduced);
-      }
       return nullIfEmpty ? null : currentOffset;
     }
     long batchId = nextBatchId.getAndIncrement();
@@ -225,7 +212,7 @@ final class PubSubMicroBatchStream
       long now = System.currentTimeMillis();
       this.lastPullMessageAgeMs = PubSubSourceMetrics.newestMessageAgeMs(pulled, now);
       LOG.debug(
-          "BATCH: latestOffset batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
+          "BATCH: micro-batch batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
     }
   }
 
@@ -538,6 +525,13 @@ final class PubSubMicroBatchStream
     PubSubOffset endOffset = (PubSubOffset) end;
     List<PulledMessage> messages = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
     if (messages.isEmpty()) {
+      int pulled = lastPullMessageCount.get();
+      if (pulled > 0) {
+        LOG.warn(
+            "BATCH: planInputPartitions batchId={} has 0 messages but lastPullMessageCount={}",
+            endOffset.batchId(),
+            pulled);
+      }
       return new InputPartition[] {new PubSubInputPartition(messages)};
     }
     int parts = Math.min(numPartitions, messages.size());

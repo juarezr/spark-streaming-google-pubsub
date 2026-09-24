@@ -122,7 +122,7 @@ class PubSubGatherTest {
   }
 
   @Test
-  void latestOffsetWithSameStartStaysIdempotent() {
+  void microBatchWithSameStartStaysIdempotent() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class))).thenReturn(messages(0, 2));
     PubSubConfig config =
@@ -138,7 +138,7 @@ class PubSubGatherTest {
   }
 
   @Test
-  void latestOffsetGathersNextBatchWhenStartConsumedPrevious() {
+  void microBatchGathersNextWhenStartConsumedPrevious() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class))).thenReturn(messages(0, 2)).thenReturn(messages(2, 3));
     PubSubConfig config =
@@ -153,11 +153,13 @@ class PubSubGatherTest {
     InputPartition[] partitions = stream.planInputPartitions(first, second);
     assertEquals(3, ((PubSubInputPartition) partitions[0]).messages().size());
     verify(client, times(2)).poll(any(Duration.class));
+    verify(client, never()).acknowledge(anyList());
+    stream.commit(first);
     verify(client).acknowledge(List.of("ack-0", "ack-1"));
   }
 
   @Test
-  void emptyFollowUpAfterConsumedStartAcksPreviousBatch() {
+  void emptyFollowUpAfterConsumedStartDoesNotAck() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class)))
         .thenReturn(messages(0, 2))
@@ -170,8 +172,9 @@ class PubSubGatherTest {
     Offset next = stream.latestOffset(first, ReadLimit.allAvailable());
 
     assertNull(next);
+    verify(client, never()).acknowledge(anyList());
+    stream.commit(first);
     verify(client).acknowledge(List.of("ack-0", "ack-1"));
-    verify(client).releaseMessages(any());
   }
 
   @Test
@@ -192,7 +195,7 @@ class PubSubGatherTest {
   }
 
   @Test
-  void latestOffsetIsIdempotentUntilCommit() {
+  void microBatchIsIdempotentUntilCommit() {
     PubSubClient client = mock(PubSubClient.class);
     List<PulledMessage> first = messages(0, 2);
     when(client.poll(any(Duration.class))).thenReturn(first).thenReturn(Collections.emptyList());
