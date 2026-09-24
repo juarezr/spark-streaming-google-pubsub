@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Test;
 class AutoBatchTimeTest {
 
   @Test
-  void unsetBatchTimeInBatchModeStartsAsProbe() {
+  void unsetReceiveTimeInBatchModeStartsAsProbe() {
     PubSubConfig config = PubSubConfig.builder().projectId("p").subscription("s").build();
     AutoBatchTime auto = AutoBatchTime.create(config, new AtomicLong()::get);
 
@@ -23,22 +23,22 @@ class AutoBatchTimeTest {
   }
 
   @Test
-  void configuredBatchTimeIsFixed() {
+  void configuredReceiveTimeIsFixed() {
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .batchTime(Duration.ofSeconds(10))
+            .receiveTime(Duration.ofSeconds(10))
             .build();
     AutoBatchTime auto = AutoBatchTime.create(config);
 
     assertEquals(AutoBatchTime.Mode.FIXED, auto.mode());
     assertFalse(auto.shouldProbe());
-    assertEquals(Duration.ofSeconds(10), auto.gatherWindow(null));
+    assertEquals(Duration.ofSeconds(10), auto.receiveWindow(null));
   }
 
   @Test
-  void pullModeDoesNotProbeWhenBatchTimeOmitted() {
+  void pullModeDoesNotProbeWhenReceiveTimeOmitted() {
     PubSubConfig config =
         PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
     AutoBatchTime auto = AutoBatchTime.create(config);
@@ -48,9 +48,9 @@ class AutoBatchTimeTest {
   }
 
   @Test
-  void oneCleanGapInfersProcessingTimeThenUsesHalf() {
+  void oneCleanGapInfersIntervalThenUsesHalf() {
     AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
 
     assertTrue(auto.shouldProbe());
     now.set(100_000_000L);
@@ -60,50 +60,14 @@ class AutoBatchTimeTest {
 
     assertEquals(AutoBatchTime.Mode.AUTO, auto.mode());
     assertEquals(Duration.ofSeconds(60), auto.processingTime());
-    assertEquals(Duration.ofSeconds(30), auto.gatherWindow(null));
-  }
-
-  @Test
-  void formulaUsesWriteAvgStdevAndSafety() {
-    AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
-    auto.shouldProbe();
-    now.addAndGet(Duration.ofSeconds(60).toNanos());
-    auto.shouldProbe();
-
-    auto.recordWrite(Duration.ofSeconds(20).toNanos());
-    auto.recordWrite(Duration.ofSeconds(22).toNanos());
-    auto.recordWrite(Duration.ofSeconds(21).toNanos());
-    auto.refreshGather();
-
-    double avg = auto.writeAvg();
-    double stdev = auto.writeStdev();
-    long safety = (long) (0.005 * Duration.ofSeconds(60).toNanos());
-    long expected = Duration.ofSeconds(60).toNanos() - (long) avg - (long) stdev - safety;
-    assertEquals(Duration.ofNanos(expected), auto.currentGather());
-  }
-
-  @Test
-  void clampKeepsGatherUnderTriggerForTypicalT() {
-    Duration clamped =
-        AutoBatchTime.clamp(Duration.ofSeconds(80), Duration.ofSeconds(60), Duration.ofSeconds(20));
-    assertEquals(Duration.ofSeconds(59), clamped);
-    Duration floor =
-        AutoBatchTime.clamp(Duration.ofSeconds(1), Duration.ofSeconds(60), Duration.ofSeconds(20));
-    assertEquals(Duration.ofSeconds(5), floor);
-  }
-
-  @Test
-  void clampFitsShortTrigger() {
-    Duration clamped =
-        AutoBatchTime.clamp(Duration.ofSeconds(5), Duration.ofSeconds(1), Duration.ofSeconds(20));
-    assertEquals(Duration.ofMillis(500), clamped);
+    assertEquals(Duration.ofSeconds(30), auto.receiveWindow(null));
+    assertEquals(Duration.ofSeconds(180), auto.inferredAckDeadline());
   }
 
   @Test
   void firstInferredGapUnderTenSecondsIsProbeNoise() {
     AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
 
     assertTrue(auto.shouldProbe());
     now.set(Duration.ofSeconds(4).toNanos());
@@ -115,115 +79,49 @@ class AutoBatchTimeTest {
 
     assertEquals(AutoBatchTime.Mode.AUTO, auto.mode());
     assertEquals(Duration.ofSeconds(60), auto.processingTime());
-    assertEquals(Duration.ofSeconds(30), auto.gatherWindow(null));
+    assertEquals(Duration.ofSeconds(30), auto.receiveWindow(null));
   }
 
   @Test
-  void idleStartToStartRaisesSeededProcessingTime() {
+  void idleStartToStartRaisesSeededIntervalOnce() {
     AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
 
     assertTrue(auto.shouldProbe());
     now.set(Duration.ofSeconds(16).toNanos());
     assertFalse(auto.shouldProbe());
     assertEquals(Duration.ofSeconds(16), auto.processingTime());
-    assertEquals(Duration.ofSeconds(8), auto.gatherWindow(null));
+    assertEquals(Duration.ofSeconds(8), auto.receiveWindow(null));
 
     auto.onGatherFinished(Duration.ofSeconds(5).toNanos(), false);
     now.addAndGet(Duration.ofSeconds(60).toNanos());
     assertFalse(auto.shouldProbe());
 
     assertEquals(Duration.ofSeconds(60), auto.processingTime());
-    assertEquals(Duration.ofSeconds(30), auto.gatherWindow(null));
   }
 
   @Test
-  void raiseAfterOverrunDoesNotPinGatherAtFloor() {
+  void busyOverrunShrinksReceiveDoesNotGrowInterval() {
     AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
-
-    assertTrue(auto.shouldProbe());
-    now.set(Duration.ofSeconds(16).toNanos());
-    assertFalse(auto.shouldProbe());
-    assertEquals(Duration.ofSeconds(16), auto.processingTime());
-
-    auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
-    now.addAndGet(Duration.ofSeconds(25).toNanos());
-    auto.onCommit();
-
-    now.set(Duration.ofSeconds(16).toNanos() + Duration.ofSeconds(60).toNanos());
-    assertFalse(auto.shouldProbe());
-
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
-    assertTrue(
-        auto.currentGather().compareTo(Duration.ofSeconds(5)) > 0,
-        "stale overrun vs 16s T must not clamp gather to 5s after raise");
-  }
-
-  @Test
-  void busyWaitRaisesSeededProcessingTime() {
-    AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
-
-    assertTrue(auto.shouldProbe());
-    now.set(Duration.ofSeconds(16).toNanos());
-    assertFalse(auto.shouldProbe());
-    assertEquals(Duration.ofSeconds(16), auto.processingTime());
-
-    auto.onGatherFinished(Duration.ofSeconds(8).toNanos(), true);
-    now.addAndGet(Duration.ofSeconds(2).toNanos());
-    auto.onCommit();
-
-    now.set(Duration.ofSeconds(16).toNanos() + Duration.ofSeconds(60).toNanos());
-    assertFalse(auto.shouldProbe());
-
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
-  }
-
-  @Test
-  void busyNearOverrunDoesNotRaiseProcessingTime() {
-    AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
 
     assertTrue(auto.shouldProbe());
     now.set(Duration.ofSeconds(60).toNanos());
     assertFalse(auto.shouldProbe());
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
-
-    auto.onGatherFinished(Duration.ofSeconds(59).toNanos(), true);
-    now.addAndGet(Duration.ofSeconds(3).toNanos());
-    auto.onCommit();
-
-    now.set(Duration.ofSeconds(60).toNanos() + Duration.ofMillis(63400).toNanos());
-    assertFalse(auto.shouldProbe());
-
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
-  }
-
-  @Test
-  void busyOverrunDoesNotRaiseProcessingTime() {
-    AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
-
-    assertTrue(auto.shouldProbe());
-    now.set(Duration.ofSeconds(60).toNanos());
-    assertFalse(auto.shouldProbe());
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertEquals(Duration.ofSeconds(30), auto.currentReceive());
 
     auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), true);
     now.addAndGet(Duration.ofSeconds(20).toNanos());
     auto.onCommit();
 
-    now.set(Duration.ofSeconds(60).toNanos() + Duration.ofSeconds(70).toNanos());
-    assertFalse(auto.shouldProbe());
-
     assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertTrue(auto.currentReceive().compareTo(Duration.ofSeconds(30)) <= 0);
   }
 
   @Test
-  void busyMatchingTriggerDoesNotRaiseProcessingTime() {
+  void busyCycleDoesNotRaiseInterval() {
     AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
 
     assertTrue(auto.shouldProbe());
     now.set(Duration.ofSeconds(60).toNanos());
@@ -233,131 +131,16 @@ class AutoBatchTimeTest {
     now.addAndGet(Duration.ofSeconds(5).toNanos());
     auto.onCommit();
 
-    now.set(Duration.ofSeconds(60).toNanos() + Duration.ofSeconds(60).toNanos());
+    now.set(Duration.ofSeconds(60).toNanos() + Duration.ofSeconds(70).toNanos());
     assertFalse(auto.shouldProbe());
 
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
-  }
-
-  @Test
-  void busyShortGapDoesNotShrinkProcessingTime() {
-    AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
-    auto.shouldProbe();
-    now.set(Duration.ofSeconds(60).toNanos());
-    auto.shouldProbe();
-    auto.onGatherFinished(Duration.ofSeconds(8).toNanos(), true);
-
-    now.addAndGet(Duration.ofSeconds(2).toNanos());
-    auto.shouldProbe();
-
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
-  }
-
-  @Test
-  void smallSeedDoesNotFreezeBeforeRaise() {
-    AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
-
-    assertTrue(auto.shouldProbe());
-    long lastStart = Duration.ofSeconds(16).toNanos();
-    now.set(lastStart);
-    assertFalse(auto.shouldProbe());
-    assertEquals(Duration.ofSeconds(16), auto.processingTime());
-
-    for (int i = 0; i < AutoBatchTime.STABLE_NO_RAISE_BATCHES; i++) {
-      now.set(lastStart + Duration.ofSeconds(5).toNanos());
-      auto.onGatherFinished(Duration.ofSeconds(4).toNanos(), true);
-      now.addAndGet(Duration.ofSeconds(1).toNanos());
-      auto.onCommit();
-      lastStart += Duration.ofSeconds(16).toNanos();
-      now.set(lastStart);
-      assertFalse(auto.shouldProbe());
-    }
-
-    assertFalse(auto.raiseFrozen());
-    assertEquals(Duration.ofSeconds(16), auto.processingTime());
-
-    now.set(lastStart + Duration.ofSeconds(10).toNanos());
-    auto.onGatherFinished(Duration.ofSeconds(8).toNanos(), true);
-    now.addAndGet(Duration.ofSeconds(2).toNanos());
-    auto.onCommit();
-    now.set(lastStart + Duration.ofSeconds(60).toNanos());
-    assertFalse(auto.shouldProbe());
-
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
-  }
-
-  @Test
-  void matchingBatchesAfterSixtySecondSeedFreezeRaises() {
-    AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
-
-    assertTrue(auto.shouldProbe());
-    long lastStart = Duration.ofSeconds(60).toNanos();
-    now.set(lastStart);
-    assertFalse(auto.shouldProbe());
-
-    for (int i = 0; i < AutoBatchTime.STABLE_NO_RAISE_BATCHES; i++) {
-      now.set(lastStart + Duration.ofSeconds(25).toNanos());
-      auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
-      now.addAndGet(Duration.ofSeconds(5).toNanos());
-      auto.onCommit();
-      lastStart += Duration.ofSeconds(60).toNanos();
-      now.set(lastStart);
-      assertFalse(auto.shouldProbe());
-    }
-
-    assertTrue(auto.raiseFrozen());
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
-
-    auto.onGatherFinished(Duration.ofSeconds(5).toNanos(), false);
-    now.addAndGet(Duration.ofSeconds(120).toNanos());
-    assertFalse(auto.shouldProbe());
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
-  }
-
-  @Test
-  void fiveMatchesAfterRaiseFreezeFurtherRaises() {
-    AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
-
-    assertTrue(auto.shouldProbe());
-    long lastStart = Duration.ofSeconds(16).toNanos();
-    now.set(lastStart);
-    assertFalse(auto.shouldProbe());
-
-    now.set(lastStart + Duration.ofSeconds(10).toNanos());
-    auto.onGatherFinished(Duration.ofSeconds(8).toNanos(), true);
-    now.addAndGet(Duration.ofSeconds(2).toNanos());
-    auto.onCommit();
-    lastStart += Duration.ofSeconds(60).toNanos();
-    now.set(lastStart);
-    assertFalse(auto.shouldProbe());
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
-    assertFalse(auto.raiseFrozen());
-
-    for (int i = 0; i < AutoBatchTime.STABLE_NO_RAISE_BATCHES; i++) {
-      now.set(lastStart + Duration.ofSeconds(25).toNanos());
-      auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
-      now.addAndGet(Duration.ofSeconds(5).toNanos());
-      auto.onCommit();
-      lastStart += Duration.ofSeconds(60).toNanos();
-      now.set(lastStart);
-      assertFalse(auto.shouldProbe());
-    }
-
-    assertTrue(auto.raiseFrozen());
-    auto.onGatherFinished(Duration.ofSeconds(5).toNanos(), false);
-    now.addAndGet(Duration.ofSeconds(120).toNanos());
-    assertFalse(auto.shouldProbe());
     assertEquals(Duration.ofSeconds(60), auto.processingTime());
   }
 
   @Test
   void threeNoiseGapsAssumeZeroTrigger() {
     AtomicLong now = new AtomicLong(0);
-    AutoBatchTime auto = new AutoBatchTime(null, Duration.ofSeconds(20), now::get);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
 
     assertTrue(auto.shouldProbe());
     now.addAndGet(TimeUnit.MILLISECONDS.toNanos(100));
@@ -368,6 +151,19 @@ class AutoBatchTimeTest {
     assertFalse(auto.shouldProbe());
 
     assertEquals(AutoBatchTime.Mode.ZERO, auto.mode());
-    assertEquals(Duration.ofSeconds(5), auto.gatherWindow(null));
+    assertEquals(Duration.ofSeconds(1), auto.receiveWindow(null));
+    assertEquals(Duration.ofSeconds(180), auto.inferredAckDeadline());
+  }
+
+  @Test
+  void clampReceiveKeepsFloorAndMargin() {
+    Duration clamped =
+        AutoBatchTime.clampReceive(
+            Duration.ofSeconds(80), Duration.ofSeconds(60), Duration.ofSeconds(10).toNanos());
+    assertEquals(Duration.ofSeconds(49), clamped);
+    Duration floor =
+        AutoBatchTime.clampReceive(
+            Duration.ofMillis(10), Duration.ofSeconds(60), Duration.ofSeconds(10).toNanos());
+    assertEquals(Duration.ofSeconds(1), floor);
   }
 }

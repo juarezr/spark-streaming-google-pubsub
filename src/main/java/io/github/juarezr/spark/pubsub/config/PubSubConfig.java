@@ -24,12 +24,10 @@ public final class PubSubConfig implements Serializable {
   public static final String SUBSCRIPTION = "subscription";
   public static final String TOPIC = "topic";
   public static final String ACK_MODE = "ackMode";
-  public static final String PULL_MAX_MESSAGES = "pullMaxMessages";
   public static final String MAX_RETRY_TIME = "maxRetryTime";
-  public static final String PULL_DEADLINE = "pullDeadline";
   public static final String ACK_DEADLINE = "ackDeadline";
   public static final String GATHER_MODE = "gatherMode";
-  public static final String BATCH_TIME = "batchTime";
+  public static final String RECEIVE_TIME = "receiveTime";
   public static final String BATCH_SIZE = "batchSize";
   public static final String BATCH_COUNT = "batchCount";
   public static final String NUM_WRITERS = "numWriters";
@@ -42,10 +40,8 @@ public final class PubSubConfig implements Serializable {
   public static final String SCHEMA_MODE = "schemaMode";
   public static final String METADATA_MODE = "metadataMode";
 
-  public static final int DEFAULT_PULL_MAX_MESSAGES = 1000;
   public static final Duration DEFAULT_MAX_RETRY_TIME = Duration.ofSeconds(90);
-  public static final Duration DEFAULT_PULL_DEADLINE = Duration.ofSeconds(20);
-  public static final Duration DEFAULT_ACK_DEADLINE = Duration.ofSeconds(60);
+  public static final Duration ACK_DEADLINE_SEED = Duration.ofSeconds(180);
   public static final long DEFAULT_BATCH_SIZE = 128L * 1024 * 1024;
 
   private static final Logger LOG = LoggerFactory.getLogger(PubSubConfig.class);
@@ -56,12 +52,11 @@ public final class PubSubConfig implements Serializable {
   private final String subscription;
   private final String topic;
   private final AckMode ackMode;
-  private final int pullMaxMessages;
   private final Duration maxRetryTime;
-  private final Duration pullDeadline;
+  private final boolean maxRetryTimeSet;
   private final Duration ackDeadline;
   private final GatherMode gatherMode;
-  private final Duration batchTime;
+  private final Duration receiveTime;
   private final long batchSize;
   private final long batchCount;
   private final String numWriters;
@@ -79,12 +74,12 @@ public final class PubSubConfig implements Serializable {
     this.subscription = Objects.requireNonNull(builder.subscription, "subscription is required");
     this.topic = builder.topic;
     this.ackMode = builder.ackMode == null ? AckMode.AFTER_COMMIT : builder.ackMode;
-    this.pullMaxMessages = builder.pullMaxMessages;
-    this.maxRetryTime = builder.maxRetryTime;
-    this.pullDeadline = builder.pullDeadline;
+    this.maxRetryTimeSet = builder.maxRetryTimeSet;
     this.ackDeadline = builder.ackDeadline;
+    this.maxRetryTime =
+        resolveMaxRetryTime(builder.maxRetryTime, builder.maxRetryTimeSet, ackDeadline);
     this.gatherMode = builder.gatherMode;
-    this.batchTime = builder.batchTime;
+    this.receiveTime = builder.receiveTime;
     this.batchSize = builder.batchSize;
     this.batchCount = builder.batchCount;
     this.numWriters = builder.numWriters;
@@ -106,11 +101,8 @@ public final class PubSubConfig implements Serializable {
     if (subscription.isBlank()) {
       throw new IllegalArgumentException("subscription must not be blank");
     }
-    if (pullMaxMessages <= 0 || pullMaxMessages > 1000) {
-      throw new IllegalArgumentException("pullMaxMessages must be between 1 and 1000");
-    }
-    if (batchTime != null && (batchTime.isZero() || batchTime.isNegative())) {
-      throw new IllegalArgumentException("batchTime must be > 0");
+    if (receiveTime != null && (receiveTime.isZero() || receiveTime.isNegative())) {
+      throw new IllegalArgumentException("receiveTime must be > 0");
     }
     if (batchSize != 0 && batchSize < 1024L * 1024L) {
       throw new IllegalArgumentException("batchSize must be 0/blank or at least 1m");
@@ -118,16 +110,10 @@ public final class PubSubConfig implements Serializable {
     if (batchCount < 0) {
       throw new IllegalArgumentException("batchCount must be >= 0");
     }
-    if (pullDeadline == null || pullDeadline.isZero() || pullDeadline.isNegative()) {
-      throw new IllegalArgumentException("pullDeadline must be > 0");
-    }
-    if (pullDeadline.compareTo(Duration.ofSeconds(600)) > 0) {
-      throw new IllegalArgumentException("pullDeadline must be <= 600s");
-    }
-    if (ackDeadline == null
-        || ackDeadline.compareTo(Duration.ofSeconds(10)) < 0
-        || ackDeadline.compareTo(Duration.ofSeconds(600)) > 0
-        || ackDeadline.toMillis() % 1000L != 0L) {
+    if (ackDeadline != null
+        && (ackDeadline.compareTo(Duration.ofSeconds(10)) < 0
+            || ackDeadline.compareTo(Duration.ofSeconds(600)) > 0
+            || ackDeadline.toMillis() % 1000L != 0L)) {
       throw new IllegalArgumentException(
           "ackDeadline must be a whole number of seconds between 10s and 600s");
     }
@@ -170,6 +156,7 @@ public final class PubSubConfig implements Serializable {
     for (Map.Entry<String, String> e : options.entrySet()) {
       normalized.put(e.getKey().toLowerCase(Locale.ROOT), e.getValue());
     }
+    rejectRemovedOptions(normalized);
     Builder b = new Builder();
     b.projectId(first(normalized, "projectid", "project"));
     b.subscription(first(normalized, "subscription", "subscriptionname"));
@@ -178,17 +165,9 @@ public final class PubSubConfig implements Serializable {
     if (ack != null) {
       b.ackMode(AckMode.fromString(ack));
     }
-    String maxMsg = first(normalized, "pullmaxmessages");
-    if (maxMsg != null) {
-      b.pullMaxMessages(Integer.parseInt(maxMsg));
-    }
     String maxRetry = first(normalized, "maxretrytime");
     if (maxRetry != null) {
       b.maxRetryTime(parseDuration(MAX_RETRY_TIME, maxRetry));
-    }
-    String pullDeadline = first(normalized, "pulldeadline");
-    if (pullDeadline != null) {
-      b.pullDeadline(parseDuration(PULL_DEADLINE, pullDeadline));
     }
     String ackDeadline = first(normalized, "ackdeadline");
     if (ackDeadline != null) {
@@ -198,9 +177,9 @@ public final class PubSubConfig implements Serializable {
     if (gatherMode != null) {
       b.gatherMode(GatherMode.fromString(gatherMode));
     }
-    String batchTime = first(normalized, "batchtime");
-    if (batchTime != null) {
-      b.batchTime(parseDuration(BATCH_TIME, batchTime));
+    String receiveTime = first(normalized, "receivetime");
+    if (receiveTime != null) {
+      b.receiveTime(parseDuration(RECEIVE_TIME, receiveTime));
     }
     String batchSize = first(normalized, "batchsize");
     if (batchSize != null) {
@@ -232,6 +211,29 @@ public final class PubSubConfig implements Serializable {
       b.metadataMode(MetadataMode.fromString(metadataMode));
     }
     return b.build();
+  }
+
+  private static void rejectRemovedOptions(Map<String, String> normalized) {
+    if (normalized.containsKey("batchtime")) {
+      throw new IllegalArgumentException(
+          "batchTime was removed in 0.9.0; use receiveTime (no alias)");
+    }
+    if (normalized.containsKey("pullmaxmessages")) {
+      throw new IllegalArgumentException(
+          "pullMaxMessages was removed in 0.9.0; unary Pull is gone");
+    }
+    if (normalized.containsKey("pulldeadline")) {
+      throw new IllegalArgumentException("pullDeadline was removed in 0.9.0; unary Pull is gone");
+    }
+  }
+
+  static Duration resolveMaxRetryTime(Duration requested, boolean explicit, Duration ackDeadline) {
+    if (explicit) {
+      return requested == null ? Duration.ZERO : requested;
+    }
+    Duration lease = ackDeadline == null ? ACK_DEADLINE_SEED : ackDeadline;
+    Duration cap = DEFAULT_MAX_RETRY_TIME;
+    return cap.compareTo(lease) <= 0 ? cap : lease;
   }
 
   static Duration parseDuration(String option, String raw) {
@@ -318,28 +320,49 @@ public final class PubSubConfig implements Serializable {
     return ackMode;
   }
 
-  public int pullMaxMessages() {
-    return pullMaxMessages;
-  }
-
   public Duration maxRetryTime() {
     return maxRetryTime;
   }
 
-  public Duration pullDeadline() {
-    return pullDeadline;
+  public boolean maxRetryTimeSet() {
+    return maxRetryTimeSet;
   }
 
   public Duration ackDeadline() {
     return ackDeadline;
   }
 
+  /**
+   * Lease when {@code ackDeadline} is omitted. Uses {@code interval} when known, otherwise 180s.
+   */
+  public Duration effectiveAckDeadline(Duration batchInterval) {
+    if (ackDeadline != null) {
+      return ackDeadline;
+    }
+    if (batchInterval == null || batchInterval.isZero() || batchInterval.isNegative()) {
+      return ACK_DEADLINE_SEED;
+    }
+    long seconds = Math.max(1L, batchInterval.getSeconds() * 3L);
+    Duration inferred = Duration.ofSeconds(seconds);
+    if (inferred.compareTo(Duration.ofSeconds(60)) < 0) {
+      return Duration.ofSeconds(60);
+    }
+    if (inferred.compareTo(Duration.ofSeconds(600)) > 0) {
+      return Duration.ofSeconds(600);
+    }
+    return inferred;
+  }
+
+  public Duration effectiveMaxRetryTime() {
+    return maxRetryTime;
+  }
+
   public GatherMode gatherMode() {
     return gatherMode;
   }
 
-  public Duration batchTime() {
-    return batchTime;
+  public Duration receiveTime() {
+    return receiveTime;
   }
 
   public long batchSize() {
@@ -422,18 +445,16 @@ public final class PubSubConfig implements Serializable {
   }
 
   String startupSummary() {
-    String batch = batchTime == null ? "auto" : formatDuration(batchTime);
+    String receive = receiveTime == null ? "auto" : formatDuration(receiveTime);
     String size = batchSize <= 0 ? "off" : batchSize + "b";
     String count = batchCount <= 0 ? "off" : Long.toString(batchCount);
     StringBuilder line = new StringBuilder();
     line.append("gatherMode=")
         .append(gatherMode)
-        .append(" batchTime=")
-        .append(batch)
-        .append(" pullDeadline=")
-        .append(formatDuration(pullDeadline))
+        .append(" receiveTime=")
+        .append(receive)
         .append(" ackDeadline=")
-        .append(formatDuration(ackDeadline))
+        .append(ackDeadline == null ? "auto" : formatDuration(ackDeadline))
         .append(" maxRetryTime=")
         .append(formatDuration(maxRetryTime))
         .append(" ackMode=")
@@ -442,8 +463,6 @@ public final class PubSubConfig implements Serializable {
         .append(seekMode)
         .append(" limitTime=")
         .append(limitTime().orElse("-"))
-        .append(" pullMaxMessages=")
-        .append(pullMaxMessages)
         .append(" batchSize=")
         .append(size)
         .append(" batchCount=")
@@ -490,12 +509,11 @@ public final class PubSubConfig implements Serializable {
     private String subscription;
     private String topic;
     private AckMode ackMode = AckMode.AFTER_COMMIT;
-    private int pullMaxMessages = DEFAULT_PULL_MAX_MESSAGES;
     private Duration maxRetryTime = DEFAULT_MAX_RETRY_TIME;
-    private Duration pullDeadline = DEFAULT_PULL_DEADLINE;
-    private Duration ackDeadline = DEFAULT_ACK_DEADLINE;
+    private boolean maxRetryTimeSet;
+    private Duration ackDeadline;
     private GatherMode gatherMode = GatherMode.BATCH;
-    private Duration batchTime;
+    private Duration receiveTime;
     private long batchSize = DEFAULT_BATCH_SIZE;
     private long batchCount;
     private String numWriters = "1";
@@ -528,18 +546,9 @@ public final class PubSubConfig implements Serializable {
       return this;
     }
 
-    public Builder pullMaxMessages(int pullMaxMessages) {
-      this.pullMaxMessages = pullMaxMessages;
-      return this;
-    }
-
     public Builder maxRetryTime(Duration maxRetryTime) {
       this.maxRetryTime = maxRetryTime;
-      return this;
-    }
-
-    public Builder pullDeadline(Duration pullDeadline) {
-      this.pullDeadline = pullDeadline;
+      this.maxRetryTimeSet = true;
       return this;
     }
 
@@ -553,8 +562,8 @@ public final class PubSubConfig implements Serializable {
       return this;
     }
 
-    public Builder batchTime(Duration batchTime) {
-      this.batchTime = batchTime;
+    public Builder receiveTime(Duration receiveTime) {
+      this.receiveTime = receiveTime;
       return this;
     }
 

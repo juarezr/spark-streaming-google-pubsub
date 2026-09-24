@@ -27,7 +27,7 @@ class PubSubConfigTest {
     assertEquals(AckMode.AFTER_COMMIT, config.ackMode());
     assertEquals(SeekMode.NONE, config.seekMode());
     assertEquals(GatherMode.BATCH, config.gatherMode());
-    assertEquals(null, config.batchTime());
+    assertEquals(null, config.receiveTime());
     assertEquals(128L * 1024 * 1024, config.batchSize());
     assertEquals(1, config.numWriters());
     assertEquals(SchemaMode.BASIC, config.schemaMode());
@@ -72,8 +72,6 @@ class PubSubConfigTest {
     options.put("ackMode", "early");
     options.put("seek", "timestamp");
     options.put("seekTime", "1700000000000");
-    options.put("pullMaxMessages", "50");
-    options.put("pullDeadline", "5s");
     options.put("maxRetryTime", "90s");
 
     PubSubConfig config = PubSubConfig.fromOptions(options);
@@ -81,9 +79,9 @@ class PubSubConfigTest {
     assertEquals(AckMode.EARLY, config.ackMode());
     assertEquals(SeekMode.TIMESTAMP, config.seekMode());
     assertEquals("1700000000000", config.seekTime().orElseThrow());
-    assertEquals(50, config.pullMaxMessages());
-    assertEquals(Duration.ofSeconds(5), config.pullDeadline());
     assertEquals(Duration.ofSeconds(90), config.maxRetryTime());
+    assertTrue(config.maxRetryTimeSet());
+    assertEquals(Duration.ofSeconds(180), config.effectiveAckDeadline(null));
   }
 
   @Test
@@ -127,7 +125,7 @@ class PubSubConfigTest {
     options.put("projectId", "p");
     options.put("subscription", "s");
     options.put("gatherMode", "pull");
-    options.put("batchTime", "5000ms");
+    options.put("receiveTime", "5000ms");
     options.put("batchSize", "2m");
     options.put("batchCount", "3000");
     options.put("numWriters", "auto");
@@ -135,7 +133,7 @@ class PubSubConfigTest {
     PubSubConfig config = PubSubConfig.fromOptions(options);
 
     assertEquals(GatherMode.PULL, config.gatherMode());
-    assertEquals(Duration.ofSeconds(5), config.batchTime());
+    assertEquals(Duration.ofSeconds(5), config.receiveTime());
     assertEquals(2L * 1024 * 1024, config.batchSize());
     assertEquals(3000L, config.batchCount());
     assertTrue(config.numWriters() >= 1);
@@ -143,10 +141,6 @@ class PubSubConfigTest {
 
   @Test
   void validatesRanges() {
-    assertThrows(
-        IllegalArgumentException.class,
-        () ->
-            PubSubConfig.builder().projectId("p").subscription("s").pullMaxMessages(1001).build());
     assertThrows(
         IllegalArgumentException.class,
         () ->
@@ -161,7 +155,7 @@ class PubSubConfigTest {
             PubSubConfig.builder()
                 .projectId("p")
                 .subscription("s")
-                .batchTime(Duration.ZERO)
+                .receiveTime(Duration.ZERO)
                 .build());
     assertThrows(IllegalArgumentException.class, () -> PubSubConfig.parseDuration("test", "10x"));
     assertThrows(
@@ -237,6 +231,29 @@ class PubSubConfigTest {
             IllegalArgumentException.class,
             () -> PubSubConfig.parseInstant(PubSubConfig.LIMIT_TIME, "not-a-time"));
     assertTrue(ex.getMessage().contains("limitTime"));
+  }
+
+  @Test
+  void rejectsRemovedUnaryAndBatchTimeOptions() {
+    Map<String, String> batchTime = new HashMap<>();
+    batchTime.put("projectId", "p");
+    batchTime.put("subscription", "s");
+    batchTime.put("batchTime", "10s");
+    IllegalArgumentException batchEx =
+        assertThrows(IllegalArgumentException.class, () -> PubSubConfig.fromOptions(batchTime));
+    assertTrue(batchEx.getMessage().contains("receiveTime"));
+
+    Map<String, String> pullMax = new HashMap<>();
+    pullMax.put("projectId", "p");
+    pullMax.put("subscription", "s");
+    pullMax.put("pullMaxMessages", "1000");
+    assertThrows(IllegalArgumentException.class, () -> PubSubConfig.fromOptions(pullMax));
+
+    Map<String, String> pullDeadline = new HashMap<>();
+    pullDeadline.put("projectId", "p");
+    pullDeadline.put("subscription", "s");
+    pullDeadline.put("pullDeadline", "20s");
+    assertThrows(IllegalArgumentException.class, () -> PubSubConfig.fromOptions(pullDeadline));
   }
 
   @Test

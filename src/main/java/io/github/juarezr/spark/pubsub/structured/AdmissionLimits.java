@@ -10,8 +10,8 @@ import org.apache.spark.sql.connector.read.streaming.ReadMaxRows;
 import org.apache.spark.sql.connector.read.streaming.ReadMinRows;
 
 /**
- * Effective gather caps: Spark {@link ReadLimit} composed with connector {@code batchCount} /
- * {@code batchSize} / {@code batchTime}. {@code ReadMaxBytes} is read by name so this class
+ * Effective receive caps: Spark {@link ReadLimit} composed with connector {@code batchCount} /
+ * {@code batchSize} / {@code receiveTime}. {@code ReadMaxBytes} is read by name so this class
  * compiles on Spark 3.5 (the type exists from Spark 4.0).
  */
 final class AdmissionLimits {
@@ -48,7 +48,7 @@ final class AdmissionLimits {
     Parsed spark = Parsed.parse(limit);
     long maxRows = minPositive(config.batchCount(), spark.maxRows);
     long maxBytes = minPositive(config.batchSize(), spark.maxBytes);
-    Duration waitTime = config.batchTime();
+    Duration waitTime = config.receiveTime();
     if (spark.maxTriggerDelayMs > 0
         && (waitTime == null || spark.maxTriggerDelayMs < waitTime.toMillis())) {
       waitTime = Duration.ofMillis(spark.maxTriggerDelayMs);
@@ -78,8 +78,8 @@ final class AdmissionLimits {
   }
 
   /**
-   * AvailableNow drain: ignore {@code batchTime} / single-Pull early exit; stop at caps or
-   * consecutive empty Pulls.
+   * AvailableNow drain: ignore {@code receiveTime} / single-receive early exit; stop at caps or
+   * consecutive empty polls.
    */
   AdmissionLimits withDrainUntilIdle() {
     return new AdmissionLimits(maxRows, maxBytes, minRows, waitTime, false, true);
@@ -102,16 +102,15 @@ final class AdmissionLimits {
     return minRows <= 0 || rows >= minRows;
   }
 
-  int messagesForNextPull(int already, int pullMaxMessages) {
-    int pullMax = Math.max(1, pullMaxMessages);
+  int remainingRows(int already) {
     if (maxRows == UNLIMITED) {
-      return pullMax;
+      return Integer.MAX_VALUE;
     }
     long remaining = maxRows - already;
     if (remaining <= 0) {
       return 0;
     }
-    return (int) Math.min(pullMax, remaining);
+    return remaining > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) remaining;
   }
 
   static long minPositive(long left, long right) {

@@ -8,7 +8,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -49,14 +48,14 @@ class PubSubAvailableNowTest {
     Offset latest = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
 
     assertNull(latest);
-    verify(client, times(PubSubMicroBatchStream.AVAILABLE_NOW_IDLE_PULLS))
-        .pull(any(Duration.class), anyInt());
+    verify(client, times(PubSubMicroBatchStream.AVAILABLE_NOW_IDLE_POLLS))
+        .poll(any(Duration.class));
   }
 
   @Test
   void firstEmptyPullDoesNotStopDrain() {
     PubSubClient client = mock(PubSubClient.class);
-    when(client.pull(any(Duration.class), anyInt()))
+    when(client.poll(any(Duration.class)))
         .thenReturn(Collections.emptyList())
         .thenReturn(messages(0, 3))
         .thenReturn(Collections.emptyList())
@@ -70,8 +69,8 @@ class PubSubAvailableNowTest {
     assertNotNull(latest);
     InputPartition[] partitions = stream.planInputPartitions(stream.initialOffset(), latest);
     assertEquals(3, ((PubSubInputPartition) partitions[0]).messages().size());
-    verify(client, times(2 + PubSubMicroBatchStream.AVAILABLE_NOW_IDLE_PULLS))
-        .pull(any(Duration.class), anyInt());
+    verify(client, times(2 + PubSubMicroBatchStream.AVAILABLE_NOW_IDLE_POLLS))
+        .poll(any(Duration.class));
   }
 
   @Test
@@ -82,7 +81,7 @@ class PubSubAvailableNowTest {
     Offset latest = stream.latestOffset();
 
     assertEquals(stream.initialOffset(), latest);
-    verify(client, times(2)).pull(any(Duration.class), anyInt());
+    verify(client, times(2)).poll(any(Duration.class));
   }
 
   @Test
@@ -98,10 +97,10 @@ class PubSubAvailableNowTest {
     PubSubMicroBatchStream probe = stream(probeClient, unsetBatchTime);
     Offset probed = probe.latestOffset();
     assertEquals(probe.initialOffset(), probed);
-    verify(probeClient, never()).pull(any(Duration.class), anyInt());
+    verify(probeClient, never()).poll(any(Duration.class));
 
     PubSubClient client = mock(PubSubClient.class);
-    when(client.pull(any(Duration.class), anyInt()))
+    when(client.poll(any(Duration.class)))
         .thenReturn(messages(0, 2))
         .thenReturn(Collections.emptyList())
         .thenReturn(Collections.emptyList())
@@ -111,14 +110,14 @@ class PubSubAvailableNowTest {
     Offset latest = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
 
     assertNotNull(latest);
-    verify(client, times(1 + PubSubMicroBatchStream.AVAILABLE_NOW_IDLE_PULLS))
-        .pull(any(Duration.class), anyInt());
+    verify(client, times(1 + PubSubMicroBatchStream.AVAILABLE_NOW_IDLE_POLLS))
+        .poll(any(Duration.class));
   }
 
   @Test
   void snapshotRecoveryDrainsThenReturnsNull() {
     PubSubClient client = mock(PubSubClient.class);
-    when(client.pull(any(Duration.class), anyInt()))
+    when(client.poll(any(Duration.class)))
         .thenReturn(messages(0, 5))
         .thenReturn(messages(5, 5))
         .thenReturn(messages(10, 2))
@@ -134,7 +133,7 @@ class PubSubAvailableNowTest {
             .gatherMode(GatherMode.BATCH)
             .batchCount(5)
             .batchSize(0)
-            .batchTime(Duration.ofSeconds(2))
+            .receiveTime(Duration.ofSeconds(2))
             .build();
     PubSubMicroBatchStream stream = stream(client, config);
     stream.prepareForTriggerAvailableNow();
@@ -157,7 +156,7 @@ class PubSubAvailableNowTest {
     Offset done = stream.latestOffset(third, ReadLimit.maxRows(5));
     assertNull(done);
     // 5 + 5 + (2 then 3 idle) + 3 idle to return null
-    verify(client, times(9)).pull(any(Duration.class), anyInt());
+    verify(client, times(9)).poll(any(Duration.class));
     verify(client).acknowledge(List.of("ack-0", "ack-1", "ack-2", "ack-3", "ack-4"));
     verify(client).acknowledge(List.of("ack-5", "ack-6", "ack-7", "ack-8", "ack-9"));
     verify(client).acknowledge(List.of("ack-10", "ack-11"));
@@ -167,9 +166,7 @@ class PubSubAvailableNowTest {
   @Test
   void batchCountSplitsHotDrainWithoutStopping() {
     PubSubClient client = mock(PubSubClient.class);
-    when(client.pull(any(Duration.class), anyInt()))
-        .thenReturn(messages(0, 4))
-        .thenReturn(messages(4, 4));
+    when(client.poll(any(Duration.class))).thenReturn(messages(0, 4)).thenReturn(messages(4, 4));
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
@@ -186,7 +183,7 @@ class PubSubAvailableNowTest {
     stream.commit(first);
     Offset second = stream.latestOffset(first, ReadLimit.maxRows(4));
     assertEquals(4, partitionSize(stream, first, second));
-    verify(client, times(2)).pull(any(Duration.class), anyInt());
+    verify(client, times(2)).poll(any(Duration.class));
   }
 
   @Test
@@ -207,13 +204,13 @@ class PubSubAvailableNowTest {
             IllegalStateException.class,
             () -> stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable()));
     assertTrue(ex.getMessage().contains("AvailableNow"));
-    verify(client, never()).pull(any(Duration.class), anyInt());
+    verify(client, never()).poll(any(Duration.class));
   }
 
   @Test
   void limitTimeKeepsInRangeNacksOverLimitThenStops() {
     PubSubClient client = mock(PubSubClient.class);
-    when(client.pull(any(Duration.class), anyInt()))
+    when(client.poll(any(Duration.class)))
         .thenReturn(List.of(messageAt(1000, 0), messageAt(1500, 1), messageAt(2000, 2)));
     PubSubConfig config =
         PubSubConfig.builder()
@@ -234,14 +231,14 @@ class PubSubAvailableNowTest {
     Offset done = stream.latestOffset(first, ReadLimit.allAvailable());
     assertNull(done);
     assertTrue(stream.limitReached());
-    verify(client, times(1)).pull(any(Duration.class), anyInt());
+    verify(client, times(1)).poll(any(Duration.class));
     verify(client).acknowledge(List.of("ack-0", "ack-1"));
   }
 
   @Test
   void allOverLimitNacksAndReturnsNull() {
     PubSubClient client = mock(PubSubClient.class);
-    when(client.pull(any(Duration.class), anyInt())).thenReturn(List.of(messageAt(3000, 0)));
+    when(client.poll(any(Duration.class))).thenReturn(List.of(messageAt(3000, 0)));
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
@@ -264,7 +261,7 @@ class PubSubAvailableNowTest {
   @Test
   void batchCountSplitsBeforeLimitBound() {
     PubSubClient client = mock(PubSubClient.class);
-    when(client.pull(any(Duration.class), anyInt()))
+    when(client.poll(any(Duration.class)))
         .thenReturn(
             List.of(messageAt(1000, 0), messageAt(1100, 1), messageAt(1200, 2), messageAt(1300, 3)))
         .thenReturn(List.of(messageAt(1400, 4), messageAt(2000, 5)));
@@ -291,7 +288,7 @@ class PubSubAvailableNowTest {
 
     Offset done = stream.latestOffset(second, ReadLimit.maxRows(4));
     assertNull(done);
-    verify(client, times(2)).pull(any(Duration.class), anyInt());
+    verify(client, times(2)).poll(any(Duration.class));
   }
 
   private static int partitionSize(PubSubMicroBatchStream stream, Offset start, Offset end) {
@@ -309,13 +306,13 @@ class PubSubAvailableNowTest {
         .subscription("s")
         .gatherMode(GatherMode.BATCH)
         .batchSize(0)
-        .batchTime(Duration.ofSeconds(2))
+        .receiveTime(Duration.ofSeconds(2))
         .build();
   }
 
   private static PubSubClient clientAlwaysEmpty() {
     PubSubClient client = mock(PubSubClient.class);
-    when(client.pull(any(Duration.class), anyInt())).thenReturn(Collections.emptyList());
+    when(client.poll(any(Duration.class))).thenReturn(Collections.emptyList());
     return client;
   }
 

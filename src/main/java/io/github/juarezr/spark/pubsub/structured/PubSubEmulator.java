@@ -4,9 +4,9 @@ import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
 import com.google.cloud.pubsub.v1.SchemaServiceSettings;
+import com.google.cloud.pubsub.v1.Subscriber;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
 import com.google.cloud.pubsub.v1.TopicAdminSettings;
-import com.google.cloud.pubsub.v1.stub.SubscriberStubSettings;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import java.util.concurrent.TimeUnit;
@@ -24,8 +24,8 @@ final class PubSubEmulator implements AutoCloseable {
     this.channel = ManagedChannelBuilder.forTarget(host).usePlaintext().build();
   }
 
-  void configureSubscriber(final SubscriberStubSettings.Builder builder) {
-    builder.setTransportChannelProvider(transportProvider());
+  void configureSubscriber(final Subscriber.Builder builder) {
+    builder.setChannelProvider(transportProvider());
     builder.setCredentialsProvider(NoCredentialsProvider.create());
   }
 

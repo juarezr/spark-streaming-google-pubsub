@@ -1,20 +1,16 @@
 package io.github.juarezr.spark.pubsub.structured;
 
+import com.google.api.core.ApiService;
+import com.google.api.gax.batching.FlowControlSettings;
+import com.google.api.gax.batching.FlowController;
 import com.google.api.gax.core.FixedCredentialsProvider;
-import com.google.api.gax.grpc.GrpcCallContext;
-import com.google.api.gax.rpc.DeadlineExceededException;
+import com.google.cloud.pubsub.v1.AckReplyConsumer;
+import com.google.cloud.pubsub.v1.MessageReceiver;
+import com.google.cloud.pubsub.v1.Subscriber;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
-import com.google.cloud.pubsub.v1.stub.GrpcSubscriberStub;
-import com.google.cloud.pubsub.v1.stub.SubscriberStub;
-import com.google.cloud.pubsub.v1.stub.SubscriberStubSettings;
 import com.google.protobuf.Timestamp;
-import com.google.pubsub.v1.AcknowledgeRequest;
-import com.google.pubsub.v1.ModifyAckDeadlineRequest;
 import com.google.pubsub.v1.PubsubMessage;
-import com.google.pubsub.v1.PullRequest;
-import com.google.pubsub.v1.PullResponse;
-import com.google.pubsub.v1.ReceivedMessage;
 import com.google.pubsub.v1.SeekRequest;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import io.github.juarezr.spark.pubsub.config.SeekMode;
@@ -25,40 +21,55 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Thin wrapper around the Pub/Sub subscriber stub with pull/ack/nack, retries, and optional seek.
+ * Warm {@link Subscriber} (StreamingPull) plus a bounded queue. The receiver never acks; Spark
+ * commit calls {@link #acknowledge}.
  */
 final class PubSubClient implements Closeable, Serializable {
 
-  private static final long serialVersionUID = -3861530485L;
+  private static final long serialVersionUID = -3861530486L;
   private static final Logger LOG = LoggerFactory.getLogger(PubSubClient.class);
 
-  /** Extra client timeout so Pub/Sub can return an empty PullResponse before gRPC cancels. */
-  private static final long CLIENT_DEADLINE_SLACK_MIN_MS = 500L;
-
-  private static final long CLIENT_DEADLINE_SLACK_MAX_MS = 2_000L;
+  /** Pub/Sub Acknowledge / ModifyAckDeadline cap. */
+  static final int ACK_CHUNK = 1000;
 
   private final RetryPolicy retryPolicy;
   private transient PubSubEmulator emulator;
 
   private final PubSubConfig config;
   private final PubSubCredentialsProvider credentialsProvider;
-  private transient SubscriberStub subscriberStub;
+  private transient Subscriber subscriber;
+  private transient LinkedBlockingQueue<HeldMessage> queue;
+  private transient ConcurrentHashMap<String, AckReplyConsumer> consumers;
   private transient AtomicLong outstandingBytes;
+  private transient AtomicLong queuedBytes;
+  private transient AtomicBoolean stopped;
   private transient boolean seekApplied;
   private final AtomicLong lastSeenNewestPublishMillis = new AtomicLong(Long.MIN_VALUE);
+
+  static final class HeldMessage {
+    final PulledMessage message;
+    final AckReplyConsumer consumer;
+
+    HeldMessage(PulledMessage message, AckReplyConsumer consumer) {
+      this.message = message;
+      this.consumer = consumer;
+    }
+  }
 
   PubSubClient(PubSubConfig config) {
     this(
         config,
         new PubSubCredentialsProvider(config.credentialsFile().orElse(null)),
-        RetryPolicy.defaults(config.maxRetryTime()));
+        RetryPolicy.defaults(config.effectiveMaxRetryTime()));
   }
 
   PubSubClient(
@@ -70,26 +81,104 @@ final class PubSubClient implements Closeable, Serializable {
   }
 
   synchronized void start() throws IOException {
-    if (this.subscriberStub != null) {
+    if (this.subscriber != null) {
       return;
     }
     this.outstandingBytes = new AtomicLong(0);
+    this.queuedBytes = new AtomicLong(0);
+    this.queue = new LinkedBlockingQueue<>();
+    this.consumers = new ConcurrentHashMap<>();
+    this.stopped = new AtomicBoolean(false);
 
-    final SubscriberStubSettings.Builder builder = SubscriberStubSettings.newBuilder();
     this.emulator = this.config.emulatorHost().map(PubSubEmulator::new).orElse(null);
-    if (this.emulator != null) {
-      this.emulator.configureSubscriber(builder);
-    } else {
-      builder.setCredentialsProvider(
-          FixedCredentialsProvider.create(this.credentialsProvider.getCredentials()));
-    }
     try {
-      this.subscriberStub = GrpcSubscriberStub.create(builder.build());
       applySeekIfNeeded();
+      Subscriber.Builder builder =
+          Subscriber.newBuilder(this.config.subscriptionPath(), receiver());
+      builder.setFlowControlSettings(flowControl());
+      org.threeten.bp.Duration ackExtend =
+          org.threeten.bp.Duration.ofSeconds(
+              Math.max(60L, config.effectiveAckDeadline(null).getSeconds()));
+      builder.setMaxAckExtensionPeriod(org.threeten.bp.Duration.ofMinutes(60));
+      builder.setMaxDurationPerAckExtension(ackExtend);
+      if (this.emulator != null) {
+        this.emulator.configureSubscriber(builder);
+      } else {
+        builder.setCredentialsProvider(
+            FixedCredentialsProvider.create(this.credentialsProvider.getCredentials()));
+      }
+      this.subscriber = builder.build();
+      this.subscriber.startAsync().awaitRunning();
     } catch (Exception e) {
       this.close();
-      throw e;
+      if (e instanceof IOException) {
+        throw (IOException) e;
+      }
+      throw new IOException("Unable to start Pub/Sub subscriber", e);
     }
+  }
+
+  private FlowControlSettings flowControl() {
+    long bytes = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
+    FlowControlSettings.Builder flow =
+        FlowControlSettings.newBuilder()
+            .setMaxOutstandingRequestBytes(bytes)
+            .setLimitExceededBehavior(FlowController.LimitExceededBehavior.Block);
+    if (config.batchCount() > 0) {
+      flow.setMaxOutstandingElementCount(config.batchCount());
+    }
+    return flow.build();
+  }
+
+  private MessageReceiver receiver() {
+    return (PubsubMessage message, AckReplyConsumer consumer) -> {
+      if (stopped != null && stopped.get()) {
+        consumer.nack();
+        return;
+      }
+      PulledMessage pulled = toPulled(message);
+      long cap = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
+      while (queuedBytes != null && queuedBytes.get() >= cap && stopped != null && !stopped.get()) {
+        try {
+          TimeUnit.MILLISECONDS.sleep(10);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          consumer.nack();
+          return;
+        }
+      }
+      if (stopped != null && stopped.get()) {
+        consumer.nack();
+        return;
+      }
+      consumers.put(pulled.ackId(), consumer);
+      queuedBytes.addAndGet(pulled.data().length);
+      outstandingBytes.addAndGet(pulled.data().length);
+      try {
+        queue.put(new HeldMessage(pulled, consumer));
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        consumers.remove(pulled.ackId());
+        queuedBytes.addAndGet(-pulled.data().length);
+        outstandingBytes.addAndGet(-pulled.data().length);
+        consumer.nack();
+      }
+    };
+  }
+
+  private PulledMessage toPulled(PubsubMessage message) {
+    byte[] data = message.getData().toByteArray();
+    long publishMillis =
+        message.getPublishTime().getSeconds() * 1000L
+            + message.getPublishTime().getNanos() / 1_000_000L;
+    String messageId = message.getMessageId();
+    return new PulledMessage(
+        messageId,
+        data,
+        message.getAttributesMap(),
+        publishMillis,
+        message.getOrderingKey(),
+        messageId);
   }
 
   private void applySeekIfNeeded() throws IOException {
@@ -144,7 +233,7 @@ final class PubSubClient implements Closeable, Serializable {
   }
 
   private void ensureStarted() {
-    if (this.subscriberStub == null) {
+    if (this.subscriber == null) {
       try {
         start();
       } catch (IOException e) {
@@ -155,95 +244,65 @@ final class PubSubClient implements Closeable, Serializable {
 
   @Override
   public synchronized void close() {
-    if (this.subscriberStub != null) {
+    if (stopped != null) {
+      stopped.set(true);
+    }
+    if (this.subscriber != null) {
       try {
-        this.subscriberStub.shutdown();
-        this.subscriberStub.awaitTermination(5, TimeUnit.SECONDS);
-      } catch (InterruptedException e) {
-        LOG.warn("CONNECTION: Interrupted while shutting down subscriber stub", e);
-        Thread.currentThread().interrupt();
+        ApiService service = this.subscriber.stopAsync();
+        service.awaitTerminated(5, TimeUnit.SECONDS);
       } catch (Exception e) {
-        LOG.warn("CONNECTION: Error shutting down subscriber stub", e);
+        LOG.warn("CONNECTION: Error shutting down subscriber", e);
       } finally {
-        this.subscriberStub = null;
+        this.subscriber = null;
       }
     }
+    nackQueued();
     if (this.emulator != null) {
       this.emulator.close();
       this.emulator = null;
     }
   }
 
-  List<PulledMessage> pull(Duration deadline) {
-    return pull(deadline, config.pullMaxMessages());
-  }
-
-  List<PulledMessage> pull(Duration deadline, int maxMessages) {
-    ensureStarted();
-    final int capped = Math.max(1, Math.min(this.config.pullMaxMessages(), maxMessages));
-    return retryPolicy.execute(
-        "pull", () -> pullMessagesFromSubscription(deadline, capped), deadline);
-  }
-
-  private List<PulledMessage> pullMessagesFromSubscription(Duration deadline, int maxMessages) {
-    try {
-      return pullSubscriptionMessages(deadline, maxMessages);
-    } catch (DeadlineExceededException e) {
-      LOG.debug(
-          "PULL: long-poll timed out after {}; treating as empty: {}",
-          asString(deadline),
-          e.toString());
-      return List.of();
+  private void nackQueued() {
+    if (queue == null) {
+      return;
+    }
+    HeldMessage held;
+    while ((held = queue.poll()) != null) {
+      try {
+        held.consumer.nack();
+      } catch (RuntimeException e) {
+        LOG.warn("CONNECTION: Failed to nack queued message on close: {}", e.getMessage());
+      }
+    }
+    if (consumers != null) {
+      consumers.clear();
+    }
+    if (queuedBytes != null) {
+      queuedBytes.set(0);
     }
   }
 
   /**
-   * Client RPC timeout slightly longer than the intended wait so the server can return an empty
-   * {@link PullResponse} instead of the client cancelling with {@link DeadlineExceededException}.
+   * Wait up to {@code timeout} for the first message, then drain what is already queued. Does not
+   * ack.
    */
-  static Duration clientPullTimeout(Duration wait) {
-    final long waitMs = Math.max(1L, wait.toMillis());
-    final long slackMs =
-        Math.min(CLIENT_DEADLINE_SLACK_MAX_MS, Math.max(CLIENT_DEADLINE_SLACK_MIN_MS, waitMs / 10));
-    return Duration.ofMillis(waitMs + slackMs);
-  }
-
-  /**
-   * Convert a duration to a human-readable string.
-   *
-   * @param duration the duration to convert
-   * @return the human-readable string
-   */
-  public static String asString(final Duration duration) {
-    return duration.toString().substring(2).replaceAll("(\\d[HMS])(?!$)", "$1").toLowerCase();
-  }
-
-  private List<PulledMessage> pullSubscriptionMessages(Duration deadline, int maxMessages) {
-    final PullRequest request =
-        PullRequest.newBuilder()
-            .setSubscription(this.config.subscriptionPath())
-            .setMaxMessages(maxMessages)
-            .build();
-    final GrpcCallContext callContext =
-        GrpcCallContext.createDefault().withTimeoutDuration(clientPullTimeout(deadline));
-    final PullResponse response = subscriberStub.pullCallable().call(request, callContext);
-    final int receivedCount = response.getReceivedMessagesCount();
-    final List<PulledMessage> messages = new ArrayList<>(receivedCount);
-
-    for (ReceivedMessage received : response.getReceivedMessagesList()) {
-      final PubsubMessage message = received.getMessage();
-      final byte[] data = message.getData().toByteArray();
-      this.outstandingBytes.addAndGet(data.length);
-      final long publishMillis =
-          message.getPublishTime().getSeconds() * 1000L
-              + message.getPublishTime().getNanos() / 1_000_000L;
-      final String messageId = message.getMessageId();
-      final Map<String, String> attributes = message.getAttributesMap();
-      final String orderingKey = message.getOrderingKey();
-      final String ackId = received.getAckId();
-      final PulledMessage converted =
-          new PulledMessage(messageId, data, attributes, publishMillis, orderingKey, ackId);
-      messages.add(converted);
+  List<PulledMessage> poll(Duration timeout) {
+    ensureStarted();
+    List<PulledMessage> messages = new ArrayList<>();
+    try {
+      HeldMessage first = queue.poll(Math.max(1L, timeout.toNanos()), TimeUnit.NANOSECONDS);
+      if (first == null) {
+        return messages;
+      }
+      take(first, messages);
+      HeldMessage next;
+      while ((next = queue.poll()) != null) {
+        take(next, messages);
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
     }
     final PublishTimeWindow window = PublishTimeWindow.of(messages);
     if (window != null) {
@@ -252,60 +311,46 @@ final class PubSubClient implements Closeable, Serializable {
     return messages;
   }
 
-  void acknowledge(List<String> ackIds) {
-    if (ackIds == null || ackIds.isEmpty()) {
-      return;
-    }
-    ensureStarted();
-    for (List<String> chunk : chunks(ackIds)) {
-      retryPolicy.executeVoid("acknowledge", () -> acknowledgeRequest(chunk));
+  private void take(HeldMessage held, List<PulledMessage> messages) {
+    messages.add(held.message);
+    if (queuedBytes != null) {
+      queuedBytes.addAndGet(-held.message.data().length);
     }
   }
 
-  private void acknowledgeRequest(List<String> ackIds) {
-    final AcknowledgeRequest request =
-        AcknowledgeRequest.newBuilder()
-            .setSubscription(this.config.subscriptionPath())
-            .addAllAckIds(ackIds)
-            .build();
-    this.subscriberStub.acknowledgeCallable().call(request);
+  void acknowledge(List<String> ackIds) {
+    reply(ackIds, true);
   }
 
   void nack(List<String> ackIds) {
-    modifyAckDeadline(ackIds, 0, "nack");
+    reply(ackIds, false);
   }
 
-  void extendAckDeadline(List<String> ackIds, int deadlineSeconds) {
-    modifyAckDeadline(ackIds, deadlineSeconds, "modifyAckDeadline");
-  }
+  /** Subscriber renews leases; kept for {@link AckLeaseWatchdog}. */
+  void extendAckDeadline(List<String> ackIds, int deadlineSeconds) {}
 
-  private void modifyAckDeadline(List<String> ackIds, int deadlineSeconds, String operation) {
+  private void reply(List<String> ackIds, boolean ack) {
     if (ackIds == null || ackIds.isEmpty()) {
       return;
     }
-    ensureStarted();
-    for (List<String> chunk : chunks(ackIds)) {
-      retryPolicy.executeVoid(operation, () -> modifyAckDeadlineRequest(chunk, deadlineSeconds));
+    if (consumers == null) {
+      return;
     }
-  }
-
-  private List<List<String>> chunks(List<String> ackIds) {
-    List<List<String>> chunks = new ArrayList<>();
-    int size = this.config.pullMaxMessages();
-    for (int start = 0; start < ackIds.size(); start += size) {
-      chunks.add(ackIds.subList(start, Math.min(start + size, ackIds.size())));
+    for (String id : ackIds) {
+      AckReplyConsumer consumer = consumers.remove(id);
+      if (consumer == null) {
+        continue;
+      }
+      try {
+        if (ack) {
+          consumer.ack();
+        } else {
+          consumer.nack();
+        }
+      } catch (RuntimeException e) {
+        LOG.warn("ACK: Failed to {} {}: {}", ack ? "ack" : "nack", id, e.getMessage());
+      }
     }
-    return chunks;
-  }
-
-  private void modifyAckDeadlineRequest(List<String> ackIds, int deadlineSeconds) {
-    ModifyAckDeadlineRequest request =
-        ModifyAckDeadlineRequest.newBuilder()
-            .setSubscription(this.config.subscriptionPath())
-            .addAllAckIds(ackIds)
-            .setAckDeadlineSeconds(deadlineSeconds)
-            .build();
-    this.subscriberStub.modifyAckDeadlineCallable().call(request);
   }
 
   void releaseMessages(List<PulledMessage> messages) {
@@ -317,7 +362,6 @@ final class PubSubClient implements Closeable, Serializable {
     }
   }
 
-  /** Clears outstanding byte accounting (e.g. on receiver shutdown). */
   void resetOutstandingBytes() {
     if (this.outstandingBytes != null) {
       this.outstandingBytes.set(0);
@@ -332,8 +376,11 @@ final class PubSubClient implements Closeable, Serializable {
     return retryPolicy.retryAttempts();
   }
 
-  /** Newest publish time from the last non-empty pull, or {@link Long#MIN_VALUE} if none. */
   long lastSeenNewestPublishMillis() {
     return lastSeenNewestPublishMillis.get();
+  }
+
+  public static String asString(final Duration duration) {
+    return duration.toString().substring(2).replaceAll("(\\d[HMS])(?!$)", "$1").toLowerCase();
   }
 }

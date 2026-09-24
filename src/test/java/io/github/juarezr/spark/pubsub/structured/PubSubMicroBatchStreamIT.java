@@ -167,10 +167,8 @@ class PubSubMicroBatchStreamIT {
             .option(PubSubConfig.SUBSCRIPTION, SUBSCRIPTION)
             .option(PubSubConfig.EMULATOR_HOST, emulatorHost)
             .option(PubSubConfig.ACK_MODE, AckMode.AFTER_COMMIT.name())
-            .option(PubSubConfig.PULL_DEADLINE, "2s")
-            .option(PubSubConfig.PULL_MAX_MESSAGES, "10")
             .option(PubSubConfig.GATHER_MODE, "batch")
-            .option(PubSubConfig.BATCH_TIME, "2s")
+            .option(PubSubConfig.RECEIVE_TIME, "2s")
             .option(PubSubConfig.BATCH_COUNT, "50")
             .load();
 
@@ -224,9 +222,8 @@ class PubSubMicroBatchStreamIT {
             .option(PubSubConfig.SUBSCRIPTION, idleSubscription)
             .option(PubSubConfig.EMULATOR_HOST, emulatorHost)
             .option(PubSubConfig.ACK_MODE, AckMode.AFTER_COMMIT.name())
-            .option(PubSubConfig.PULL_DEADLINE, "1s")
             .option(PubSubConfig.GATHER_MODE, "batch")
-            .option(PubSubConfig.BATCH_TIME, "1s")
+            .option(PubSubConfig.RECEIVE_TIME, "1s")
             .load();
 
     StreamingQuery query =
@@ -310,8 +307,6 @@ class PubSubMicroBatchStreamIT {
             .option(PubSubConfig.SUBSCRIPTION, subscription)
             .option(PubSubConfig.EMULATOR_HOST, emulatorHost)
             .option(PubSubConfig.ACK_MODE, AckMode.AFTER_COMMIT.name())
-            .option(PubSubConfig.PULL_DEADLINE, "1s")
-            .option(PubSubConfig.PULL_MAX_MESSAGES, "10")
             .option(PubSubConfig.GATHER_MODE, "batch")
             .option(PubSubConfig.BATCH_COUNT, "8")
             .load();
