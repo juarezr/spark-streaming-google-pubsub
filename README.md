@@ -156,9 +156,10 @@ For `raw` or `dynamic`, set `metadataMode=basic` (or higher) and select `publish
 
 ## How a query runs
 
-The **driver** runs a warm Subscriber (StreamingPull) into a bounded queue. Each Spark **batch**
-polls that queue for up to `receiveTime` (or `batchSize`). Executors only write. After the sink
-finishes, Spark commits and the driver acks (unless `ackMode=early`). The receiver never acks.
+The **driver** runs a warm Subscriber (StreamingPull) into a bounded queue. Each Spark
+**micro-batch** polls that queue for up to `receiveTime` (or `batchSize`). Executors only write.
+After the sink finishes, Spark commits and the driver acks (unless `ackMode=early`). The receiver
+never acks.
 
 ```mermaid
 sequenceDiagram
@@ -168,12 +169,15 @@ sequenceDiagram
   participant Spark
   participant Executor
   PubSub-->>Queue: push always
-  Spark->>Driver: next batch
+  Spark->>Driver: next micro-batch
   Driver->>Queue: poll until receiveTime or batchSize
-  Driver-->>Spark: batch
-  Spark->>Executor: write tasks
+  Driver-->>Spark: this micro-batch
+  PubSub-->>Queue: still pushing messages\nfor next micro-batch
+  Spark->>Executor: write parquet\nfoward\repartition
+  Note over Executor: run application stages
   Spark->>Driver: commit
   Driver->>PubSub: acknowledge
+  Spark->>Driver: triggers micro-batch N+1
 ```
 
 An idle cycle does not start an empty micro-batch, so the sink does not write an empty file.
@@ -197,9 +201,21 @@ When to set `receiveTime` yourself:
 - `Trigger.Once()`
 - A short receive for low latency (more output files)
 - A short receive and a longer batch interval, so the subscription buffers while Spark sleeps
+- Do not set `receiveTime` equal to the batch interval: Spark still needs time to write.
 
-Leave it unset for `Trigger.ProcessingTime` if you are unsure about the best value.
-Do not set `receiveTime` equal to the batch interval: Spark still needs time to write.
+Leave it unset for `Trigger.ProcessingTime` if you are unsure about the best value. The
+connector will infer a sane value following this probe:
+
+```mermaid
+flowchart LR
+  probe[PROBE empty micro-batch]
+  seed[batchInterval = idle gap]
+  half[receiveTime = batchInterval / 2]
+  idleRaise[Idle larger gap: re-measure batchInterval once]
+  adjust[Then overrun-shrink or idle-raise receiveTime]
+  freeze[Freeze receiveTime after N steps]
+  probe --> seed --> half --> idleRaise --> adjust --> freeze
+```
 
 `ackDeadline` omitted is `3 ×` the inferred batch interval (180s at 60s). Subscriber keeps extending
 until commit. `maxRetryTime` omitted is `min(90s, ackDeadline)`.
