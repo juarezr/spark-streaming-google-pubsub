@@ -91,7 +91,7 @@ Full script: [`examples/python/structured_streaming_example.py`](examples/python
 | `ackDeadline` | auto (`3 ×` batch interval, seed 180s) | Lease step; Subscriber renews until Spark commits. Omit to infer. |
 | `gatherMode` | `batch` | `batch` collects until `receiveTime` / caps; `pull` returns a batch as soon as messages arrive |
 | `receiveTime` | auto | How long this batch may take from the queue. Omit with `Trigger.ProcessingTime` |
-| `batchSize` | `128m` | Max payload bytes per batch and Subscriber outstanding bytes. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
+| `batchSize` | `128m` | Max payload bytes per batch and Subscriber outstanding bytes. Default stays `128m`. A startup backlog can fill that in one micro-batch; try `64m` on the next peak soak. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
 | `batchCount` | | Max messages per batch. Capped by Spark `maxRowsPerTrigger` |
 | `numWriters` | `1` | Spark tasks per micro-batch; integer ≥1 or `auto` (driver CPU count) |
 | `schemaMode` | `basic` | `raw`, `basic`, `slim`, `dynamic`, or `mixed` |
@@ -211,11 +211,14 @@ flowchart LR
   probe[PROBE empty micro-batch]
   seed[batchInterval = idle gap]
   half[receiveTime = batchInterval / 2]
-  idleRaise[Idle larger gap: re-measure batchInterval once]
+  idleRaise[Idle leftover after a micro-batch: re-measure batchInterval once]
   adjust[Then overrun-shrink or idle-raise receiveTime]
   freeze[Freeze receiveTime after N steps]
   probe --> seed --> half --> idleRaise --> adjust --> freeze
 ```
+
+The leftover raise uses micro-batch start-to-start only when Spark slept (`gap > gather + write + 1s`).
+A busy overrun (`cycle ≈ gap`) does not become the batch interval.
 
 `ackDeadline` omitted is `3 ×` the inferred batch interval (180s at 60s). Subscriber keeps extending
 until commit. `maxRetryTime` omitted is `min(90s, ackDeadline)`.

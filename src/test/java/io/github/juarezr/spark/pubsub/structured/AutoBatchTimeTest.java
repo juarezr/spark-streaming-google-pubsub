@@ -121,19 +121,47 @@ class AutoBatchTimeTest {
   }
 
   @Test
-  void busyCycleDoesNotRaiseInterval() {
+  void busyStartToStartNearCycleDoesNotBecomeInterval() {
     AtomicLong now = new AtomicLong(0);
     AutoBatchTime auto = new AutoBatchTime(null, now::get);
 
     assertTrue(auto.shouldProbe());
-    now.set(Duration.ofSeconds(60).toNanos());
+    now.set(Duration.ofSeconds(50).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(50), auto.batchInterval());
+
+    now.addAndGet(Duration.ofSeconds(6).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(6).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(136).toNanos());
+    auto.onCommit();
     assertFalse(auto.shouldProbe());
 
-    auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
+    assertEquals(Duration.ofSeconds(50), auto.batchInterval());
+  }
+
+  @Test
+  void leftoverAfterFirstAutoRaisesSeededIntervalOnce() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(50).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(50), auto.batchInterval());
+    assertEquals(Duration.ofSeconds(25), auto.currentReceive());
+
+    now.addAndGet(Duration.ofSeconds(6).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(6).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(136).toNanos());
+    auto.onCommit();
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(50), auto.batchInterval());
+
+    now.addAndGet(Duration.ofSeconds(48).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(48).toNanos(), true);
     now.addAndGet(Duration.ofSeconds(5).toNanos());
     auto.onCommit();
-
-    now.set(Duration.ofSeconds(60).toNanos() + Duration.ofSeconds(70).toNanos());
+    now.addAndGet(Duration.ofSeconds(7).toNanos());
     assertFalse(auto.shouldProbe());
 
     assertEquals(Duration.ofSeconds(60), auto.batchInterval());

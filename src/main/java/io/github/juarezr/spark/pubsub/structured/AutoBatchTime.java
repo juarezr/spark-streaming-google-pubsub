@@ -11,13 +11,14 @@ import org.slf4j.LoggerFactory;
 /**
  * Infers a sane {@code receiveTime} when the option is omitted so receive + write fits the Spark
  * batch interval ({@code Trigger.ProcessingTime}). Probe idle micro-batch gaps for the batch
- * interval, then adjust receive time only: overrun shrinks it, leftover idle raises it, for a
- * fixed number of steps. Never grows the batch interval from a busy cycle.
+ * interval, then one start-to-start leftover raise if Spark slept, then adjust receive time
+ * only: overrun shrinks it, leftover idle raises it, for a fixed number of steps. Never sets
+ * the batch interval from gather + write.
  *
  * <pre>
  * @startuml
  * !theme vibrant
- * title Auto receiveTime: PROBE then idle-raise / overrun-shrink
+ * title Auto receiveTime: PROBE then idle leftover / overrun-shrink
  *
  * participant App
  * participant Spark
@@ -38,16 +39,19 @@ import org.slf4j.LoggerFactory;
  *   Auto -> Auto : Mode.ZERO receive = 1s
  * end
  *
- * == AUTO: receive; never grow batch interval from busy ==
+ * == AUTO: one leftover raise; never grow from busy ==
  *
  * loop each later micro-batch
  *   Spark -> Stream : next micro-batch
  *   Stream -> Auto : shouldProbe()
  *   note right of Auto
- *     Idle empty receive and a larger gap:
+ *     After the first AUTO micro-batch,
+ *     if start-to-start > seed and Spark
+ *     slept (gap > gather + write + 1s):
  *     one re-measure of batch interval,
  *     then batch interval is done.
- *     Busy cycles never change it.
+ *     Busy cycles (cycle ≈ gap) never
+ *     change it.
  *     After it is done: overrun shrinks
  *     receive; leftover idle raises it.
  *     After N steps or within 1s of
@@ -145,12 +149,7 @@ final class AutoBatchTime {
     if (mode == Mode.AUTO) {
       maybeIdleRaiseBatchInterval(now);
       autoCycles++;
-      if (!batchIntervalFrozen && autoCycles >= 2) {
-        batchIntervalFrozen = true;
-        LOG.info(
-            "AUTO: inferred batch interval={} is done (no larger idle gap)", format(batchInterval));
-      }
-      if (batchIntervalFrozen) {
+      if (autoCycles >= 2) {
         maybeAdjustReceive(now);
       }
       lastOffsetStartNanos = now;
@@ -265,27 +264,43 @@ final class AutoBatchTime {
     return inferred;
   }
 
+  /**
+   * One raise of the batch interval from micro-batch start-to-start leftover (Spark slept). Never
+   * sets the interval from {@code cycle = gather + write}. Skips the first AUTO micro-batch when
+   * that cycle is a busy overrun (startup).
+   */
   private void maybeIdleRaiseBatchInterval(long now) {
-    if (batchIntervalFrozen
-        || lastOffsetStartNanos == 0L
-        || batchInterval == null
-        || !lastGatherEmpty) {
+    if (batchIntervalFrozen || lastOffsetStartNanos == 0L || batchInterval == null) {
       return;
     }
     long gap = now - lastOffsetStartNanos;
     if (gap <= batchInterval.toNanos()) {
       return;
     }
+    long write = lastWriteNanos;
+    if (pendingWrite && lastReturnNanos != 0L) {
+      write = Math.max(write, now - lastReturnNanos);
+    }
+    long cycle = lastGatherNanos + write;
+    boolean sparkSlept = lastGatherEmpty || gap > cycle + MARGIN_NANOS;
+    if (!sparkSlept) {
+      return;
+    }
+    if (autoCycles < 1 && !lastGatherEmpty) {
+      return;
+    }
     batchInterval = Duration.ofNanos(gap);
     batchIntervalFrozen = true;
+    receiveFrozen = false;
+    adjustCount = 0;
     if (currentReceive == null) {
       currentReceive = firstReceive(batchInterval);
     } else {
       currentReceive = clampReceive(currentReceive, batchInterval, lastWriteNanos);
     }
     LOG.info(
-        "AUTO: inferred batch interval={} receiveTime={} (idle re-measure; batch interval is"
-            + " done)",
+        "AUTO: inferred batch interval={} receiveTime={} (idle leftover after a micro-batch;"
+            + " batch interval is done)",
         format(batchInterval),
         format(currentReceive));
   }
