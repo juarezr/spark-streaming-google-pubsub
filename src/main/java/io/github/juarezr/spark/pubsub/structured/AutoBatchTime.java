@@ -10,9 +10,9 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Infers a sane {@code receiveTime} when the option is omitted so receive + write fits the Spark
- * batch interval ({@code Trigger.ProcessingTime}). Probe idle {@code latestOffset} gaps for the
- * interval T, then adjust receive time only: overrun shrinks it, leftover idle raises it, for a
- * fixed number of steps. Never grows T from a busy cycle.
+ * batch interval ({@code Trigger.ProcessingTime}). Probe idle micro-batch gaps for the batch
+ * interval, then adjust receive time only: overrun shrinks it, leftover idle raises it, for a
+ * fixed number of steps. Never grows the batch interval from a busy cycle.
  *
  * <pre>
  * @startuml
@@ -28,29 +28,31 @@ import org.slf4j.LoggerFactory;
  * Spark -> Stream : new(config)
  * Stream -> Auto : create(config)
  *
- * == PROBE: empty latestOffset; finite ==
+ * == PROBE: empty micro-batch; finite ==
  *
- * Spark -> Stream : latestOffset()
+ * Spark -> Stream : next micro-batch
  * Stream -> Auto : shouldProbe()
  * alt gap >= 10s
- *   Auto -> Auto : T = gap\nreceive = T / 2\nmode = AUTO
+ *   Auto -> Auto : batchInterval = gap\nreceive = batchInterval / 2\nmode = AUTO
  * else gap < 1s three times
  *   Auto -> Auto : Mode.ZERO receive = 1s
  * end
  *
- * == AUTO: receive; never grow T from busy ==
+ * == AUTO: receive; never grow batch interval from busy ==
  *
- * loop each later latestOffset
- *   Spark -> Stream : latestOffset()
+ * loop each later micro-batch
+ *   Spark -> Stream : next micro-batch
  *   Stream -> Auto : shouldProbe()
  *   note right of Auto
- *     Idle empty gather and a larger gap:
- *     one re-measure of T, then T is done.
- *     Busy cycles never change T.
- *     Overrun: shrink receive.
- *     Leftover idle: raise receive.
+ *     Idle empty receive and a larger gap:
+ *     one re-measure of batch interval,
+ *     then batch interval is done.
+ *     Busy cycles never change it.
+ *     After it is done: overrun shrinks
+ *     receive; leftover idle raises it.
  *     After N steps or within 1s of
- *     T - write - margin: freeze receive.
+ *     batchInterval - write - margin:
+ *     freeze receive.
  *   end note
  * end
  * @enduml
@@ -81,7 +83,7 @@ final class AutoBatchTime {
   private final Duration fixedReceiveTime;
   private Mode mode;
   private Long probeStartedNanos;
-  private Duration processingTime;
+  private Duration batchInterval;
   private Duration currentReceive;
   private long lastGatherNanos;
   private long lastWriteNanos;
@@ -92,7 +94,8 @@ final class AutoBatchTime {
   private int probeNoiseCount;
   private int probeAttempts;
   private boolean zeroTriggerWarned;
-  private boolean tFrozen;
+  private boolean batchIntervalFrozen;
+  private int autoCycles;
   private int adjustCount;
   private boolean receiveFrozen;
 
@@ -122,8 +125,8 @@ final class AutoBatchTime {
     return mode;
   }
 
-  Duration processingTime() {
-    return processingTime;
+  Duration batchInterval() {
+    return batchInterval;
   }
 
   Duration currentReceive() {
@@ -135,13 +138,21 @@ final class AutoBatchTime {
   }
 
   /**
-   * @return {@code true} when this {@code latestOffset} must return empty without receiving
+   * @return {@code true} when this micro-batch must return empty without receiving
    */
   boolean shouldProbe() {
     long now = nanoTime.getAsLong();
     if (mode == Mode.AUTO) {
-      maybeIdleRaiseT(now);
-      maybeAdjustReceive(now);
+      maybeIdleRaiseBatchInterval(now);
+      autoCycles++;
+      if (!batchIntervalFrozen && autoCycles >= 2) {
+        batchIntervalFrozen = true;
+        LOG.info(
+            "AUTO: inferred batch interval={} is done (no larger idle gap)", format(batchInterval));
+      }
+      if (batchIntervalFrozen) {
+        maybeAdjustReceive(now);
+      }
       lastOffsetStartNanos = now;
       return false;
     }
@@ -154,9 +165,9 @@ final class AutoBatchTime {
       lastOffsetStartNanos = now;
       probeAttempts = 1;
       LOG.warn(
-          "BATCH: receiveTime is unset; inferring Spark batch interval from idle gaps (empty"
-              + " latestOffset, no receive) until one gap is at least 10s. In a 3 sub-second gap"
-              + " sequence assume ProcessingTime(0). probeAttempt=1");
+          "AUTO: receiveTime is unset; inferring Spark batch interval from idle gaps (empty"
+              + " micro-batch, no receive) until one gap is at least 10s. In a 3 sub-second gap"
+              + " sequence assume Trigger.ProcessingTime(0). probeAttempt=1");
       return true;
     }
     probeAttempts++;
@@ -165,7 +176,7 @@ final class AutoBatchTime {
     if (gapFromStart < PROBE_NOISE_NANOS) {
       probeNoiseCount++;
       LOG.info(
-          "BATCH: probeAttempt={} gap {} is under 1s ({}/{} noise); keep probing",
+          "AUTO: probeAttempt={} gap {} is under 1s ({}/{} noise); keep probing",
           probeAttempts,
           format(Duration.ofNanos(gapFromStart)),
           probeNoiseCount,
@@ -180,19 +191,18 @@ final class AutoBatchTime {
       probeStartedNanos = now;
       lastOffsetStartNanos = now;
       LOG.warn(
-          "BATCH: probeAttempt={} inferred batch interval {} is under 10s; not seeding (keep"
-              + " probing)",
+          "AUTO: probeAttempt={} inferred batch interval {} is under 10s; not seeding (keep probing)",
           probeAttempts,
           format(Duration.ofNanos(gapFromStart)));
       return true;
     }
     probeNoiseCount = 0;
-    processingTime = Duration.ofNanos(gapFromStart);
-    currentReceive = firstReceive(processingTime);
+    batchInterval = Duration.ofNanos(gapFromStart);
+    currentReceive = firstReceive(batchInterval);
     mode = Mode.AUTO;
     LOG.info(
-        "BATCH: inferred batch interval={} first receiveTime={} (seed probeAttempt={})",
-        format(processingTime),
+        "AUTO: inferred batch interval={} first receiveTime={} (seed probeAttempt={})",
+        format(batchInterval),
         format(currentReceive),
         probeAttempts);
     return false;
@@ -222,7 +232,7 @@ final class AutoBatchTime {
   }
 
   void onCommit() {
-    if (!pendingWrite || processingTime == null || mode != Mode.AUTO) {
+    if (!pendingWrite || batchInterval == null || mode != Mode.AUTO) {
       return;
     }
     long write = nanoTime.getAsLong() - lastReturnNanos;
@@ -231,7 +241,9 @@ final class AutoBatchTime {
     }
     lastWriteNanos = write;
     pendingWrite = false;
-    maybeAdjustReceive(nanoTime.getAsLong());
+    if (batchIntervalFrozen) {
+      maybeAdjustReceive(nanoTime.getAsLong());
+    }
   }
 
   /**
@@ -239,10 +251,10 @@ final class AutoBatchTime {
    * 60s–600s.
    */
   Duration inferredAckDeadline() {
-    if (processingTime == null) {
+    if (batchInterval == null) {
       return ACK_DEADLINE_SEED;
     }
-    long seconds = Math.max(1L, processingTime.getSeconds() * 3L);
+    long seconds = Math.max(1L, batchInterval.getSeconds() * 3L);
     Duration inferred = Duration.ofSeconds(seconds);
     if (inferred.compareTo(ACK_DEADLINE_MIN) < 0) {
       return ACK_DEADLINE_MIN;
@@ -253,93 +265,105 @@ final class AutoBatchTime {
     return inferred;
   }
 
-  private void maybeIdleRaiseT(long now) {
-    if (tFrozen || lastOffsetStartNanos == 0L || processingTime == null || !lastGatherEmpty) {
+  private void maybeIdleRaiseBatchInterval(long now) {
+    if (batchIntervalFrozen
+        || lastOffsetStartNanos == 0L
+        || batchInterval == null
+        || !lastGatherEmpty) {
       return;
     }
     long gap = now - lastOffsetStartNanos;
-    if (gap <= processingTime.toNanos()) {
+    if (gap <= batchInterval.toNanos()) {
       return;
     }
-    processingTime = Duration.ofNanos(gap);
-    tFrozen = true;
+    batchInterval = Duration.ofNanos(gap);
+    batchIntervalFrozen = true;
     if (currentReceive == null) {
-      currentReceive = firstReceive(processingTime);
+      currentReceive = firstReceive(batchInterval);
     } else {
-      currentReceive = clampReceive(currentReceive, processingTime, lastWriteNanos);
+      currentReceive = clampReceive(currentReceive, batchInterval, lastWriteNanos);
     }
     LOG.info(
-        "BATCH: inferred batch interval={} receiveTime={} (idle re-measure; T is done)",
-        format(processingTime),
+        "AUTO: inferred batch interval={} receiveTime={} (idle re-measure; batch interval is"
+            + " done)",
+        format(batchInterval),
         format(currentReceive));
   }
 
   private void maybeAdjustReceive(long now) {
-    if (receiveFrozen || mode != Mode.AUTO || processingTime == null || currentReceive == null) {
+    if (receiveFrozen || mode != Mode.AUTO || batchInterval == null || currentReceive == null) {
       return;
     }
     if (lastGatherNanos <= 0L && lastWriteNanos <= 0L) {
       return;
     }
-    long t = processingTime.toNanos();
+    long intervalNanos = batchInterval.toNanos();
     long write = lastWriteNanos;
     if (pendingWrite && lastReturnNanos != 0L) {
       write = Math.max(write, now - lastReturnNanos);
     }
     long cycle = lastGatherNanos + write;
+    long floor = receiveFloorNanos(intervalNanos);
     Duration next = currentReceive;
-    if (cycle > t) {
-      long shrink = cycle - t;
-      next = Duration.ofNanos(Math.max(RECEIVE_FLOOR_NANOS, currentReceive.toNanos() - shrink));
+    if (cycle > intervalNanos) {
+      long shrink = cycle - intervalNanos;
+      next = Duration.ofNanos(Math.max(floor, currentReceive.toNanos() - shrink));
       LOG.info(
-          "BATCH: overrun cycle={} > interval={}; shrink receiveTime {} -> {}",
+          "AUTO: overrun cycle={} > batch interval={}; shrink receiveTime {} -> {}",
           format(Duration.ofNanos(cycle)),
-          format(processingTime),
+          format(batchInterval),
           format(currentReceive),
           format(next));
-    } else if (lastGatherEmpty || cycle + MARGIN_NANOS < t) {
-      long leftover = t - cycle;
+    } else if (lastGatherEmpty || cycle + MARGIN_NANOS < intervalNanos) {
+      long leftover = intervalNanos - cycle;
       if (leftover > MARGIN_NANOS) {
         next = Duration.ofNanos(currentReceive.toNanos() + leftover);
       }
     }
-    next = clampReceive(next, processingTime, write);
+    next = clampReceive(next, batchInterval, write);
     currentReceive = next;
     adjustCount++;
-    long target = Math.max(RECEIVE_FLOOR_NANOS, t - write - MARGIN_NANOS);
-    if (Math.abs(next.toNanos() - target) <= MARGIN_NANOS || adjustCount >= ADJUST_STEPS) {
+    long target = Math.max(floor, intervalNanos - write - MARGIN_NANOS);
+    boolean closeEnough = Math.abs(next.toNanos() - target) <= MARGIN_NANOS;
+    if (adjustCount >= 2 && (closeEnough || adjustCount >= ADJUST_STEPS)) {
       receiveFrozen = true;
       LOG.info(
-          "BATCH: receiveTime={} frozen after {} adjust(s)", format(currentReceive), adjustCount);
+          "AUTO: receiveTime={} frozen after {} adjust(s)", format(currentReceive), adjustCount);
     }
   }
 
   private void enterZeroTrigger() {
     mode = Mode.ZERO;
-    processingTime = null;
+    batchInterval = null;
     currentReceive = ZERO_TRIGGER_RECEIVE;
     if (!zeroTriggerWarned) {
       zeroTriggerWarned = true;
       LOG.warn(
-          "BATCH: receiveTime is unset and Spark trigger looks like ProcessingTime(0); using"
-              + " receiveTime={}. Set receiveTime explicitly to override.",
+          "AUTO: receiveTime is unset and Spark trigger looks like Trigger.ProcessingTime(0);"
+              + " using receiveTime={}. Set receiveTime explicitly to override.",
           format(currentReceive));
     }
   }
 
-  static Duration firstReceive(Duration processingTime) {
-    return processingTime.dividedBy(2);
+  static Duration firstReceive(Duration batchInterval) {
+    return batchInterval.dividedBy(2);
   }
 
-  static Duration clampReceive(Duration value, Duration processingTime, long writeNanos) {
-    long t = processingTime.toNanos();
-    long max = t - Math.max(writeNanos, 0L) - MARGIN_NANOS;
-    if (max < RECEIVE_FLOOR_NANOS) {
-      max = Math.max(RECEIVE_FLOOR_NANOS, t / 2);
+  static long receiveFloorNanos(long batchIntervalNanos) {
+    long quarter = batchIntervalNanos / 4L;
+    return Math.max(RECEIVE_FLOOR_NANOS, quarter);
+  }
+
+  static Duration clampReceive(Duration value, Duration batchInterval, long writeNanos) {
+    long intervalNanos = batchInterval.toNanos();
+    long floor = receiveFloorNanos(intervalNanos);
+    long max = intervalNanos - Math.max(writeNanos, 0L) - MARGIN_NANOS;
+    if (max < floor) {
+      max = Math.max(floor, intervalNanos / 2);
     }
     long v = value.toNanos();
-    if (v < RECEIVE_FLOOR_NANOS) {
-      return Duration.ofNanos(RECEIVE_FLOOR_NANOS);
+    if (v < floor) {
+      return Duration.ofNanos(floor);
     }
     if (v > max) {
       return Duration.ofNanos(max);

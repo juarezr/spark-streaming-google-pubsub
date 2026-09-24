@@ -59,7 +59,7 @@ class AutoBatchTimeTest {
     assertFalse(auto.shouldProbe());
 
     assertEquals(AutoBatchTime.Mode.AUTO, auto.mode());
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertEquals(Duration.ofSeconds(60), auto.batchInterval());
     assertEquals(Duration.ofSeconds(30), auto.receiveWindow(null));
     assertEquals(Duration.ofSeconds(180), auto.inferredAckDeadline());
   }
@@ -78,7 +78,7 @@ class AutoBatchTimeTest {
     assertFalse(auto.shouldProbe());
 
     assertEquals(AutoBatchTime.Mode.AUTO, auto.mode());
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertEquals(Duration.ofSeconds(60), auto.batchInterval());
     assertEquals(Duration.ofSeconds(30), auto.receiveWindow(null));
   }
 
@@ -90,14 +90,14 @@ class AutoBatchTimeTest {
     assertTrue(auto.shouldProbe());
     now.set(Duration.ofSeconds(16).toNanos());
     assertFalse(auto.shouldProbe());
-    assertEquals(Duration.ofSeconds(16), auto.processingTime());
+    assertEquals(Duration.ofSeconds(16), auto.batchInterval());
     assertEquals(Duration.ofSeconds(8), auto.receiveWindow(null));
 
     auto.onGatherFinished(Duration.ofSeconds(5).toNanos(), false);
     now.addAndGet(Duration.ofSeconds(60).toNanos());
     assertFalse(auto.shouldProbe());
 
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertEquals(Duration.ofSeconds(60), auto.batchInterval());
   }
 
   @Test
@@ -113,8 +113,10 @@ class AutoBatchTimeTest {
     auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), true);
     now.addAndGet(Duration.ofSeconds(20).toNanos());
     auto.onCommit();
+    assertFalse(auto.shouldProbe());
+    assertFalse(auto.shouldProbe());
 
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertEquals(Duration.ofSeconds(60), auto.batchInterval());
     assertTrue(auto.currentReceive().compareTo(Duration.ofSeconds(30)) <= 0);
   }
 
@@ -134,7 +136,7 @@ class AutoBatchTimeTest {
     now.set(Duration.ofSeconds(60).toNanos() + Duration.ofSeconds(70).toNanos());
     assertFalse(auto.shouldProbe());
 
-    assertEquals(Duration.ofSeconds(60), auto.processingTime());
+    assertEquals(Duration.ofSeconds(60), auto.batchInterval());
   }
 
   @Test
@@ -164,6 +166,26 @@ class AutoBatchTimeTest {
     Duration floor =
         AutoBatchTime.clampReceive(
             Duration.ofMillis(10), Duration.ofSeconds(60), Duration.ofSeconds(10).toNanos());
-    assertEquals(Duration.ofSeconds(1), floor);
+    assertEquals(Duration.ofSeconds(15), floor);
+  }
+
+  @Test
+  void firstBusyCycleAfterShortSeedDoesNotShrinkReceiveToOneSecond() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(40).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(40), auto.batchInterval());
+    assertEquals(Duration.ofSeconds(20), auto.currentReceive());
+
+    auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
+    now.set(Duration.ofSeconds(40).toNanos() + Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    assertEquals(Duration.ofSeconds(40), auto.batchInterval());
+    assertEquals(Duration.ofSeconds(20), auto.currentReceive());
+    assertFalse(auto.receiveFrozen());
   }
 }
