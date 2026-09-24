@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -22,6 +23,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.streaming.Offset;
 import org.apache.spark.sql.connector.read.streaming.ReadLimit;
@@ -184,6 +187,46 @@ class PubSubAvailableNowTest {
     Offset second = stream.latestOffset(first, ReadLimit.maxRows(4));
     assertEquals(4, partitionSize(stream, first, second));
     verify(client, times(2)).poll(any(Duration.class));
+  }
+
+  @Test
+  void acksFullBatchBeforeNextPullSoBacklogIsVisible() {
+    AtomicBoolean firstPageAcked = new AtomicBoolean();
+    AtomicInteger polls = new AtomicInteger();
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.poll(any(Duration.class)))
+        .thenAnswer(
+            invocation -> {
+              int n = polls.getAndIncrement();
+              if (!firstPageAcked.get()) {
+                return n == 0 ? messages(0, 4) : Collections.emptyList();
+              }
+              return n == 1 ? messages(4, 3) : Collections.emptyList();
+            });
+    doAnswer(
+            invocation -> {
+              firstPageAcked.set(true);
+              return null;
+            })
+        .when(client)
+        .acknowledge(anyList());
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .gatherMode(GatherMode.BATCH)
+            .batchCount(4)
+            .batchSize(0)
+            .build();
+    PubSubMicroBatchStream stream = stream(client, config);
+    stream.prepareForTriggerAvailableNow();
+
+    Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.maxRows(4));
+    assertEquals(4, partitionSize(stream, stream.initialOffset(), first));
+
+    Offset second = stream.latestOffset(first, ReadLimit.maxRows(4));
+    assertEquals(3, partitionSize(stream, first, second));
+    verify(client).acknowledge(List.of("ack-0", "ack-1", "ack-2", "ack-3"));
   }
 
   @Test

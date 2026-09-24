@@ -102,6 +102,11 @@ final class AckCoordinator implements Serializable {
     return pendingByBatch.size();
   }
 
+  /** Drops one batch after it was already acked or found empty. Other in-flight batches stay. */
+  void discard(String batchId) {
+    pendingByBatch.remove(batchId);
+  }
+
   void clear() {
     pendingByBatch.clear();
   }

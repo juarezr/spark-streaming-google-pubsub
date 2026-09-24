@@ -166,6 +166,13 @@ final class PubSubMicroBatchStream
       resetMetrics();
       return nullIfEmpty ? null : currentOffset;
     }
+    // Streaming pull flow control holds at most one batch. Spark has finished that batch
+    // (start offset caught up) but calls source commit only after the next offset is built.
+    // Ack first so the subscriber can deliver the rest; otherwise the following empty polls
+    // look like the end of an AvailableNow drain and the query stops with a partial backlog.
+    if (lastProduced != null && startConsumed(startOffset, lastProduced)) {
+      commit(lastProduced);
+    }
     List<PulledMessage> pulled = gatherMessages(limits);
     if (pulled.isEmpty()) {
       resetMetrics();
@@ -250,7 +257,7 @@ final class PubSubMicroBatchStream
     if (limits.remainingRows(0) <= 0) {
       return messages;
     }
-    List<PulledMessage> pulled = client.poll(RECEIVE_IDLE);
+    List<PulledMessage> pulled = poll(limits, messages.size(), RECEIVE_IDLE);
     return retainPolled(messages, pulled, limits, 0L).messages;
   }
 
@@ -272,7 +279,7 @@ final class PubSubMicroBatchStream
           break;
         }
         Duration slice = remainingWait(deadlineNanos);
-        List<PulledMessage> pulled = client.poll(slice);
+        List<PulledMessage> pulled = poll(limits, messages.size(), slice);
         if (gatherAborted()) {
           return stopLeaseNackAndRelease(messages, pulled);
         }
@@ -283,7 +290,7 @@ final class PubSubMicroBatchStream
         } else if (config.gatherMode() == GatherMode.BATCH && messages.isEmpty() && !debounced) {
           debounced = true;
           List<PulledMessage> pulled2 =
-              client.poll(min(RECEIVE_IDLE, remainingWait(deadlineNanos)));
+              poll(limits, messages.size(), min(RECEIVE_IDLE, remainingWait(deadlineNanos)));
           if (gatherAborted()) {
             return stopLeaseNackAndRelease(messages, pulled2);
           }
@@ -308,6 +315,11 @@ final class PubSubMicroBatchStream
       throw e;
     }
     return messages;
+  }
+
+  private List<PulledMessage> poll(AdmissionLimits limits, int already, Duration timeout) {
+    client.limitNextPoll(limits.remainingRows(already));
+    return client.poll(timeout);
   }
 
   private Duration remainingWait(long deadlineNanos) {
@@ -377,7 +389,7 @@ final class PubSubMicroBatchStream
             || limits.remainingRows(messages.size()) <= 0) {
           break;
         }
-        List<PulledMessage> pulled = client.poll(RECEIVE_IDLE);
+        List<PulledMessage> pulled = poll(limits, messages.size(), RECEIVE_IDLE);
         if (gatherAborted()) {
           return stopLeaseNackAndRelease(messages, pulled);
         }
@@ -594,7 +606,7 @@ final class PubSubMicroBatchStream
         if (!ackIds.isEmpty()) {
           client.releaseMessages(messages);
         }
-        ackCoordinator.clear();
+        ackCoordinator.discard(batchKey);
         finishBatch(endOffset.batchId());
       }
       currentOffset = endOffset;

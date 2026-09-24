@@ -153,7 +153,7 @@ class PubSubGatherTest {
     InputPartition[] partitions = stream.planInputPartitions(first, second);
     assertEquals(3, ((PubSubInputPartition) partitions[0]).messages().size());
     verify(client, times(2)).poll(any(Duration.class));
-    verify(client, never()).acknowledge(anyList());
+    verify(client).acknowledge(List.of("ack-0", "ack-1"));
   }
 
   @Test

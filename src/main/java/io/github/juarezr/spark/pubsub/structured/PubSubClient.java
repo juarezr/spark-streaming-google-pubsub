@@ -53,6 +53,10 @@ final class PubSubClient implements Closeable, Serializable {
   private transient AtomicLong queuedBytes;
   private transient AtomicBoolean stopped;
   private transient boolean seekApplied;
+
+  /** Caps the next {@link #poll(Duration)} so overflow stays queued for the following batch. */
+  private transient int nextPollMax = Integer.MAX_VALUE;
+
   private final AtomicLong lastSeenNewestPublishMillis = new AtomicLong(Long.MIN_VALUE);
 
   static final class HeldMessage {
@@ -125,7 +129,10 @@ final class PubSubClient implements Closeable, Serializable {
             .setMaxOutstandingRequestBytes(bytes)
             .setLimitExceededBehavior(FlowController.LimitExceededBehavior.Block);
     if (config.batchCount() > 0) {
-      flow.setMaxOutstandingElementCount(config.batchCount());
+      // One extra batch can sit in the queue while Spark still holds the previous one unacked.
+      long count = config.batchCount();
+      long elements = count > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : count * 2;
+      flow.setMaxOutstandingElementCount(elements);
     }
     return flow.build();
   }
@@ -285,12 +292,25 @@ final class PubSubClient implements Closeable, Serializable {
   }
 
   /**
-   * Wait up to {@code timeout} for the first message, then drain what is already queued. Does not
-   * ack.
+   * Upper bound for the next {@link #poll(Duration)}. Messages beyond the cap stay in the queue.
+   * {@code maxMessages <= 0} means no cap.
+   */
+  void limitNextPoll(int maxMessages) {
+    this.nextPollMax = maxMessages <= 0 ? Integer.MAX_VALUE : maxMessages;
+  }
+
+  /**
+   * Wait up to {@code timeout} for the first message, then drain what is already queued up to
+   * {@link #limitNextPoll(int)}. Does not ack.
    */
   List<PulledMessage> poll(Duration timeout) {
     ensureStarted();
+    int max = this.nextPollMax;
+    this.nextPollMax = Integer.MAX_VALUE;
     List<PulledMessage> messages = new ArrayList<>();
+    if (max <= 0) {
+      return messages;
+    }
     try {
       HeldMessage first = queue.poll(Math.max(1L, timeout.toNanos()), TimeUnit.NANOSECONDS);
       if (first == null) {
@@ -298,7 +318,7 @@ final class PubSubClient implements Closeable, Serializable {
       }
       take(first, messages);
       HeldMessage next;
-      while ((next = queue.poll()) != null) {
+      while (messages.size() < max && (next = queue.poll()) != null) {
         take(next, messages);
       }
     } catch (InterruptedException e) {
