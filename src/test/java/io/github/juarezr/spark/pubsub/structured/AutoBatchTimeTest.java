@@ -198,6 +198,96 @@ class AutoBatchTimeTest {
   }
 
   @Test
+  void leftoverThenTwoSmallWritesDoesNotFreezeReceive() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(50).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    now.addAndGet(Duration.ofSeconds(6).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(6).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(136).toNanos());
+    auto.onCommit();
+    assertFalse(auto.shouldProbe());
+
+    now.addAndGet(Duration.ofSeconds(48).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(48).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(5).toNanos());
+    auto.onCommit();
+    now.addAndGet(Duration.ofSeconds(7).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.batchInterval());
+    Duration afterLeftover = auto.currentReceive();
+
+    now.addAndGet(Duration.ofSeconds(30).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(30).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(1).toNanos());
+    auto.onCommit();
+    assertFalse(auto.shouldProbe());
+    now.addAndGet(Duration.ofSeconds(30).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(30).toNanos(), true);
+    now.addAndGet(Duration.ofSeconds(1).toNanos());
+    auto.onCommit();
+    assertFalse(auto.shouldProbe());
+
+    assertFalse(auto.receiveFrozen());
+    assertTrue(auto.currentReceive().compareTo(Duration.ofSeconds(59)) < 0);
+    assertTrue(auto.currentReceive().compareTo(afterLeftover) >= 0);
+  }
+
+  @Test
+  void severalOverrunsShrinkReceiveWithoutFreezingEarly() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+    Duration seeded = auto.currentReceive();
+
+    for (int i = 0; i < 4; i++) {
+      auto.onGatherFinished(Duration.ofSeconds(58).toNanos(), true);
+      now.addAndGet(Duration.ofSeconds(6).toNanos());
+      auto.onCommit();
+      assertFalse(auto.shouldProbe());
+    }
+
+    assertEquals(Duration.ofSeconds(60), auto.batchInterval());
+    assertTrue(auto.currentReceive().compareTo(seeded) < 0);
+    assertFalse(auto.receiveFrozen());
+  }
+
+  @Test
+  void fifteenthReceiveAdjustFreezes() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    do {
+      auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
+      now.addAndGet(Duration.ofSeconds(5).toNanos());
+      auto.onCommit();
+      assertFalse(auto.shouldProbe());
+    } while (auto.waitingToAdjustReceive());
+
+    final long s45 = Duration.ofSeconds(45).toNanos();
+    final long s05 = Duration.ofSeconds(5).toNanos();
+
+    for (int i = 0; i < AutoBatchTime.ADJUST_STEPS + 1; i++) {
+      auto.onGatherFinished(s45, true);
+      now.addAndGet(s05);
+      auto.onCommit();
+      assertFalse(auto.shouldProbe());
+    }
+    assertTrue(auto.receiveFrozen());
+  }
+
+  @Test
   void firstBusyCycleAfterShortSeedDoesNotShrinkReceiveToOneSecond() {
     AtomicLong now = new AtomicLong(0);
     AutoBatchTime auto = new AutoBatchTime(null, now::get);

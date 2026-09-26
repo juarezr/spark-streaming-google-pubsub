@@ -212,13 +212,14 @@ flowchart LR
   seed[batchInterval = idle gap]
   half[receiveTime = batchInterval / 2]
   idleRaise[Idle leftover after a micro-batch: re-measure batchInterval once]
-  adjust[Then overrun-shrink or idle-raise receiveTime]
-  freeze[Freeze receiveTime after N steps]
+  adjust[Then step receive: overrun-shrink or idle-raise by half leftover]
+  freeze[Freeze receiveTime after 15 adjusts]
   probe --> seed --> half --> idleRaise --> adjust --> freeze
 ```
 
 The leftover raise uses micro-batch start-to-start only when Spark slept (`gap > gather + write + 1s`).
 A busy overrun (`cycle ≈ gap`) does not become the batch interval.
+Receive keeps approximating for 15 cycles after that raise.
 
 `ackDeadline` omitted is `3 ×` the inferred batch interval (180s at 60s). Subscriber keeps extending
 until commit. `maxRetryTime` omitted is `min(90s, ackDeadline)`.

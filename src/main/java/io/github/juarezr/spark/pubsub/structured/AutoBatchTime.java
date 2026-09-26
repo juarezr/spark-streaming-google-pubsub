@@ -11,9 +11,9 @@ import org.slf4j.LoggerFactory;
 /**
  * Infers a sane {@code receiveTime} when the option is omitted so receive + write fits the Spark
  * batch interval ({@code Trigger.ProcessingTime}). Probe idle micro-batch gaps for the batch
- * interval, then one start-to-start leftover raise if Spark slept, then adjust receive time
- * only: overrun shrinks it, leftover idle raises it, for a fixed number of steps. Never sets
- * the batch interval from gather + write.
+ * interval, then one start-to-start leftover raise if Spark slept, then keep approximating
+ * receive for 15 cycles: overrun shrinks it, leftover idle raises it by half the gap. Never
+ * sets the batch interval from gather + write.
  *
  * <pre>
  * @startuml
@@ -53,10 +53,9 @@ import org.slf4j.LoggerFactory;
  *     Busy cycles (cycle ≈ gap) never
  *     change it.
  *     After it is done: overrun shrinks
- *     receive; leftover idle raises it.
- *     After N steps or within 1s of
- *     batchInterval - write - margin:
- *     freeze receive.
+ *     receive; leftover idle raises it
+ *     by half the gap (no one jump).
+ *     After 15 receive adjusts: freeze.
  *   end note
  * end
  * @enduml
@@ -68,9 +67,9 @@ final class AutoBatchTime {
   static final long PROBE_NOISE_NANOS = TimeUnit.SECONDS.toNanos(1);
   static final long SEED_MIN_NANOS = TimeUnit.SECONDS.toNanos(10);
   static final int ZERO_TRIGGER_NOISE_CYCLES = 3;
-  static final int ADJUST_STEPS = 8;
+  static final int ADJUST_STEPS = 15;
   static final long RECEIVE_FLOOR_NANOS = TimeUnit.SECONDS.toNanos(1);
-  static final long MARGIN_NANOS = TimeUnit.SECONDS.toNanos(1);
+  static final long RECEIVE_WRITE_MARGIN_NANOS = TimeUnit.SECONDS.toNanos(1);
   static final Duration ZERO_TRIGGER_RECEIVE = Duration.ofSeconds(1);
   static final Duration ACK_DEADLINE_SEED = Duration.ofSeconds(180);
   static final Duration ACK_DEADLINE_MIN = Duration.ofSeconds(60);
@@ -190,7 +189,8 @@ final class AutoBatchTime {
       probeStartedNanos = now;
       lastOffsetStartNanos = now;
       LOG.warn(
-          "AUTO: probeAttempt={} inferred batch interval {} is under 10s; not seeding (keep probing)",
+          "AUTO: probeAttempt={} inferred batch interval {} is under 10s; not seeding (keep"
+              + " probing)",
           probeAttempts,
           format(Duration.ofNanos(gapFromStart)));
       return true;
@@ -282,7 +282,7 @@ final class AutoBatchTime {
       write = Math.max(write, now - lastReturnNanos);
     }
     long cycle = lastGatherNanos + write;
-    boolean sparkSlept = lastGatherEmpty || gap > cycle + MARGIN_NANOS;
+    boolean sparkSlept = lastGatherEmpty || gap > cycle + RECEIVE_WRITE_MARGIN_NANOS;
     if (!sparkSlept) {
       return;
     }
@@ -305,11 +305,19 @@ final class AutoBatchTime {
         format(currentReceive));
   }
 
-  private void maybeAdjustReceive(long now) {
+  boolean waitingToAdjustReceive() {
     if (receiveFrozen || mode != Mode.AUTO || batchInterval == null || currentReceive == null) {
-      return;
+      return true;
     }
     if (lastGatherNanos <= 0L && lastWriteNanos <= 0L) {
+      return true;
+    }
+    return false;
+  }
+
+  private void maybeAdjustReceive(long now) {
+    boolean waiting = waitingToAdjustReceive();
+    if (waiting) {
       return;
     }
     long intervalNanos = batchInterval.toNanos();
@@ -329,18 +337,16 @@ final class AutoBatchTime {
           format(batchInterval),
           format(currentReceive),
           format(next));
-    } else if (lastGatherEmpty || cycle + MARGIN_NANOS < intervalNanos) {
+    } else if (lastGatherEmpty || cycle + RECEIVE_WRITE_MARGIN_NANOS < intervalNanos) {
       long leftover = intervalNanos - cycle;
-      if (leftover > MARGIN_NANOS) {
-        next = Duration.ofNanos(currentReceive.toNanos() + leftover);
+      if (leftover > RECEIVE_WRITE_MARGIN_NANOS) {
+        next = Duration.ofNanos(currentReceive.toNanos() + leftover / 2L);
       }
     }
     next = clampReceive(next, batchInterval, write);
     currentReceive = next;
     adjustCount++;
-    long target = Math.max(floor, intervalNanos - write - MARGIN_NANOS);
-    boolean closeEnough = Math.abs(next.toNanos() - target) <= MARGIN_NANOS;
-    if (adjustCount >= 2 && (closeEnough || adjustCount >= ADJUST_STEPS)) {
+    if (adjustCount >= ADJUST_STEPS) {
       receiveFrozen = true;
       LOG.info(
           "AUTO: receiveTime={} frozen after {} adjust(s)", format(currentReceive), adjustCount);
@@ -372,7 +378,7 @@ final class AutoBatchTime {
   static Duration clampReceive(Duration value, Duration batchInterval, long writeNanos) {
     long intervalNanos = batchInterval.toNanos();
     long floor = receiveFloorNanos(intervalNanos);
-    long max = intervalNanos - Math.max(writeNanos, 0L) - MARGIN_NANOS;
+    long max = intervalNanos - Math.max(writeNanos, 0L) - RECEIVE_WRITE_MARGIN_NANOS;
     if (max < floor) {
       max = Math.max(floor, intervalNanos / 2);
     }
