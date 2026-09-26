@@ -91,7 +91,7 @@ Full script: [`examples/python/structured_streaming_example.py`](examples/python
 | `ackDeadline` | auto (`3 ×` batch interval, seed 180s) | Lease step; Subscriber renews until Spark commits. Omit to infer. |
 | `gatherMode` | `batch` | `batch` collects until `receiveTime` / caps; `pull` returns a batch as soon as messages arrive |
 | `receiveTime` | auto | How long this batch may take from the queue. Omit with `Trigger.ProcessingTime` |
-| `batchSize` | `128m` | Max payload bytes per batch and Subscriber outstanding bytes. Default stays `128m`. A startup backlog can fill that in one micro-batch; try `64m` on the next peak soak. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
+| `batchSize` | `64m` | Max payload bytes per batch and Subscriber outstanding bytes. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
 | `batchCount` | | Max messages per batch. Capped by Spark `maxRowsPerTrigger` |
 | `numWriters` | `1` | Spark tasks per micro-batch; integer ≥1 or `auto` (driver CPU count) |
 | `schemaMode` | `basic` | `raw`, `basic`, `slim`, `dynamic`, or `mixed` |

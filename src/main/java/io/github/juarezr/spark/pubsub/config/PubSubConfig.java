@@ -42,7 +42,7 @@ public final class PubSubConfig implements Serializable {
 
   public static final Duration DEFAULT_MAX_RETRY_TIME = Duration.ofSeconds(90);
   public static final Duration ACK_DEADLINE_SEED = Duration.ofSeconds(180);
-  public static final long DEFAULT_BATCH_SIZE = 128L * 1024 * 1024;
+  public static final long DEFAULT_BATCH_SIZE = 64L * 1024 * 1024;
 
   private static final Logger LOG = LoggerFactory.getLogger(PubSubConfig.class);
   private static final AtomicBoolean VERSION_LOGGED = new AtomicBoolean();
