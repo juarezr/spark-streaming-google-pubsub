@@ -196,6 +196,12 @@ An idle cycle does not start an empty micro-batch, so the sink does not write an
 | `gatherMode=batch` | Collects from the queue until `receiveTime`, `batchSize`, or `batchCount`. |
 | `gatherMode=pull` | Returns a batch as soon as the queue has messages — lowest latency, more files. |
 
+When using `Trigger.AvailableNow` keeps receiving until the batch caps or the queue looks idle
+(three empty 1s polls). Set `batchCount` or `batchSize` so a large backlog is split across batches.
+`limitTime` is only valid with this trigger.
+
+### Auto tunning
+
 When to set `receiveTime` yourself:
 
 - `Trigger.Once()`
@@ -217,22 +223,13 @@ flowchart LR
   probe --> seed --> half --> idleRaise --> adjust --> freeze
 ```
 
-The leftover raise uses micro-batch start-to-start only when Spark slept
-(`gap > gather + write + margin`). Margin is `max(1s, 1.6% × batch interval)` so longer
-`ProcessingTime` triggers get proportionally more slack. PROBE sub-second gaps still use a fixed
-1s noise threshold.
-A busy overrun (`cycle ≈ gap`) does not become the batch interval.
-Overruns within the margin are ignored; larger overruns shrink `receiveTime` by half the excess.
-Receive keeps approximating until it is unchanged for five consecutive tune steps (after at least
-five steps), unless the last three cycles were still over the interval; otherwise it stops at 32
-steps with a warning.
+Each measure calculates `receiveTime` by the gather messages + write output time + an margin of
+1.6% × batch interval, so longer `ProcessingTime` triggers get proportionally longer margin.
+The probe above keeps approximating `receiveTime` until it is unchanged for five consecutive tune
+steps; otherwise it stops at 32 steps with a warning.
 
-`ackDeadline` omitted is `3 ×` the inferred batch interval (180s at 60s). Subscriber keeps extending
+When `ackDeadline` omitted is `3 ×` the inferred batch interval (180s at 60s). Subscriber keeps extending
 until commit. `maxRetryTime` omitted is `min(90s, ackDeadline)`.
-
-`Trigger.AvailableNow` keeps receiving until the batch caps or the queue looks idle (three empty
-1s polls). Set `batchCount` or `batchSize` so a large backlog is split across batches.
-`limitTime` is only valid with this trigger.
 
 ## Performance
 
