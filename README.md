@@ -24,8 +24,8 @@ Authentication uses **Application Default Credentials (ADC)** unless you set `cr
 
 | Spark   | Scala | Artifact                                                     |
 |---------|-------|--------------------------------------------------------------|
-| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.8.2` |
-| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.8.2` |
+| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.0` |
+| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.9.0` |
 
 Prefer `--packages` or a Maven/Gradle dependency so Google client libraries come in as transitives.
 Fat JARs (`*-all.jar`) are not on Maven Central; build with `mvn package` or download them from
@@ -86,15 +86,13 @@ Full script: [`examples/python/structured_streaming_example.py`](examples/python
 | `seekTime` | | Seek instant when `seek=timestamp` |
 | `seekSnapshot` | | Snapshot resource when `seek=snapshot` |
 | `limitTime` | | Exclusive `publishTime` upper bound. Requires `Trigger.AvailableNow()`. With `seek=timestamp` the window is `[seekTime, limitTime)` |
-| `pullMaxMessages` | `1000` | Messages requested per Pull (1–1000) |
-| `maxRetryTime` | `90s` | Retry budget for ack, nack, and lease extend |
-| `pullDeadline` | `20s` | How long one Pull waits for messages |
+| `maxRetryTime` | `min(90s, ackDeadline)` | Retry budget for ack and nack RPCs. Omit to clamp. |
 | `ackMode` | `afterCommit` | `afterCommit` or `early` |
-| `ackDeadline` | `60s` | Pub/Sub message lease; renewed until Spark commits |
-| `gatherMode` | `batch` | `batch` collects several Pulls per micro-batch; `pull` emits one Pull |
-| `batchTime` | auto | How long `batch` mode collects messages. Omit with `Trigger.ProcessingTime` |
-| `batchSize` | `128m` | Max payload bytes per gather; blank/0 disables. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
-| `batchCount` | | Max messages per gather; blank/0 disables. Capped by Spark `maxRowsPerTrigger` |
+| `ackDeadline` | auto (`3 ×` batch interval, seed 180s) | Lease step; Subscriber renews until Spark commits. Omit to infer. |
+| `gatherMode` | `batch` | `batch` collects until `receiveTime` / caps; `pull` returns a batch as soon as messages arrive |
+| `receiveTime` | auto | How long this batch may take from the queue. Omit with `Trigger.ProcessingTime` |
+| `batchSize` | `64m` | Max payload bytes per batch and Subscriber outstanding bytes. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
+| `batchCount` | | Max messages per batch. Capped by Spark `maxRowsPerTrigger` |
 | `numWriters` | `1` | Spark tasks per micro-batch; integer ≥1 or `auto` (driver CPU count) |
 | `schemaMode` | `basic` | `raw`, `basic`, `slim`, `dynamic`, or `mixed` |
 | `metadataMode` | `none` | `none`, `basic`, `slim`, or `full` |
@@ -158,22 +156,28 @@ For `raw` or `dynamic`, set `metadataMode=basic` (or higher) and select `publish
 
 ## How a query runs
 
-The **driver** Pulls from Pub/Sub and builds each micro-batch. Executors only write the slices they
-receive. After the sink finishes, Spark commits and the driver acknowledges (unless `ackMode=early`).
+The **driver** runs a warm Subscriber (StreamingPull) into a bounded queue. Each Spark
+**micro-batch** polls that queue for up to `receiveTime` (or `batchSize`). Executors only write.
+After the sink finishes, Spark commits and the driver acks (unless `ackMode=early`). The receiver
+never acks.
 
 ```mermaid
 sequenceDiagram
   participant PubSub
+  participant Queue
   participant Driver
   participant Spark
   participant Executor
+  PubSub-->>Queue: push always
   Spark->>Driver: next micro-batch
-  Driver->>PubSub: Pull
-  PubSub-->>Driver: messages
-  Driver-->>Spark: batch
-  Spark->>Executor: write tasks
+  Driver->>Queue: poll until receiveTime or batchSize
+  Driver-->>Spark: this micro-batch
+  PubSub-->>Queue: still pushing messages\nfor next micro-batch
+  Spark->>Executor: write parquet\nfoward\repartition
+  Note over Executor: run application stages
   Spark->>Driver: commit
   Driver->>PubSub: acknowledge
+  Spark->>Driver: triggers micro-batch N+1
 ```
 
 An idle cycle does not start an empty micro-batch, so the sink does not write an empty file.
@@ -182,46 +186,62 @@ An idle cycle does not start an empty micro-batch, so the sink does not write an
 
 | Spark trigger | What the connector does |
 | :------------ | :---------------------- |
-| `ProcessingTime` | Recommended for 24×7 jobs. Omit `batchTime`; gather is sized from the trigger so write time still fits. |
+| `ProcessingTime` | Recommended for 24×7 jobs. Omit `receiveTime`; it is sized from the batch interval so write time still fits. |
 | `AvailableNow` | Drain until idle or `limitTime`, then stop. Use for recovery, not a live feed that never goes quiet. |
-| `Once` | Set `batchTime` yourself. Without it the job can stop before the first Pull. |
+| `Once` | Set `receiveTime` yourself. Without it the job can stop before the first receive. |
 | `Continuous` | Not supported. |
 
 | Connector gatherMode | What the connector does |
 | :------------------- | :---------------------- |
-| `gatherMode=batch` | Collects Pulls until `batchTime`, `batchSize`, or `batchCount` is reached. |
-| `gatherMode=pull` | Emits one Pull per micro-batch — use it for lowest latency. |
+| `gatherMode=batch` | Collects from the queue until `receiveTime`, `batchSize`, or `batchCount`. |
+| `gatherMode=pull` | Returns a batch as soon as the queue has messages — lowest latency, more files. |
 
-When to set `batchTime` yourself:
+When using `Trigger.AvailableNow` keeps receiving until the batch caps or the queue looks idle
+(three empty 1s polls). Set `batchCount` or `batchSize` so a large backlog is split across batches.
+`limitTime` is only valid with this trigger.
+
+### Auto tunning
+
+When to set `receiveTime` yourself:
 
 - `Trigger.Once()`
-- A short gather for low latency (more output files)
-- A short gather and a longer trigger, so the subscription buffers while Spark sleeps
+- A short receive for low latency (more output files)
+- A short receive and a longer batch interval, so the subscription buffers while Spark sleeps
+- Do not set `receiveTime` equal to the batch interval: Spark still needs time to write.
 
-Leave it unset for `Trigger.ProcessingTime` if you are unsure about the best value.
-Do not set `batchTime` equal to the trigger interval: Spark still needs time to write after gather finishes.
+Leave it unset for `Trigger.ProcessingTime` if you are unsure about the best value. The
+connector will infer a sane value following this probe:
 
-`pullDeadline` is how long one Pull waits for messages. `ackDeadline` is how long Pub/Sub holds
-already-delivered messages. Neither follows the trigger automatically; the defaults work for both
-short and long intervals. Keep `pullDeadline` well under the trigger, and keep `ackDeadline` longer
-than a typical write.
+```mermaid
+flowchart LR
+  probe[PROBE empty micro-batch]
+  seed[batchInterval = idle gap]
+  half[receiveTime = batchInterval / 2]
+  idleRaise[Idle leftover after a micro-batch: re-measure batchInterval once]
+  adjust[Half overrun-shrink or idle-raise by half leftover]
+  freeze[Freeze when stable 5 adjusts min 5 or max 32]
+  probe --> seed --> half --> idleRaise --> adjust --> freeze
+```
 
-`Trigger.AvailableNow` keeps pulling until the batch caps or the subscription looks idle (several
-empty Pulls). Idle detection takes about `3 × pullDeadline`; use a short `pullDeadline` if you want
-a faster stop. Set `batchCount` or `batchSize` so a large backlog is split across micro-batches.
-`limitTime` is only valid with this trigger.
+Each measure calculates `receiveTime` by the gather messages + write output time + an margin of
+1.6% × batch interval, so longer `ProcessingTime` triggers get proportionally longer margin.
+The probe above keeps approximating `receiveTime` until it is unchanged for five consecutive tune
+steps; otherwise it stops at 32 steps with a warning.
+
+When `ackDeadline` omitted is `3 ×` the inferred batch interval (180s at 60s). Subscriber keeps extending
+until commit. `maxRetryTime` omitted is `min(90s, ackDeadline)`.
 
 ## Performance
 
 | Goal | Settings |
 | :--- | :------- |
-| Low latency | `gatherMode=pull`, or a short `batchTime` (more sink files) |
-| Higher throughput | `gatherMode=batch`, omit `batchTime` |
-| Fewer files | omit `batchTime`, keep `numWriters=1`, partition in the application |
-| Recovery drain | `Trigger.AvailableNow`, `seek=snapshot` or `seek=timestamp`, optional `limitTime`, short `pullDeadline` |
+| Low latency | `gatherMode=pull`, or a short `receiveTime` (more sink files) |
+| Higher throughput | `gatherMode=batch`, omit `receiveTime` |
+| Fewer files | omit `receiveTime`, keep `numWriters=1`, partition in the application |
+| Recovery drain | `Trigger.AvailableNow`, `seek=snapshot` or `seek=timestamp`, optional `limitTime` |
 
-`numWriters` only splits the already-gathered batch into Spark tasks. It does not start more Pull
-loops.
+`numWriters` only splits the already-received batch into Spark tasks. It does not start more
+receive loops.
 
 The driver holds payloads, ack ids, and attributes. Leave about 3–5× `batchSize` as heap headroom.
 
@@ -229,10 +249,9 @@ The driver holds payloads, ack ids, and attributes. Leave about 3–5× `batchSi
 
 - **`ackMode=afterCommit` (default):** ack after Spark commits. A failure before commit redelivers
   (at-least-once). Leases are renewed until commit.
-- **`ackMode=early`:** ack soon after Pull. Faster release, higher loss risk on crash.
+- **`ackMode=early`:** ack soon after receive. Faster release, higher loss risk on crash.
 - An uncommitted batch that is replaced or stopped is nacked so Pub/Sub can redeliver quickly.
-- Pull errors retry only while the current gather is still open. Ack, nack, and lease extend retry
-  for up to `maxRetryTime`.
+- Ack and nack RPCs retry for up to `maxRetryTime`.
 - Checkpoints store progress, not payloads. After a driver crash, unacked messages redeliver from
   Pub/Sub.
 - `seek=none` (default) never rewinds the subscription.
@@ -240,7 +259,7 @@ The driver holds payloads, ack ids, and attributes. Leave about 3–5× `batchSi
 Watch `StreamingQueryProgress` in the Spark UI:
 
 - `lastPullMessageCount`, `lastPullPayloadBytes`
-- `lastPullMessageAgeMs` — age of the newest message in the last gather (`-` when empty)
+- `lastPullMessageAgeMs` — age of the newest message in the last batch (`-` when empty)
 - `outstandingPayloadBytes`
 - `lastProducedBatchId`, `lastConsumedBatchId`
 - `pubsubRetryAttempts`, `pubsubRetryAttemptsTotal`
@@ -252,7 +271,7 @@ These are connector metrics, not the Pub/Sub subscription backlog.
 This is a **read-only micro-batch** source.
 
 - No Spark Real-time Mode and no Continuous Processing.
-- `Trigger.Once` needs an explicit `batchTime`.
+- `Trigger.Once` needs an explicit `receiveTime`.
 - `Trigger.AvailableNow` drains until idle (or `limitTime`). Pub/Sub is a queue, not a log with an
   end offset. Do not point it at a live 24×7 subscription that never goes idle.
 - No streaming sink and no batch `spark.read`. Rewind with `seek` / snapshot options.
@@ -268,8 +287,8 @@ Use a **dedicated recovery subscription** or a **snapshot**, not a live 24×7 fe
 3. Set `seek=snapshot` (or `seek=timestamp` + `seekTime`) and optional `limitTime`.
 4. The job writes until idle or until `publishTime` reaches `limitTime`, then exits.
 
-Messages at or after `limitTime` stay on the subscription. Pull order is not a publish-time log, so
-older stragglers after that last Pull are not read.
+Messages at or after `limitTime` stay on the subscription. Receive order is not a publish-time log,
+so older stragglers after that last receive are not read.
 
 ```java
 Dataset<Row> recovered = spark.readStream()
@@ -282,7 +301,6 @@ Dataset<Row> recovered = spark.readStream()
     .option("ackMode", "afterCommit")
     .option("gatherMode", "batch")
     .option("batchCount", "25000")
-    .option("pullDeadline", "2s")
     .load();
 
 recovered
@@ -311,7 +329,7 @@ recovered
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.8.2 \
+  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.0 \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -320,7 +338,7 @@ gcloud dataproc jobs submit spark \
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.8.2-all.jar \
+  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.9.0-all.jar \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -379,7 +397,7 @@ mvn -Pspark35 -DskipTests package
 
 spark-submit \
   --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
-  --jars target/spark-streaming-google-pubsub_2.12-0.8.2-SNAPSHOT-all.jar \
+  --jars target/spark-streaming-google-pubsub_2.12-0.9.0-all.jar \
   examples/java/JavaStructuredStreamingExample.java \
   YOUR_PROJECT YOUR_SUBSCRIPTION /tmp/pubsub-cp /tmp/pubsub-out
 ```

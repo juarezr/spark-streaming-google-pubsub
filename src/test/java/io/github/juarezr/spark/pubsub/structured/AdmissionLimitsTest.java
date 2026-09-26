@@ -32,8 +32,6 @@ class AdmissionLimitsTest {
     AdmissionLimits limits = AdmissionLimits.from(config, ReadLimit.maxRows(500));
 
     assertEquals(500L, limits.maxRows());
-    assertEquals(0, limits.messagesForNextPull(500, 1000));
-    assertEquals(500, limits.messagesForNextPull(0, 1000));
     assertTrue(limits.reachedMax(500, 0));
     assertFalse(limits.reachedMax(499, 0));
   }
@@ -61,7 +59,7 @@ class AdmissionLimitsTest {
             .gatherMode(GatherMode.PULL)
             .batchCount(0)
             .batchSize(0)
-            .batchTime(Duration.ofSeconds(10))
+            .receiveTime(Duration.ofSeconds(10))
             .build();
     ReadLimit composite =
         ReadLimit.compositeLimit(
@@ -88,7 +86,6 @@ class AdmissionLimitsTest {
     AdmissionLimits limits = AdmissionLimits.from(config, ReadLimit.maxRows(10));
 
     assertTrue(limits.singlePull());
-    assertEquals(10, limits.messagesForNextPull(0, 1000));
   }
 
   @Test

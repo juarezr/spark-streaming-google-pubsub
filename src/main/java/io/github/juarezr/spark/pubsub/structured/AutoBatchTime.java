@@ -3,119 +3,62 @@ package io.github.juarezr.spark.pubsub.structured;
 import io.github.juarezr.spark.pubsub.config.GatherMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Sizes {@code batchTime} when the option is omitted: empty-gap probe for Spark {@code
- * Trigger.ProcessingTime} until one gap is at least 10s (or 3 sub-second gaps assume 0), then
- * {@code T/2}, then {@code T - writeAvg - writeStdev - safety}. Start-to-start gaps may raise
- * {@code T} when Spark waited (idle 1s slack; busy {@code max(5s, 10% T)}). A raise clears stale
- * overrun. After T is at least 30s or after any raise, five matching no-raise batches freeze
- * further raises. Never shrinks {@code T}. Never re-enters PROBE.
+ * Infers a sane {@code receiveTime} when the option is omitted so receive + write fits the Spark
+ * batch interval ({@code Trigger.ProcessingTime}). Probe idle micro-batch gaps for the batch
+ * interval, then one start-to-start leftover raise if Spark slept, then approximate receive until
+ * stable: overrun shrinks by half the excess, leftover idle raises by half the gap. Never sets the
+ * batch interval from gather + write.
  *
  * <pre>
  * @startuml
  * !theme vibrant
- * title Auto batchTime: PROBE then AUTO then freeze raises
+ * title Auto receiveTime: PROBE then idle leftover / half overrun-shrink
  *
  * participant App
  * participant Spark
  * participant Stream as PubSubMicroBatchStream
  * participant Auto as AutoBatchTime
  *
- * App -> Spark : format("google-pubsub")\noption(gatherMode=batch)\nbatchTime omitted\ntrigger(ProcessingTime)
+ * App -> Spark : format("google-pubsub")\noption(gatherMode=batch)\nreceiveTime omitted\ntrigger(ProcessingTime)
  * Spark -> Stream : new(config)
  * Stream -> Auto : create(config)
- * note right of Auto
- *   gatherMode=batch and batchTime unset
- *   starts Mode.PROBE, not AUTO
- * end note
  *
- * == PROBE: empty latestOffset, no Pull; finite ==
+ * == PROBE: empty micro-batch; finite ==
  *
- * Spark -> Stream : latestOffset()
+ * Spark -> Stream : next micro-batch
  * Stream -> Auto : shouldProbe()
- * note right of Auto
- *   probeAttempt=1 starts the gap timer
- *   returns true (empty, no Pull)
- * end note
- * Auto --> Stream : true
- * Stream --> Spark : empty Offset
- *
- * Spark -> Stream : latestOffset()
- * Stream -> Auto : shouldProbe()
- * alt gap < 1s
- *   note right of Auto
- *     Trigger noise. After 3 consecutive
- *     cycles: Mode.ZERO, gather =
- *     min(pullDeadline, 5s). Leave PROBE.
- *   end note
- *   Auto --> Stream : true (stay PROBE)
- * else 1s <= gap < 10s
- *   note right of Auto
- *     Startup noise: do not seed T.
- *     Reset the probe start; stay PROBE
- *   end note
- *   Auto --> Stream : true (stay PROBE)
- * else gap >= 10s
- *   Auto -> Auto : T = gap\ngather = T / 2\nmode = AUTO
- *   note right of Auto
- *     PROBE ends. Later latestOffset
- *     always Pulls. Never re-enter PROBE.
- *   end note
- *   Auto --> Stream : false
+ * alt gap >= 10s
+ *   Auto -> Auto : batchInterval = gap\nreceive = batchInterval / 2\nmode = AUTO
+ * else gap < 1s three times
+ *   Auto -> Auto : Mode.ZERO receive = 1s
  * end
  *
- * == AUTO: Pull; raise T only until 5 matching batches ==
+ * == AUTO: one leftover raise; never grow from busy ==
  *
- * loop each later latestOffset until raiseFrozen
- *   Spark -> Stream : latestOffset()
+ * loop each later micro-batch
+ *   Spark -> Stream : next micro-batch
  *   Stream -> Auto : shouldProbe()
  *   note right of Auto
- *     Always false (does Pull).
- *     If raiseFrozen: skip raise.
- *     Else slack = 1s if last gather
- *     empty, else max(5s, 10% of T).
- *     Raise when gap > T + slack
- *     AND Spark waited:
- *     last gather empty, or
- *     gap > gather + write + slack.
- *     On raise: T = gap, clear
- *     lastOverrunNanos, reset
- *     matching count. Never shrink T.
- *   end note
- *   alt no raise
- *     note right of Auto
- *       If armed (T >= 30s or
- *       raiseCount >= 1): matching++.
- *       After 5 matching: raiseFrozen.
- *       A 16s seed is not armed.
- *     end note
- *   end
- *   Auto --> Stream : false
- *   Stream -> Auto : gatherWindow(admissionWait)
- *   note right of Auto
- *     No write samples: gather = T / 2
- *     Else: T - writeAvg - writeStdev - safety
- *     safety = 0.5% * T + overrun
- *     (500ms overrun seed after first write)
- *     clamp [min(pullDeadline, 5s) .. T - 1s]
- *     window = min(admissionWait, gather)
- *   end note
- *   Stream -> Stream : Pull until gather window
- *   Stream -> Auto : onGatherFinished(nanos, nonEmpty)
- *   Stream --> Spark : Offset
- *
- *   Spark -> Stream : commit()
- *   Stream -> Auto : onCommit()
- *   note right of Auto
- *     Non-empty gather only:
- *     record write sample, store overrun
- *     if gather + write > T, then
- *     refreshGather()
+ *     After the first AUTO micro-batch,
+ *     if start-to-start > seed and Spark
+ *     slept (gap > gather + write + margin):
+ *     one re-measure of batch interval,
+ *     then batch interval is done.
+ *     Busy cycles (cycle ≈ gap) never
+ *     change it.
+ *     margin = max(1s, 1.6% of interval).
+ *     Overrun shrink uses half excess;
+ *     ignore overrun within margin.
+ *     Freeze when receive stable for 5
+ *     adjusts (min 5), unless still
+ *     chronically over interval; max 32.
  *   end note
  * end
  * @enduml
@@ -125,29 +68,20 @@ final class AutoBatchTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoBatchTime.class);
 
   static final long PROBE_NOISE_NANOS = TimeUnit.SECONDS.toNanos(1);
-
-  /** Busy start-to-start must exceed work and T by this floor so wal/planning is not a wait. */
-  static final long BUSY_WAIT_MIN_NANOS = TimeUnit.SECONDS.toNanos(5);
-
-  static final double BUSY_WAIT_FRACTION = 0.10;
-
-  /**
-   * First inferred Trigger.ProcessingTime below this is startup noise; keep probing instead of
-   * seeding.
-   */
   static final long SEED_MIN_NANOS = TimeUnit.SECONDS.toNanos(10);
-
   static final int ZERO_TRIGGER_NOISE_CYCLES = 3;
-  static final int WRITE_WINDOW = 8;
-  static final double SAFETY_FRACTION = 0.005;
-  static final long OVERRUN_SEED_NANOS = TimeUnit.MILLISECONDS.toNanos(500);
-  static final Duration ZERO_TRIGGER_MAX_GATHER = Duration.ofSeconds(5);
-
-  /** Consecutive no-raise AUTO batches after T is armed, then freeze raises. */
-  static final int STABLE_NO_RAISE_BATCHES = 5;
-
-  /** Arm the stability counter once T is at least this, or after any raise. */
-  static final long STABLE_ARM_MIN_NANOS = TimeUnit.SECONDS.toNanos(30);
+  static final int MIN_TUNE_ADJUSTS = 5;
+  static final int STABLE_RECEIVE_CYCLES = 5;
+  static final int MAX_TUNE_ADJUSTS = 32;
+  static final long STABLE_RECEIVE_DELTA_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
+  static final int WRITE_SMOOTH_SAMPLES = 5;
+  static final long RECEIVE_FLOOR_NANOS = TimeUnit.SECONDS.toNanos(1);
+  static final double RECEIVE_WRITE_MARGIN_PERCENT = 1.0 / 60.0;
+  static final long RECEIVE_WRITE_MARGIN_MIN_NANOS = TimeUnit.SECONDS.toNanos(1);
+  static final Duration ZERO_TRIGGER_RECEIVE = Duration.ofSeconds(1);
+  static final Duration ACK_DEADLINE_SEED = Duration.ofSeconds(180);
+  static final Duration ACK_DEADLINE_MIN = Duration.ofSeconds(60);
+  static final Duration ACK_DEADLINE_MAX = Duration.ofSeconds(600);
 
   enum Mode {
     FIXED,
@@ -157,72 +91,102 @@ final class AutoBatchTime {
   }
 
   private final LongSupplier nanoTime;
-  private final Duration pullDeadline;
-  private final Duration fixedBatchTime;
+  private final Duration fixedReceiveTime;
   private Mode mode;
   private Long probeStartedNanos;
-  private Duration processingTime;
-  private Duration currentGather;
-  private final long[] writeNanos = new long[WRITE_WINDOW];
-  private int writeCount;
-  private int writeIndex;
+  private Duration batchInterval;
+  private Duration currentReceive;
   private long lastGatherNanos;
   private long lastWriteNanos;
   private long lastReturnNanos;
   private long lastOffsetStartNanos;
   private boolean lastGatherEmpty;
-  private boolean lastNonEmpty;
   private boolean pendingWrite;
-  private int finishedNonEmpty;
   private int probeNoiseCount;
   private int probeAttempts;
   private boolean zeroTriggerWarned;
-  private Long lastOverrunNanos;
-  private int raiseCount;
-  private int stableNoRaiseCount;
-  private boolean raiseFrozen;
+  private boolean batchIntervalFrozen;
+  private int autoCycles;
+  private int adjustCount;
+  private int stableStreak;
+  private boolean receiveFrozen;
+  private boolean frozenAtMaxTuneCap;
+  private final long[] recentWriteNanos = new long[WRITE_SMOOTH_SAMPLES];
+  private int recentWriteCount;
+  private boolean recentOverrun0;
+  private boolean recentOverrun1;
+  private boolean recentOverrun2;
 
   static AutoBatchTime create(PubSubConfig config) {
     return create(config, System::nanoTime);
   }
 
   static AutoBatchTime create(PubSubConfig config, LongSupplier nanoTime) {
-    Duration configured = config.batchTime();
+    Duration configured = config.receiveTime();
     if (config.gatherMode() == GatherMode.BATCH && configured == null) {
-      return new AutoBatchTime(null, config.pullDeadline(), nanoTime);
+      return new AutoBatchTime(null, nanoTime);
     }
-    Duration fixed = configured != null ? configured : Duration.ofSeconds(10);
-    return new AutoBatchTime(fixed, config.pullDeadline(), nanoTime);
+    Duration fixed = configured != null ? configured : Duration.ofSeconds(1);
+    return new AutoBatchTime(fixed, nanoTime);
   }
 
-  AutoBatchTime(Duration fixedBatchTime, Duration pullDeadline, LongSupplier nanoTime) {
-    this.fixedBatchTime = fixedBatchTime;
-    this.pullDeadline = pullDeadline == null ? PubSubConfig.DEFAULT_PULL_DEADLINE : pullDeadline;
+  AutoBatchTime(Duration fixedReceiveTime, LongSupplier nanoTime) {
+    this.fixedReceiveTime = fixedReceiveTime;
     this.nanoTime = nanoTime;
-    this.mode = fixedBatchTime == null ? Mode.PROBE : Mode.FIXED;
+    this.mode = fixedReceiveTime == null ? Mode.PROBE : Mode.FIXED;
+    if (fixedReceiveTime != null) {
+      this.currentReceive = fixedReceiveTime;
+    }
   }
 
   Mode mode() {
     return mode;
   }
 
-  Duration processingTime() {
-    return processingTime;
+  Duration batchInterval() {
+    return batchInterval;
   }
 
-  Duration currentGather() {
-    return currentGather;
+  Duration currentReceive() {
+    return currentReceive;
+  }
+
+  boolean receiveFrozen() {
+    return receiveFrozen;
+  }
+
+  boolean frozenAtMaxTuneCap() {
+    return frozenAtMaxTuneCap;
+  }
+
+  long lastGatherNanos() {
+    return lastGatherNanos;
+  }
+
+  long autoCycles() {
+    return autoCycles;
+  }
+
+  long adjustCount() {
+    return adjustCount;
+  }
+
+  int stableStreak() {
+    return stableStreak;
   }
 
   /**
-   * @return {@code true} when this {@code latestOffset} must return empty without Pulling
+   * @return {@code true} when this micro-batch must return empty without receiving
    */
   boolean shouldProbe() {
     long now = nanoTime.getAsLong();
     if (mode == Mode.AUTO) {
-      maybeRaiseFromStart(now);
+      maybeIdleRaiseBatchInterval(now);
+      autoCycles++;
+      if (autoCycles >= 2) {
+        maybeAdjustReceive(now);
+      }
       lastOffsetStartNanos = now;
-      observeCycle(now);
       return false;
     }
     if (mode != Mode.PROBE) {
@@ -234,9 +198,9 @@ final class AutoBatchTime {
       lastOffsetStartNanos = now;
       probeAttempts = 1;
       LOG.warn(
-          "batchTime is unset; inferring Spark ProcessingTime from idle gaps (empty latestOffset,"
-              + " no Pull) until one gap is at least 10s. In a 3 sub-second gap sequence assume"
-              + " ProcessingTime(0). probeAttempt=1");
+          "AUTO: receiveTime is unset; inferring Spark batch interval from idle gaps (empty"
+              + " micro-batch, no receive) until one gap is at least 10s. In a 3 sub-second gap"
+              + " sequence assume Trigger.ProcessingTime(0). probeAttempt=1");
       return true;
     }
     probeAttempts++;
@@ -245,7 +209,7 @@ final class AutoBatchTime {
     if (gapFromStart < PROBE_NOISE_NANOS) {
       probeNoiseCount++;
       LOG.info(
-          "BATCH: probeAttempt={} gap {} is under 1s ({}/{} noise); keep probing",
+          "AUTO: probeAttempt={} gap {} is under 1s ({}/{} noise); keep probing",
           probeAttempts,
           format(Duration.ofNanos(gapFromStart)),
           probeNoiseCount,
@@ -260,34 +224,33 @@ final class AutoBatchTime {
       probeStartedNanos = now;
       lastOffsetStartNanos = now;
       LOG.warn(
-          "BATCH: probeAttempt={} inferred processingTime={} is under 10s; not seeding (keep"
+          "AUTO: probeAttempt={} inferred batch interval {} is under 10s; not seeding (keep"
               + " probing)",
           probeAttempts,
           format(Duration.ofNanos(gapFromStart)));
       return true;
     }
     probeNoiseCount = 0;
-    processingTime = Duration.ofNanos(gapFromStart);
-    currentGather = firstGather(processingTime);
+    batchInterval = Duration.ofNanos(gapFromStart);
+    currentReceive = firstReceive(batchInterval);
     mode = Mode.AUTO;
     LOG.info(
-        "BATCH: inferred processingTime={} first gather={} (seed probeAttempt={}; start-to-start"
-            + " wait may raise Trigger.ProcessingTime)",
-        format(processingTime),
-        format(currentGather),
+        "AUTO: inferred batch interval={} first receiveTime={} (seed probeAttempt={})",
+        format(batchInterval),
+        format(currentReceive),
         probeAttempts);
     return false;
   }
 
-  Duration gatherWindow(Duration admissionWait) {
+  Duration receiveWindow(Duration admissionWait) {
     Duration base;
     if (mode == Mode.FIXED) {
-      base = fixedBatchTime;
+      base = fixedReceiveTime;
     } else {
-      base = currentGather;
+      base = currentReceive;
     }
     if (base == null) {
-      base = pullDeadline;
+      base = Duration.ofSeconds(1);
     }
     if (admissionWait != null && admissionWait.compareTo(base) < 0) {
       return admissionWait;
@@ -297,219 +260,263 @@ final class AutoBatchTime {
 
   void onGatherFinished(long gatherNanos, boolean nonEmpty) {
     lastGatherNanos = gatherNanos;
-    lastNonEmpty = nonEmpty;
     lastGatherEmpty = !nonEmpty;
     lastReturnNanos = nanoTime.getAsLong();
     pendingWrite = nonEmpty;
   }
 
   void onCommit() {
-    if (!pendingWrite || processingTime == null || mode != Mode.AUTO) {
+    if (!pendingWrite || batchInterval == null || mode != Mode.AUTO) {
       return;
     }
     long write = nanoTime.getAsLong() - lastReturnNanos;
     if (write < 0) {
       return;
     }
-    long cycle = lastGatherNanos + write;
-    long t = processingTime.toNanos();
-    if (cycle > t) {
-      lastOverrunNanos = cycle - t;
-    }
     lastWriteNanos = write;
-    recordWrite(write);
+    recordWriteSample(write);
     pendingWrite = false;
-    finishedNonEmpty++;
-    refreshGather();
+    if (batchIntervalFrozen) {
+      maybeAdjustReceive(nanoTime.getAsLong());
+    }
   }
 
-  private void maybeRaiseFromStart(long now) {
-    if (raiseFrozen || lastOffsetStartNanos == 0L || processingTime == null) {
+  /**
+   * Lease used when {@code ackDeadline} is omitted: {@code 3 ×} batch interval, seed 180s, clamp
+   * 60s–600s.
+   */
+  Duration inferredAckDeadline() {
+    if (batchInterval == null) {
+      return ACK_DEADLINE_SEED;
+    }
+    long seconds = Math.max(1L, batchInterval.getSeconds() * 3L);
+    Duration inferred = Duration.ofSeconds(seconds);
+    if (inferred.compareTo(ACK_DEADLINE_MIN) < 0) {
+      return ACK_DEADLINE_MIN;
+    }
+    if (inferred.compareTo(ACK_DEADLINE_MAX) > 0) {
+      return ACK_DEADLINE_MAX;
+    }
+    return inferred;
+  }
+
+  /**
+   * One raise of the batch interval from micro-batch start-to-start leftover (Spark slept). Never
+   * sets the interval from {@code cycle = gather + write}. Skips the first AUTO micro-batch when
+   * that cycle is a busy overrun (startup).
+   */
+  private void maybeIdleRaiseBatchInterval(long now) {
+    if (batchIntervalFrozen || lastOffsetStartNanos == 0L || batchInterval == null) {
       return;
     }
     long gap = now - lastOffsetStartNanos;
-    long slack = lastGatherEmpty ? PROBE_NOISE_NANOS : busyWaitSlackNanos();
-    long processingSlack = processingTime.toNanos() + slack;
-    boolean waited = sparkWaited(now, gap, slack);
-    if (gap <= processingSlack || !waited) {
-      noteStableNoRaise();
+    if (gap <= batchInterval.toNanos()) {
       return;
     }
-    processingTime = Duration.ofNanos(gap);
-    lastOverrunNanos = null;
-    raiseCount++;
-    stableNoRaiseCount = 0;
-    refreshGather();
+    long write = calcWriteTime(now);
+    long cycle = lastGatherNanos + write;
+    long margin = receiveWriteMarginNanos(batchInterval.toNanos());
+    boolean sparkSlept = lastGatherEmpty || gap > cycle + margin;
+    if (!sparkSlept) {
+      return;
+    }
+    if (autoCycles < 1 && !lastGatherEmpty) {
+      return;
+    }
+    batchInterval = Duration.ofNanos(gap);
+    batchIntervalFrozen = true;
+    receiveFrozen = false;
+    frozenAtMaxTuneCap = false;
+    adjustCount = 0;
+    stableStreak = 0;
+    resetTuneHistory();
+    if (currentReceive == null) {
+      currentReceive = firstReceive(batchInterval);
+    } else {
+      currentReceive = clampReceive(currentReceive, batchInterval, smoothedWriteNanos());
+    }
     LOG.info(
-        "BATCH: inferred processingTime={} gather={} (raise #{}; start-to-start wait may raise"
-            + " Trigger.ProcessingTime again until {} matching batches)",
-        format(processingTime),
-        format(currentGather),
-        raiseCount,
-        STABLE_NO_RAISE_BATCHES);
+        "AUTO: inferred batch interval={} receiveTime={} (idle leftover after a micro-batch;"
+            + " batch interval is done)",
+        format(batchInterval),
+        format(currentReceive));
   }
 
-  private void noteStableNoRaise() {
-    if (!raiseArmed()) {
-      return;
+  long calcWriteTime(long now) {
+    long write = lastWriteNanos;
+    if (pendingWrite && lastReturnNanos != 0L) {
+      write = Math.max(write, now - lastReturnNanos);
     }
-    stableNoRaiseCount++;
-    if (stableNoRaiseCount < STABLE_NO_RAISE_BATCHES) {
-      return;
-    }
-    raiseFrozen = true;
-    LOG.info(
-        "BATCH: processingTime={} stable after {} matching batches; stop raising T",
-        format(processingTime),
-        stableNoRaiseCount);
+    return write;
   }
 
-  private boolean raiseArmed() {
-    if (raiseCount >= 1) {
+  boolean waitingToAdjustReceive() {
+    if (receiveFrozen || mode != Mode.AUTO || batchInterval == null || currentReceive == null) {
       return true;
     }
-    return processingTime != null && processingTime.toNanos() >= STABLE_ARM_MIN_NANOS;
-  }
-
-  boolean raiseFrozen() {
-    return raiseFrozen;
-  }
-
-  private boolean sparkWaited(long now, long gap, long slack) {
-    if (lastGatherEmpty) {
+    if (lastGatherNanos <= 0L && lastWriteNanos <= 0L) {
       return true;
     }
-    long write =
-        pendingWrite && lastReturnNanos != 0L
-            ? Math.max(0L, now - lastReturnNanos)
-            : lastWriteNanos;
-    return gap > lastGatherNanos + write + slack;
+    return false;
   }
 
-  private long busyWaitSlackNanos() {
-    if (processingTime == null) {
-      return BUSY_WAIT_MIN_NANOS;
+  private void maybeAdjustReceive(long now) {
+    boolean waiting = waitingToAdjustReceive();
+    if (waiting) {
+      return;
     }
-    return Math.max(BUSY_WAIT_MIN_NANOS, (long) (BUSY_WAIT_FRACTION * processingTime.toNanos()));
+    long intervalNanos = batchInterval.toNanos();
+    long margin = receiveWriteMarginNanos(intervalNanos);
+    long write = calcWriteTime(now);
+    long cycle = lastGatherNanos + write;
+    long floor = receiveFloorNanos(intervalNanos);
+    Duration priorReceive = currentReceive;
+    Duration next = currentReceive;
+    if (cycle > intervalNanos) {
+      long overrun = cycle - intervalNanos;
+      if (overrun > margin) {
+        long shrink = overrun / 2L;
+        next = Duration.ofNanos(Math.max(floor, currentReceive.toNanos() - shrink));
+        LOG.info(
+            "AUTO: overrun cycle={} > batch interval={}; shrink receiveTime {} -> {} (half"
+                + " excess {})",
+            format(Duration.ofNanos(cycle)),
+            format(batchInterval),
+            format(currentReceive),
+            format(next),
+            format(Duration.ofNanos(overrun)));
+      }
+    } else if (lastGatherEmpty || cycle + margin < intervalNanos) {
+      long leftover = intervalNanos - cycle;
+      if (leftover > margin) {
+        next = Duration.ofNanos(currentReceive.toNanos() + leftover / 2L);
+      }
+    }
+    next = clampReceive(next, batchInterval, smoothedWriteNanos());
+    if (receiveDeltaNanos(priorReceive, next) <= STABLE_RECEIVE_DELTA_NANOS) {
+      stableStreak++;
+    } else {
+      stableStreak = 0;
+    }
+    currentReceive = next;
+    adjustCount++;
+    pushRecentOverrun(cycle > intervalNanos + margin);
+    maybeFreezeReceive();
+  }
+
+  private void maybeFreezeReceive() {
+    if (receiveFrozen) {
+      return;
+    }
+    if (adjustCount >= MAX_TUNE_ADJUSTS) {
+      receiveFrozen = true;
+      frozenAtMaxTuneCap = true;
+      LOG.warn(
+          "AUTO: receiveTime={} frozen at max tune cap after {} adjust(s)",
+          format(currentReceive),
+          adjustCount);
+      return;
+    }
+    if (adjustCount < MIN_TUNE_ADJUSTS || stableStreak < STABLE_RECEIVE_CYCLES) {
+      return;
+    }
+    if (recentChronicOverrun()) {
+      return;
+    }
+    receiveFrozen = true;
+    frozenAtMaxTuneCap = false;
+    LOG.info(
+        "AUTO: receiveTime={} frozen after {} adjust(s), stable streak {}",
+        format(currentReceive),
+        adjustCount,
+        stableStreak);
   }
 
   private void enterZeroTrigger() {
     mode = Mode.ZERO;
-    processingTime = null;
-    currentGather = min(pullDeadline, ZERO_TRIGGER_MAX_GATHER);
+    batchInterval = null;
+    currentReceive = ZERO_TRIGGER_RECEIVE;
     if (!zeroTriggerWarned) {
       zeroTriggerWarned = true;
       LOG.warn(
-          "batchTime is unset and Spark trigger looks like ProcessingTime(0); using gather={}."
-              + " Set batchTime explicitly to override.",
-          format(currentGather));
+          "AUTO: receiveTime is unset and Spark trigger looks like Trigger.ProcessingTime(0);"
+              + " using receiveTime={}. Set receiveTime explicitly to override.",
+          format(currentReceive));
     }
   }
 
-  private void observeCycle(long now) {
-    if (!lastNonEmpty || lastReturnNanos == 0 || processingTime == null) {
-      return;
-    }
-    long gap = now - lastReturnNanos;
-    long t = processingTime.toNanos();
-    long cycle = lastGatherNanos + gap;
-    if (cycle > t) {
-      lastOverrunNanos = cycle - t;
-      if (pendingWrite) {
-        recordWrite(gap);
-        pendingWrite = false;
-        finishedNonEmpty++;
-      }
-    }
-    lastNonEmpty = false;
-    refreshGather();
+  static Duration firstReceive(Duration batchInterval) {
+    return batchInterval.dividedBy(2);
   }
 
-  void recordWrite(long sampleNanos) {
-    if (sampleNanos < 0) {
-      return;
-    }
-    writeNanos[writeIndex] = sampleNanos;
-    writeIndex = (writeIndex + 1) % WRITE_WINDOW;
-    writeCount++;
+  static long receiveFloorNanos(long batchIntervalNanos) {
+    long quarter = batchIntervalNanos / 4L;
+    return Math.max(RECEIVE_FLOOR_NANOS, quarter);
   }
 
-  void refreshGather() {
-    if (mode != Mode.AUTO || processingTime == null) {
-      return;
-    }
-    if (writeCount == 0) {
-      currentGather = firstGather(processingTime);
-      return;
-    }
-    long t = processingTime.toNanos();
-    long overrun = lastOverrunNanos != null ? lastOverrunNanos : overrunSeed();
-    long safety = (long) (SAFETY_FRACTION * t) + overrun;
-    long next = t - (long) writeAvg() - (long) writeStdev() - safety;
-    currentGather = clamp(Duration.ofNanos(Math.max(0L, next)), processingTime, pullDeadline);
+  static long receiveWriteMarginNanos(long batchIntervalNanos) {
+    long scaled = (long) (batchIntervalNanos * RECEIVE_WRITE_MARGIN_PERCENT);
+    return Math.max(RECEIVE_WRITE_MARGIN_MIN_NANOS, scaled);
   }
 
-  private long overrunSeed() {
-    return finishedNonEmpty >= 1 ? OVERRUN_SEED_NANOS : 0L;
-  }
-
-  static Duration firstGather(Duration processingTime) {
-    return processingTime.dividedBy(2);
-  }
-
-  static Duration clamp(Duration value, Duration processingTime, Duration pullDeadline) {
-    Duration minGather = min(pullDeadline, Duration.ofSeconds(5));
-    Duration maxGather = processingTime.minusSeconds(1);
-    if (maxGather.isNegative() || maxGather.isZero()) {
-      maxGather = firstGather(processingTime);
+  static Duration clampReceive(Duration value, Duration batchInterval, long writeNanos) {
+    long intervalNanos = batchInterval.toNanos();
+    long floor = receiveFloorNanos(intervalNanos);
+    long margin = receiveWriteMarginNanos(intervalNanos);
+    long max = intervalNanos - Math.max(writeNanos, 0L) - margin;
+    if (max < floor) {
+      max = Math.max(floor, intervalNanos / 2);
     }
-    if (minGather.compareTo(maxGather) > 0) {
-      minGather = maxGather.compareTo(Duration.ofMillis(1)) < 0 ? Duration.ofMillis(1) : maxGather;
+    long v = value.toNanos();
+    if (v < floor) {
+      return Duration.ofNanos(floor);
     }
-    if (value.compareTo(minGather) < 0) {
-      return minGather;
-    }
-    if (value.compareTo(maxGather) > 0) {
-      return maxGather;
+    if (v > max) {
+      return Duration.ofNanos(max);
     }
     return value;
   }
 
-  double writeAvg() {
-    int n = sampleCount();
-    if (n == 0) {
-      return 0;
+  private void recordWriteSample(long writeNanos) {
+    if (recentWriteCount < WRITE_SMOOTH_SAMPLES) {
+      recentWriteNanos[recentWriteCount++] = writeNanos;
+      return;
     }
-    long sum = 0L;
-    for (int i = 0; i < n; i++) {
-      sum += writeNanos[i];
-    }
-    return (double) sum / n;
+    System.arraycopy(recentWriteNanos, 1, recentWriteNanos, 0, WRITE_SMOOTH_SAMPLES - 1);
+    recentWriteNanos[WRITE_SMOOTH_SAMPLES - 1] = writeNanos;
   }
 
-  double writeStdev() {
-    int n = sampleCount();
-    if (n < 2) {
-      return 0;
+  private long smoothedWriteNanos() {
+    long max = lastWriteNanos;
+    for (int i = 0; i < recentWriteCount; i++) {
+      max = Math.max(max, recentWriteNanos[i]);
     }
-    double avg = writeAvg();
-    double var = 0;
-    for (int i = 0; i < n; i++) {
-      double d = writeNanos[i] - avg;
-      var += d * d;
-    }
-    return Math.sqrt(var / (n - 1));
+    return max;
   }
 
-  private int sampleCount() {
-    return Math.min(writeCount, WRITE_WINDOW);
+  private void resetTuneHistory() {
+    recentWriteCount = 0;
+    Arrays.fill(recentWriteNanos, 0L);
+    recentOverrun0 = false;
+    recentOverrun1 = false;
+    recentOverrun2 = false;
   }
 
-  private static Duration min(Duration left, Duration right) {
-    return left.compareTo(right) <= 0 ? left : right;
+  private void pushRecentOverrun(boolean chronic) {
+    recentOverrun2 = recentOverrun1;
+    recentOverrun1 = recentOverrun0;
+    recentOverrun0 = chronic;
   }
 
-  private static String format(Duration duration) {
+  private boolean recentChronicOverrun() {
+    return recentOverrun0 || recentOverrun1 || recentOverrun2;
+  }
+
+  private static long receiveDeltaNanos(Duration a, Duration b) {
+    return Math.abs(a.toNanos() - b.toNanos());
+  }
+
+  static String format(Duration duration) {
     if (duration == null) {
       return "-";
     }

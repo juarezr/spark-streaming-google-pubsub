@@ -35,10 +35,12 @@ final class PubSubMicroBatchStream
   private static final Logger LOG = LoggerFactory.getLogger(PubSubMicroBatchStream.class);
 
   /**
-   * Pub/Sub has no log-end offset. AvailableNow treats this many consecutive empty Pulls as idle
+   * Pub/Sub has no log-end offset. AvailableNow treats this many consecutive empty polls as idle
    * and returns {@code null} so Spark stops.
    */
-  static final int AVAILABLE_NOW_IDLE_PULLS = 3;
+  static final int AVAILABLE_NOW_IDLE_POLLS = 3;
+
+  static final Duration RECEIVE_IDLE = Duration.ofSeconds(1);
 
   private final PubSubConfig config;
   private final StructType readSchema;
@@ -104,14 +106,14 @@ final class PubSubMicroBatchStream
     if (config.limitTime().isPresent()) {
       LOG.info(
           "BATCH: AvailableNow recovery drain; limitTime={} exclusive; stop at bound or {}"
-              + " consecutive empty Pulls",
+              + " consecutive empty polls",
           config.limitTime().get(),
-          AVAILABLE_NOW_IDLE_PULLS);
+          AVAILABLE_NOW_IDLE_POLLS);
     } else {
       LOG.info(
-          "BATCH: AvailableNow drain enabled; stop after {} consecutive empty Pulls"
+          "BATCH: AvailableNow drain enabled; stop after {} consecutive empty polls"
               + " (Pub/Sub has no log-end offset; use seek=snapshot for recovery)",
-          AVAILABLE_NOW_IDLE_PULLS);
+          AVAILABLE_NOW_IDLE_POLLS);
     }
   }
 
@@ -155,9 +157,6 @@ final class PubSubMicroBatchStream
     }
     if (this.limitReached) {
       resetMetrics();
-      if (lastProduced != null && startConsumed(startOffset, lastProduced)) {
-        commit(lastProduced);
-      }
       return nullIfEmpty ? null : this.currentOffset;
     }
     if (!availableNow && autoBatchTime.shouldProbe()) {
@@ -167,9 +166,6 @@ final class PubSubMicroBatchStream
     List<PulledMessage> pulled = gatherMessages(limits);
     if (pulled.isEmpty()) {
       resetMetrics();
-      if (lastProduced != null && startConsumed(startOffset, lastProduced)) {
-        commit(lastProduced);
-      }
       return nullIfEmpty ? null : currentOffset;
     }
     long batchId = nextBatchId.getAndIncrement();
@@ -196,15 +192,6 @@ final class PubSubMicroBatchStream
       messagesByBatch.remove(batchId);
       throw e;
     }
-    if (config.ackMode() == AckMode.AFTER_COMMIT && config.gatherMode() == GatherMode.PULL) {
-      List<String> ids = PulledMessage.ackIds(pulled);
-      try {
-        client.extendAckDeadline(ids, ackDeadlineSeconds());
-      } catch (RuntimeException e) {
-        LOG.warn("BATCH: Failed to extend ack deadline for batch {}: {}", batchId, e.getMessage());
-      }
-      leaseWatchdog.start(client, ids, ackDeadlineSeconds());
-    }
     return offset;
   }
 
@@ -225,7 +212,7 @@ final class PubSubMicroBatchStream
       long now = System.currentTimeMillis();
       this.lastPullMessageAgeMs = PubSubSourceMetrics.newestMessageAgeMs(pulled, now);
       LOG.debug(
-          "BATCH: latestOffset batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
+          "BATCH: micro-batch batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
     }
   }
 
@@ -233,7 +220,7 @@ final class PubSubMicroBatchStream
     AdmissionLimits limits =
         availableNow
             ? gatherLimits.withDrainUntilIdle()
-            : gatherLimits.withWaitTime(this.autoBatchTime.gatherWindow(gatherLimits.waitTime()));
+            : gatherLimits.withWaitTime(this.autoBatchTime.receiveWindow(gatherLimits.waitTime()));
 
     long gatherStarted = System.nanoTime();
     List<PulledMessage> pulled =
@@ -254,19 +241,18 @@ final class PubSubMicroBatchStream
     if (gatherAborted()) {
       return messages;
     }
-    int maxMessages = limits.messagesForNextPull(0, config.pullMaxMessages());
-    if (maxMessages > 0) {
-      messages.addAll(client.pull(config.pullDeadline(), maxMessages));
+    if (limits.remainingRows(0) <= 0) {
+      return messages;
     }
-    return messages;
+    List<PulledMessage> pulled = poll(limits, messages.size(), RECEIVE_IDLE);
+    return retainPolled(messages, pulled, limits, 0L).messages;
   }
 
   private List<PulledMessage> gatherMessagesUntilDeadline(AdmissionLimits limits) {
 
     List<PulledMessage> messages = new ArrayList<>();
     Duration wait = limits.waitTime();
-    Duration pullDeadline = config.pullDeadline();
-    final long waitNanos = wait == null ? pullDeadline.toNanos() : wait.toNanos();
+    final long waitNanos = wait == null ? RECEIVE_IDLE.toNanos() : wait.toNanos();
     final long deadlineNanos = System.nanoTime() + waitNanos;
     long payloadBytes = 0L;
     boolean debounced = false;
@@ -275,33 +261,32 @@ final class PubSubMicroBatchStream
         if (gatherAborted()) {
           return stopLeaseNackAndRelease(messages, null);
         }
-        if (limits.reachedMax(messages.size(), payloadBytes)) {
+        if (limits.reachedMax(messages.size(), payloadBytes)
+            || limits.remainingRows(messages.size()) <= 0) {
           break;
         }
-        int maxMessages = limits.messagesForNextPull(messages.size(), config.pullMaxMessages());
-        if (maxMessages <= 0) {
-          break;
-        }
-        final Duration rpcDeadline = calcRpcDeadline(pullDeadline, deadlineNanos);
-        List<PulledMessage> pulled = client.pull(rpcDeadline, maxMessages);
+        Duration slice = remainingWait(deadlineNanos);
+        List<PulledMessage> pulled = poll(limits, messages.size(), slice);
         if (gatherAborted()) {
           return stopLeaseNackAndRelease(messages, pulled);
         }
         if (!pulled.isEmpty()) {
-          payloadBytes += extendMessagesOrAckEarlier(messages, pulled, rpcDeadline);
+          RetainResult retained = retainPolled(messages, pulled, limits, payloadBytes);
+          payloadBytes = retained.payloadBytes;
+          messages = retained.messages;
         } else if (config.gatherMode() == GatherMode.BATCH && messages.isEmpty() && !debounced) {
           debounced = true;
-          Duration debounceDeadline = Duration.ofSeconds(1);
-
-          final Duration rpcDeadline2 = calcRpcDeadline(debounceDeadline, deadlineNanos);
-          List<PulledMessage> pulled2 = client.pull(rpcDeadline2, maxMessages);
+          List<PulledMessage> pulled2 =
+              poll(limits, messages.size(), min(RECEIVE_IDLE, remainingWait(deadlineNanos)));
           if (gatherAborted()) {
             return stopLeaseNackAndRelease(messages, pulled2);
           }
           if (pulled2.isEmpty()) {
             break;
           }
-          payloadBytes += extendMessagesOrAckEarlier(messages, pulled2, rpcDeadline2);
+          RetainResult retained = retainPolled(messages, pulled2, limits, payloadBytes);
+          payloadBytes = retained.payloadBytes;
+          messages = retained.messages;
         } else if (config.gatherMode() == GatherMode.BATCH || limits.minRowsMet(messages.size())) {
           break;
         }
@@ -319,45 +304,64 @@ final class PubSubMicroBatchStream
     return messages;
   }
 
-  private long extendMessagesOrAckEarlier(
-      List<PulledMessage> messages, List<PulledMessage> pulled, Duration rpcDeadline) {
-
-    messages.addAll(pulled);
-    long payloadBytes = PulledMessage.payloadBytes(pulled);
-    if (config.ackMode() == AckMode.EARLY) {
-      client.acknowledge(PulledMessage.ackIds(pulled));
-      client.releaseMessages(pulled);
-    } else {
-      try {
-        client.extendAckDeadline(PulledMessage.ackIds(pulled), ackDeadlineSeconds());
-      } catch (RuntimeException e) {
-        final String amount = PubSubClient.asString(rpcDeadline);
-        LOG.warn(
-            "BATCH: Failed to extend initial ack deadline ({} remaining) while gathering: {}",
-            amount,
-            e.getMessage());
-      }
-      List<String> ids = PulledMessage.ackIds(messages);
-      boolean sameSize = messages.size() == pulled.size();
-      if (sameSize) {
-        leaseWatchdog.start(client, ids, ackDeadlineSeconds());
-      } else {
-        leaseWatchdog.update(ids);
-      }
-    }
-    return payloadBytes;
+  private List<PulledMessage> poll(AdmissionLimits limits, int already, Duration timeout) {
+    client.limitNextPoll(limits.remainingRows(already));
+    return client.poll(timeout);
   }
 
-  private Duration calcRpcDeadline(Duration pullDeadline, final long deadlineNanos) {
-    Duration remaining = Duration.ofNanos(Math.max(1L, deadlineNanos - System.nanoTime()));
-    final Duration rpcDeadline = min(pullDeadline, remaining);
-    return rpcDeadline;
+  private Duration remainingWait(long deadlineNanos) {
+    return Duration.ofNanos(Math.max(1L, deadlineNanos - System.nanoTime()));
+  }
+
+  private static final class RetainResult {
+    final List<PulledMessage> messages;
+    final long payloadBytes;
+
+    RetainResult(List<PulledMessage> messages, long payloadBytes) {
+      this.messages = messages;
+      this.payloadBytes = payloadBytes;
+    }
+  }
+
+  private RetainResult retainPolled(
+      List<PulledMessage> messages,
+      List<PulledMessage> pulled,
+      AdmissionLimits limits,
+      long payloadBytes) {
+
+    List<PulledMessage> overflow = new ArrayList<>();
+    for (PulledMessage message : pulled) {
+      if (limits.reachedMax(messages.size(), payloadBytes)
+          || limits.remainingRows(messages.size()) <= 0) {
+        overflow.add(message);
+        continue;
+      }
+      messages.add(message);
+      payloadBytes += message.data().length;
+    }
+    if (!overflow.isEmpty()) {
+      if (config.ackMode() == AckMode.AFTER_COMMIT) {
+        try {
+          client.nack(PulledMessage.ackIds(overflow));
+        } catch (RuntimeException e) {
+          LOG.warn("BATCH: Failed to nack overflow messages: {}", e.getMessage());
+        } finally {
+          client.releaseMessages(overflow);
+        }
+      }
+    }
+    List<PulledMessage> kept =
+        overflow.isEmpty() ? pulled : pulled.subList(0, pulled.size() - overflow.size());
+    if (config.ackMode() == AckMode.EARLY && !kept.isEmpty()) {
+      client.acknowledge(PulledMessage.ackIds(kept));
+      client.releaseMessages(kept);
+    }
+    return new RetainResult(messages, payloadBytes);
   }
 
   /**
-   * AvailableNow gather: keep Pulling until {@code batchCount}/{@code batchSize} or {@link
-   * #AVAILABLE_NOW_IDLE_PULLS} consecutive empty Pulls. Does not treat the first empty Pull as
-   * query-stop (that is the ProcessingTime idle path).
+   * AvailableNow receive: keep polling until {@code batchCount}/{@code batchSize} or {@link
+   * #AVAILABLE_NOW_IDLE_POLLS} consecutive empty polls.
    */
   private List<PulledMessage> gatherUntilIdleOrMax(AdmissionLimits limits) {
     List<PulledMessage> messages = new ArrayList<>();
@@ -368,22 +372,19 @@ final class PubSubMicroBatchStream
         if (gatherAborted()) {
           return stopLeaseNackAndRelease(messages, null);
         }
-        if (limits.reachedMax(messages.size(), payloadBytes)) {
+        if (limits.reachedMax(messages.size(), payloadBytes)
+            || limits.remainingRows(messages.size()) <= 0) {
           break;
         }
-        int maxMessages = limits.messagesForNextPull(messages.size(), config.pullMaxMessages());
-        if (maxMessages <= 0) {
-          break;
-        }
-        List<PulledMessage> pulled = client.pull(config.pullDeadline(), maxMessages);
+        List<PulledMessage> pulled = poll(limits, messages.size(), RECEIVE_IDLE);
         if (gatherAborted()) {
           return stopLeaseNackAndRelease(messages, pulled);
         }
         if (pulled.isEmpty()) {
           emptyStreak++;
-          if (emptyStreak >= AVAILABLE_NOW_IDLE_PULLS) {
+          if (emptyStreak >= AVAILABLE_NOW_IDLE_POLLS) {
             LOG.info(
-                "BATCH: AvailableNow idle after {} consecutive empty Pulls; gathered={}",
+                "BATCH: AvailableNow idle after {} consecutive empty polls; received={}",
                 emptyStreak,
                 messages.size());
             break;
@@ -401,12 +402,16 @@ final class PubSubMicroBatchStream
               split.overLimit.size());
 
           if (!split.inRange.isEmpty()) {
-            payloadBytes += retainDrainPull(messages, split.inRange);
+            RetainResult retained = retainPolled(messages, split.inRange, limits, payloadBytes);
+            payloadBytes = retained.payloadBytes;
+            messages = retained.messages;
           }
           break;
         }
         emptyStreak = 0;
-        payloadBytes += retainDrainPull(messages, split.inRange);
+        RetainResult retained = retainPolled(messages, split.inRange, limits, payloadBytes);
+        payloadBytes = retained.payloadBytes;
+        messages = retained.messages;
       }
     } catch (RuntimeException e) {
       stopLeaseNackAndRelease(messages, null);
@@ -457,28 +462,6 @@ final class PubSubMicroBatchStream
     }
   }
 
-  private long retainDrainPull(List<PulledMessage> messages, List<PulledMessage> pulled) {
-    boolean first = messages.isEmpty();
-    messages.addAll(pulled);
-    if (config.ackMode() == AckMode.EARLY) {
-      client.acknowledge(PulledMessage.ackIds(pulled));
-      client.releaseMessages(pulled);
-      return PulledMessage.payloadBytes(pulled);
-    }
-    try {
-      client.extendAckDeadline(PulledMessage.ackIds(pulled), ackDeadlineSeconds());
-    } catch (RuntimeException e) {
-      LOG.warn("BATCH: Failed to extend initial ack deadline while draining: {}", e.getMessage());
-    }
-    List<String> ids = PulledMessage.ackIds(messages);
-    if (first) {
-      leaseWatchdog.start(client, ids, ackDeadlineSeconds());
-    } else {
-      leaseWatchdog.update(ids);
-    }
-    return PulledMessage.payloadBytes(pulled);
-  }
-
   private boolean gatherAborted() {
     return cancelled || Thread.currentThread().isInterrupted();
   }
@@ -518,10 +501,6 @@ final class PubSubMicroBatchStream
     return startBatchId >= produced.batchId();
   }
 
-  private int ackDeadlineSeconds() {
-    return Math.toIntExact(config.ackDeadline().getSeconds());
-  }
-
   @Override
   public Map<String, String> metrics(final Optional<Offset> latestConsumedOffset) {
     PubSubOffset produced = lastProduced;
@@ -546,6 +525,13 @@ final class PubSubMicroBatchStream
     PubSubOffset endOffset = (PubSubOffset) end;
     List<PulledMessage> messages = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
     if (messages.isEmpty()) {
+      int pulled = lastPullMessageCount.get();
+      if (pulled > 0) {
+        LOG.warn(
+            "BATCH: planInputPartitions batchId={} has 0 messages but lastPullMessageCount={}",
+            endOffset.batchId(),
+            pulled);
+      }
       return new InputPartition[] {new PubSubInputPartition(messages)};
     }
     int parts = Math.min(numPartitions, messages.size());
@@ -614,7 +600,7 @@ final class PubSubMicroBatchStream
         if (!ackIds.isEmpty()) {
           client.releaseMessages(messages);
         }
-        ackCoordinator.clear();
+        ackCoordinator.discard(batchKey);
         finishBatch(endOffset.batchId());
       }
       currentOffset = endOffset;
