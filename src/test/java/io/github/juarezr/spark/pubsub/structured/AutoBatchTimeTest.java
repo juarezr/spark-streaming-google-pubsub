@@ -185,11 +185,13 @@ class AutoBatchTimeTest {
     AutoBatchTime auto = new AutoBatchTime(null, now::get);
 
     assertTrue(auto.shouldProbe());
-    now.addAndGet(TimeUnit.MILLISECONDS.toNanos(100));
+
+    long of100ms = TimeUnit.MILLISECONDS.toNanos(100);
+    now.addAndGet(of100ms);
     assertTrue(auto.shouldProbe());
-    now.addAndGet(TimeUnit.MILLISECONDS.toNanos(100));
+    now.addAndGet(of100ms);
     assertTrue(auto.shouldProbe());
-    now.addAndGet(TimeUnit.MILLISECONDS.toNanos(100));
+    now.addAndGet(of100ms);
     assertFalse(auto.shouldProbe());
 
     assertEquals(AutoBatchTime.Mode.ZERO, auto.mode());
@@ -199,15 +201,12 @@ class AutoBatchTimeTest {
 
   @Test
   void receiveWriteMarginNanosUsesPercentAndFloor() {
-    assertEquals(
-        Duration.ofSeconds(1).toNanos(),
-        AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(60).toNanos()));
-    assertEquals(
-        Duration.ofSeconds(1).toNanos(),
-        AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(10).toNanos()));
-    assertTrue(
-        AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(120).toNanos())
-            >= Duration.ofMillis(1920).toNanos());
+    long margin60s = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(60).toNanos());
+    assertEquals(Duration.ofSeconds(1).toNanos(), margin60s);
+    long margin10s = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(10).toNanos());
+    assertEquals(Duration.ofSeconds(1).toNanos(), margin10s);
+    long margin120s = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(120).toNanos());
+    assertTrue(margin120s >= Duration.ofMillis(1920).toNanos());
   }
 
   @Test
@@ -309,9 +308,8 @@ class AutoBatchTimeTest {
     assertTrue(auto.receiveFrozen());
     assertFalse(auto.frozenAtMaxTuneCap());
     assertTrue(auto.adjustCount() >= AutoBatchTime.MIN_TUNE_ADJUSTS);
-    assertTrue(
-        auto.adjustCount()
-            <= AutoBatchTime.MIN_TUNE_ADJUSTS + AutoBatchTime.STABLE_RECEIVE_CYCLES + 2);
+    int maxAdjust = AutoBatchTime.MIN_TUNE_ADJUSTS + AutoBatchTime.STABLE_RECEIVE_CYCLES + 2;
+    assertTrue(auto.adjustCount() <= maxAdjust);
     assertTrue(auto.currentReceive().compareTo(Duration.ofSeconds(52)) >= 0);
     assertTrue(auto.currentReceive().compareTo(Duration.ofSeconds(54)) <= 0);
   }
@@ -437,7 +435,7 @@ class AutoBatchTimeTest {
     assertEquals(Duration.ofSeconds(20), auto.currentReceive());
 
     auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
-    now.set(Duration.ofSeconds(40).toNanos() + Duration.ofSeconds(60).toNanos());
+    now.set(Duration.ofSeconds(100).toNanos());
     assertFalse(auto.shouldProbe());
     printAutoValuesIfDebug(auto, now);
 
