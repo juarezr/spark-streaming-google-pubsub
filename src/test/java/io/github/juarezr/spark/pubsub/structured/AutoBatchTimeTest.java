@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.github.juarezr.spark.pubsub.config.GatherMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import java.time.Duration;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
@@ -245,13 +246,14 @@ class AutoBatchTimeTest {
     assertTrue(auto.shouldProbe());
     now.set(Duration.ofSeconds(60).toNanos());
     assertFalse(auto.shouldProbe());
-    Duration seeded = auto.currentReceive();
+    assertProbe(now, auto, "severalOverrunsShrinkReceiveWithoutFreezingEarly");
 
+    Duration seeded = auto.currentReceive();
     for (int i = 0; i < 4; i++) {
       auto.onGatherFinished(Duration.ofSeconds(58).toNanos(), true);
       now.addAndGet(Duration.ofSeconds(6).toNanos());
       auto.onCommit();
-      assertFalse(auto.shouldProbe());
+      assertProbe(now, auto);
     }
 
     assertEquals(Duration.ofSeconds(60), auto.batchInterval());
@@ -260,31 +262,124 @@ class AutoBatchTimeTest {
   }
 
   @Test
-  void fifteenthReceiveAdjustFreezes() {
+  void fifteenthReceiveAdjustFreezesAllIntervals() {
+    System.out.println("\nfifteenthReceiveAdjustFreezesAllIntervals:");
+    fifteenthReceiveAdjustFreezesConstantInterval();
+    fifteenthReceiveAdjustFreezesVariableInterval();
+    fifteenthReceiveAdjustFreezesDecreasingInterval();
+    fifteenthReceiveAdjustFreezesGrowingInterval();
+  }
+
+  @Test
+  void fifteenthReceiveAdjustFreezesConstantInterval() {
+    final long[] gather = genRandomIntervals(45, 0, 0);
+    final long[] write = genRandomIntervals(5, 0, 0);
+
+    fifteenthReceiveAdjustFreezes("Constant", 60, gather, write);
+  }
+
+  @Test
+  void fifteenthReceiveAdjustFreezesVariableInterval() {
+    final long[] gather = genRandomIntervals(55, 10, 0);
+    final long[] write = genRandomIntervals(5, 1, 0);
+
+    fifteenthReceiveAdjustFreezes("Variable", 60, gather, write);
+  }
+
+  @Test
+  void fifteenthReceiveAdjustFreezesDecreasingInterval() {
+    final long[] gather = genRandomIntervals(55, 10, -3);
+    final long[] write = genRandomIntervals(5, 2, 0);
+
+    fifteenthReceiveAdjustFreezes("Decreasing", 60, gather, write);
+  }
+
+  @Test
+  void fifteenthReceiveAdjustFreezesGrowingInterval() {
+    final long[] gather = genRandomIntervals(10, 10, 3);
+    final long[] write = genRandomIntervals(5, 2, 0);
+
+    fifteenthReceiveAdjustFreezes("Growing", 60, gather, write);
+  }
+
+  private long[] genRandomIntervals(
+      final int minSecs, final int randomSecs, final int addedMillis) {
+    final long[] intervals = new long[AutoBatchTime.ADJUST_STEPS];
+
+    final ThreadLocalRandom generator = ThreadLocalRandom.current();
+    long nextNanos = Duration.ofSeconds(minSecs).toNanos();
+    final long randomNanos = Duration.ofSeconds(randomSecs).toNanos();
+    final long addedNanos = Duration.ofMillis(addedMillis).toNanos();
+
+    for (int i = 0; i < AutoBatchTime.ADJUST_STEPS; i++) {
+      final long generatedNanos =
+          randomSecs == 0 ? 0 : generator.nextLong(-randomNanos, randomNanos);
+      intervals[i] = nextNanos + generatedNanos;
+      nextNanos += addedNanos;
+    }
+    return intervals;
+  }
+
+  void fifteenthReceiveAdjustFreezes(
+      final String caption,
+      final int probeSecs,
+      final long[] gatherIntervals,
+      final long[] writeIntervals) {
+
     AtomicLong now = new AtomicLong(0);
     AutoBatchTime auto = new AutoBatchTime(null, now::get);
+    System.out.println("\nfifteenthReceiveAdjustFreezes" + caption + "Interval:");
+    printAutoValues(auto, now);
 
     assertTrue(auto.shouldProbe());
-    now.set(Duration.ofSeconds(60).toNanos());
-    assertFalse(auto.shouldProbe());
+    now.set(Duration.ofSeconds(probeSecs).toNanos());
+    assertProbe(now, auto);
 
+    final long gather0 = gatherIntervals[0];
+    final long write0 = writeIntervals[0];
     do {
-      auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
-      now.addAndGet(Duration.ofSeconds(5).toNanos());
+      auto.onGatherFinished(gather0, true);
+      now.addAndGet(write0);
       auto.onCommit();
-      assertFalse(auto.shouldProbe());
+      assertProbe(now, auto);
     } while (auto.waitingToAdjustReceive());
 
-    final long s45 = Duration.ofSeconds(45).toNanos();
-    final long s05 = Duration.ofSeconds(5).toNanos();
-
-    for (int i = 0; i < AutoBatchTime.ADJUST_STEPS + 1; i++) {
-      auto.onGatherFinished(s45, true);
-      now.addAndGet(s05);
+    for (int i = 0; i < AutoBatchTime.ADJUST_STEPS; i++) {
+      final long gather = gatherIntervals[i];
+      final long write = writeIntervals[i];
+      auto.onGatherFinished(gather, true);
+      now.addAndGet(write);
       auto.onCommit();
-      assertFalse(auto.shouldProbe());
+      assertProbe(now, auto);
     }
     assertTrue(auto.receiveFrozen());
+  }
+
+  private void assertProbe(final AtomicLong now, final AutoBatchTime auto, final String caption) {
+    System.out.println("\n" + caption + ":");
+    assertProbe(now, auto);
+  }
+
+  private void assertProbe(final AtomicLong now, final AutoBatchTime auto) {
+    assertFalse(auto.shouldProbe());
+    printAutoValues(auto, now);
+  }
+
+  private void printAutoValues(AutoBatchTime auto, AtomicLong now) {
+    long write = auto.calcWriteTime(now.get());
+    System.out.println(
+        "AutoCycle="
+            + auto.autoCycles()
+            + " adjustCount="
+            + auto.adjustCount()
+            + " lastGather: "
+            + AutoBatchTime.format(Duration.ofNanos(auto.lastGatherNanos()))
+            + " lastWrite: "
+            + AutoBatchTime.format(Duration.ofNanos(write))
+            + " cycle: "
+            + AutoBatchTime.format(Duration.ofNanos(auto.lastGatherNanos() + write))
+            + " currentReceive: "
+            + AutoBatchTime.format(auto.currentReceive()));
   }
 
   @Test

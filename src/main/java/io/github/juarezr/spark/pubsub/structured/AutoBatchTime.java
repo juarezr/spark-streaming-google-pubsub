@@ -140,6 +140,18 @@ final class AutoBatchTime {
     return receiveFrozen;
   }
 
+  long lastGatherNanos() {
+    return lastGatherNanos;
+  }
+
+  long autoCycles() {
+    return autoCycles;
+  }
+
+  long adjustCount() {
+    return adjustCount;
+  }
+
   /**
    * @return {@code true} when this micro-batch must return empty without receiving
    */
@@ -277,10 +289,7 @@ final class AutoBatchTime {
     if (gap <= batchInterval.toNanos()) {
       return;
     }
-    long write = lastWriteNanos;
-    if (pendingWrite && lastReturnNanos != 0L) {
-      write = Math.max(write, now - lastReturnNanos);
-    }
+    long write = calcWriteTime(now);
     long cycle = lastGatherNanos + write;
     boolean sparkSlept = lastGatherEmpty || gap > cycle + RECEIVE_WRITE_MARGIN_NANOS;
     if (!sparkSlept) {
@@ -305,6 +314,14 @@ final class AutoBatchTime {
         format(currentReceive));
   }
 
+  long calcWriteTime(long now) {
+    long write = lastWriteNanos;
+    if (pendingWrite && lastReturnNanos != 0L) {
+      write = Math.max(write, now - lastReturnNanos);
+    }
+    return write;
+  }
+
   boolean waitingToAdjustReceive() {
     if (receiveFrozen || mode != Mode.AUTO || batchInterval == null || currentReceive == null) {
       return true;
@@ -321,10 +338,7 @@ final class AutoBatchTime {
       return;
     }
     long intervalNanos = batchInterval.toNanos();
-    long write = lastWriteNanos;
-    if (pendingWrite && lastReturnNanos != 0L) {
-      write = Math.max(write, now - lastReturnNanos);
-    }
+    long write = calcWriteTime(now);
     long cycle = lastGatherNanos + write;
     long floor = receiveFloorNanos(intervalNanos);
     Duration next = currentReceive;
@@ -392,7 +406,7 @@ final class AutoBatchTime {
     return value;
   }
 
-  private static String format(Duration duration) {
+  static String format(Duration duration) {
     if (duration == null) {
       return "-";
     }
