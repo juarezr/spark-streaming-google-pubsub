@@ -3,6 +3,7 @@ package io.github.juarezr.spark.pubsub.structured;
 import io.github.juarezr.spark.pubsub.config.GatherMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
@@ -11,14 +12,14 @@ import org.slf4j.LoggerFactory;
 /**
  * Infers a sane {@code receiveTime} when the option is omitted so receive + write fits the Spark
  * batch interval ({@code Trigger.ProcessingTime}). Probe idle micro-batch gaps for the batch
- * interval, then one start-to-start leftover raise if Spark slept, then keep approximating
- * receive for 15 cycles: overrun shrinks it, leftover idle raises it by half the gap. Never
- * sets the batch interval from gather + write.
+ * interval, then one start-to-start leftover raise if Spark slept, then approximate receive until
+ * stable: overrun shrinks by half the excess, leftover idle raises by half the gap. Never sets the
+ * batch interval from gather + write.
  *
  * <pre>
  * @startuml
  * !theme vibrant
- * title Auto receiveTime: PROBE then idle leftover / overrun-shrink
+ * title Auto receiveTime: PROBE then idle leftover / half overrun-shrink
  *
  * participant App
  * participant Spark
@@ -47,15 +48,17 @@ import org.slf4j.LoggerFactory;
  *   note right of Auto
  *     After the first AUTO micro-batch,
  *     if start-to-start > seed and Spark
- *     slept (gap > gather + write + 1s):
+ *     slept (gap > gather + write + margin):
  *     one re-measure of batch interval,
  *     then batch interval is done.
  *     Busy cycles (cycle ≈ gap) never
  *     change it.
- *     After it is done: overrun shrinks
- *     receive; leftover idle raises it
- *     by half the gap (no one jump).
- *     After 15 receive adjusts: freeze.
+ *     margin = max(1s, 1.6% of interval).
+ *     Overrun shrink uses half excess;
+ *     ignore overrun within margin.
+ *     Freeze when receive stable for 5
+ *     adjusts (min 5), unless still
+ *     chronically over interval; max 32.
  *   end note
  * end
  * @enduml
@@ -67,9 +70,14 @@ final class AutoBatchTime {
   static final long PROBE_NOISE_NANOS = TimeUnit.SECONDS.toNanos(1);
   static final long SEED_MIN_NANOS = TimeUnit.SECONDS.toNanos(10);
   static final int ZERO_TRIGGER_NOISE_CYCLES = 3;
-  static final int ADJUST_STEPS = 15;
+  static final int MIN_TUNE_ADJUSTS = 5;
+  static final int STABLE_RECEIVE_CYCLES = 5;
+  static final int MAX_TUNE_ADJUSTS = 32;
+  static final long STABLE_RECEIVE_DELTA_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
+  static final int WRITE_SMOOTH_SAMPLES = 5;
   static final long RECEIVE_FLOOR_NANOS = TimeUnit.SECONDS.toNanos(1);
-  static final long RECEIVE_WRITE_MARGIN_NANOS = TimeUnit.SECONDS.toNanos(1);
+  static final double RECEIVE_WRITE_MARGIN_PERCENT = 1.0 / 60.0;
+  static final long RECEIVE_WRITE_MARGIN_MIN_NANOS = TimeUnit.SECONDS.toNanos(1);
   static final Duration ZERO_TRIGGER_RECEIVE = Duration.ofSeconds(1);
   static final Duration ACK_DEADLINE_SEED = Duration.ofSeconds(180);
   static final Duration ACK_DEADLINE_MIN = Duration.ofSeconds(60);
@@ -100,7 +108,14 @@ final class AutoBatchTime {
   private boolean batchIntervalFrozen;
   private int autoCycles;
   private int adjustCount;
+  private int stableStreak;
   private boolean receiveFrozen;
+  private boolean frozenAtMaxTuneCap;
+  private final long[] recentWriteNanos = new long[WRITE_SMOOTH_SAMPLES];
+  private int recentWriteCount;
+  private boolean recentOverrun0;
+  private boolean recentOverrun1;
+  private boolean recentOverrun2;
 
   static AutoBatchTime create(PubSubConfig config) {
     return create(config, System::nanoTime);
@@ -140,6 +155,10 @@ final class AutoBatchTime {
     return receiveFrozen;
   }
 
+  boolean frozenAtMaxTuneCap() {
+    return frozenAtMaxTuneCap;
+  }
+
   long lastGatherNanos() {
     return lastGatherNanos;
   }
@@ -150,6 +169,10 @@ final class AutoBatchTime {
 
   long adjustCount() {
     return adjustCount;
+  }
+
+  int stableStreak() {
+    return stableStreak;
   }
 
   /**
@@ -251,6 +274,7 @@ final class AutoBatchTime {
       return;
     }
     lastWriteNanos = write;
+    recordWriteSample(write);
     pendingWrite = false;
     if (batchIntervalFrozen) {
       maybeAdjustReceive(nanoTime.getAsLong());
@@ -291,7 +315,8 @@ final class AutoBatchTime {
     }
     long write = calcWriteTime(now);
     long cycle = lastGatherNanos + write;
-    boolean sparkSlept = lastGatherEmpty || gap > cycle + RECEIVE_WRITE_MARGIN_NANOS;
+    long margin = receiveWriteMarginNanos(batchInterval.toNanos());
+    boolean sparkSlept = lastGatherEmpty || gap > cycle + margin;
     if (!sparkSlept) {
       return;
     }
@@ -301,11 +326,14 @@ final class AutoBatchTime {
     batchInterval = Duration.ofNanos(gap);
     batchIntervalFrozen = true;
     receiveFrozen = false;
+    frozenAtMaxTuneCap = false;
     adjustCount = 0;
+    stableStreak = 0;
+    resetTuneHistory();
     if (currentReceive == null) {
       currentReceive = firstReceive(batchInterval);
     } else {
-      currentReceive = clampReceive(currentReceive, batchInterval, lastWriteNanos);
+      currentReceive = clampReceive(currentReceive, batchInterval, smoothedWriteNanos());
     }
     LOG.info(
         "AUTO: inferred batch interval={} receiveTime={} (idle leftover after a micro-batch;"
@@ -338,33 +366,70 @@ final class AutoBatchTime {
       return;
     }
     long intervalNanos = batchInterval.toNanos();
+    long margin = receiveWriteMarginNanos(intervalNanos);
     long write = calcWriteTime(now);
     long cycle = lastGatherNanos + write;
     long floor = receiveFloorNanos(intervalNanos);
+    Duration priorReceive = currentReceive;
     Duration next = currentReceive;
     if (cycle > intervalNanos) {
-      long shrink = cycle - intervalNanos;
-      next = Duration.ofNanos(Math.max(floor, currentReceive.toNanos() - shrink));
-      LOG.info(
-          "AUTO: overrun cycle={} > batch interval={}; shrink receiveTime {} -> {}",
-          format(Duration.ofNanos(cycle)),
-          format(batchInterval),
-          format(currentReceive),
-          format(next));
-    } else if (lastGatherEmpty || cycle + RECEIVE_WRITE_MARGIN_NANOS < intervalNanos) {
+      long overrun = cycle - intervalNanos;
+      if (overrun > margin) {
+        long shrink = overrun / 2L;
+        next = Duration.ofNanos(Math.max(floor, currentReceive.toNanos() - shrink));
+        LOG.info(
+            "AUTO: overrun cycle={} > batch interval={}; shrink receiveTime {} -> {} (half"
+                + " excess {})",
+            format(Duration.ofNanos(cycle)),
+            format(batchInterval),
+            format(currentReceive),
+            format(next),
+            format(Duration.ofNanos(overrun)));
+      }
+    } else if (lastGatherEmpty || cycle + margin < intervalNanos) {
       long leftover = intervalNanos - cycle;
-      if (leftover > RECEIVE_WRITE_MARGIN_NANOS) {
+      if (leftover > margin) {
         next = Duration.ofNanos(currentReceive.toNanos() + leftover / 2L);
       }
     }
-    next = clampReceive(next, batchInterval, write);
+    next = clampReceive(next, batchInterval, smoothedWriteNanos());
+    if (receiveDeltaNanos(priorReceive, next) <= STABLE_RECEIVE_DELTA_NANOS) {
+      stableStreak++;
+    } else {
+      stableStreak = 0;
+    }
     currentReceive = next;
     adjustCount++;
-    if (adjustCount >= ADJUST_STEPS) {
-      receiveFrozen = true;
-      LOG.info(
-          "AUTO: receiveTime={} frozen after {} adjust(s)", format(currentReceive), adjustCount);
+    pushRecentOverrun(cycle > intervalNanos + margin);
+    maybeFreezeReceive();
+  }
+
+  private void maybeFreezeReceive() {
+    if (receiveFrozen) {
+      return;
     }
+    if (adjustCount >= MAX_TUNE_ADJUSTS) {
+      receiveFrozen = true;
+      frozenAtMaxTuneCap = true;
+      LOG.warn(
+          "AUTO: receiveTime={} frozen at max tune cap after {} adjust(s)",
+          format(currentReceive),
+          adjustCount);
+      return;
+    }
+    if (adjustCount < MIN_TUNE_ADJUSTS || stableStreak < STABLE_RECEIVE_CYCLES) {
+      return;
+    }
+    if (recentChronicOverrun()) {
+      return;
+    }
+    receiveFrozen = true;
+    frozenAtMaxTuneCap = false;
+    LOG.info(
+        "AUTO: receiveTime={} frozen after {} adjust(s), stable streak {}",
+        format(currentReceive),
+        adjustCount,
+        stableStreak);
   }
 
   private void enterZeroTrigger() {
@@ -389,10 +454,16 @@ final class AutoBatchTime {
     return Math.max(RECEIVE_FLOOR_NANOS, quarter);
   }
 
+  static long receiveWriteMarginNanos(long batchIntervalNanos) {
+    long scaled = (long) (batchIntervalNanos * RECEIVE_WRITE_MARGIN_PERCENT);
+    return Math.max(RECEIVE_WRITE_MARGIN_MIN_NANOS, scaled);
+  }
+
   static Duration clampReceive(Duration value, Duration batchInterval, long writeNanos) {
     long intervalNanos = batchInterval.toNanos();
     long floor = receiveFloorNanos(intervalNanos);
-    long max = intervalNanos - Math.max(writeNanos, 0L) - RECEIVE_WRITE_MARGIN_NANOS;
+    long margin = receiveWriteMarginNanos(intervalNanos);
+    long max = intervalNanos - Math.max(writeNanos, 0L) - margin;
     if (max < floor) {
       max = Math.max(floor, intervalNanos / 2);
     }
@@ -404,6 +475,45 @@ final class AutoBatchTime {
       return Duration.ofNanos(max);
     }
     return value;
+  }
+
+  private void recordWriteSample(long writeNanos) {
+    if (recentWriteCount < WRITE_SMOOTH_SAMPLES) {
+      recentWriteNanos[recentWriteCount++] = writeNanos;
+      return;
+    }
+    System.arraycopy(recentWriteNanos, 1, recentWriteNanos, 0, WRITE_SMOOTH_SAMPLES - 1);
+    recentWriteNanos[WRITE_SMOOTH_SAMPLES - 1] = writeNanos;
+  }
+
+  private long smoothedWriteNanos() {
+    long max = lastWriteNanos;
+    for (int i = 0; i < recentWriteCount; i++) {
+      max = Math.max(max, recentWriteNanos[i]);
+    }
+    return max;
+  }
+
+  private void resetTuneHistory() {
+    recentWriteCount = 0;
+    Arrays.fill(recentWriteNanos, 0L);
+    recentOverrun0 = false;
+    recentOverrun1 = false;
+    recentOverrun2 = false;
+  }
+
+  private void pushRecentOverrun(boolean chronic) {
+    recentOverrun2 = recentOverrun1;
+    recentOverrun1 = recentOverrun0;
+    recentOverrun0 = chronic;
+  }
+
+  private boolean recentChronicOverrun() {
+    return recentOverrun0 || recentOverrun1 || recentOverrun2;
+  }
+
+  private static long receiveDeltaNanos(Duration a, Duration b) {
+    return Math.abs(a.toNanos() - b.toNanos());
   }
 
   static String format(Duration duration) {
