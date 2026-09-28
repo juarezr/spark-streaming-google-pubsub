@@ -85,6 +85,39 @@ class PubSubConfigTest {
   }
 
   @Test
+  void omittedAckDeadlineUsesThreeIntervalsWhenBatchIntervalKnown() {
+    PubSubConfig config = PubSubConfig.builder().projectId("p").subscription("s").build();
+    assertEquals(Duration.ofSeconds(180), config.effectiveAckDeadline(null));
+    assertEquals(Duration.ofSeconds(180), config.effectiveAckDeadline(Duration.ofSeconds(60)));
+    assertEquals(Duration.ofSeconds(90), config.effectiveMaxRetryTime());
+  }
+
+  @Test
+  void omittedMaxRetryTimeClampsToAckDeadline() {
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackDeadline(Duration.ofSeconds(30))
+            .build();
+    assertEquals(Duration.ofSeconds(30), config.effectiveMaxRetryTime());
+    assertFalse(config.maxRetryTimeSet());
+  }
+
+  @Test
+  void explicitMaxRetryTimeWinsOverAckDeadlineClamp() {
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackDeadline(Duration.ofSeconds(30))
+            .maxRetryTime(Duration.ofSeconds(20))
+            .build();
+    assertEquals(Duration.ofSeconds(20), config.effectiveMaxRetryTime());
+    assertTrue(config.maxRetryTimeSet());
+  }
+
+  @Test
   void rejectsBlankProject() {
     assertThrows(
         IllegalArgumentException.class,

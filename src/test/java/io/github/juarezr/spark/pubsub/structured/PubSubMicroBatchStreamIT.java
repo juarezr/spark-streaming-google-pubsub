@@ -4,23 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-import com.google.api.gax.core.NoCredentialsProvider;
-import com.google.api.gax.grpc.GrpcTransportChannel;
-import com.google.api.gax.rpc.FixedTransportChannelProvider;
 import com.google.cloud.pubsub.v1.Publisher;
-import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
-import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
-import com.google.cloud.pubsub.v1.TopicAdminClient;
-import com.google.cloud.pubsub.v1.TopicAdminSettings;
 import com.google.protobuf.ByteString;
-import com.google.pubsub.v1.ProjectSubscriptionName;
-import com.google.pubsub.v1.ProjectTopicName;
 import com.google.pubsub.v1.PubsubMessage;
-import com.google.pubsub.v1.PushConfig;
 import io.github.juarezr.spark.pubsub.config.AckMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
-import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -55,57 +43,16 @@ class PubSubMicroBatchStreamIT {
   private static final String SUBSCRIPTION = "it-subscription";
 
   private String emulatorHost;
-  private ManagedChannel channel;
+  private PubSubEmulatorFixtures.EmulatorChannel emulator;
   private SparkSession spark;
 
   @BeforeAll
   void setUp() throws Exception {
-    emulatorHost = System.getenv("PUBSUB_EMULATOR_HOST");
-    assumeTrue(
-        emulatorHost != null && !emulatorHost.isBlank(),
-        "Skipping IT: set PUBSUB_EMULATOR_HOST to run against the emulator");
+    emulatorHost = PubSubEmulatorFixtures.requireEmulatorHost();
+    emulator = PubSubEmulatorFixtures.openChannel(emulatorHost);
+    PubSubEmulatorFixtures.recreateTopicAndSubscription(emulator, PROJECT, TOPIC, SUBSCRIPTION);
 
-    channel = ManagedChannelBuilder.forTarget(emulatorHost).usePlaintext().build();
-    FixedTransportChannelProvider channelProvider =
-        FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
-    NoCredentialsProvider credentialsProvider = NoCredentialsProvider.create();
-
-    TopicAdminSettings topicSettings =
-        TopicAdminSettings.newBuilder()
-            .setTransportChannelProvider(channelProvider)
-            .setCredentialsProvider(credentialsProvider)
-            .build();
-    SubscriptionAdminSettings subSettings =
-        SubscriptionAdminSettings.newBuilder()
-            .setTransportChannelProvider(channelProvider)
-            .setCredentialsProvider(credentialsProvider)
-            .build();
-
-    ProjectTopicName topicName = ProjectTopicName.of(PROJECT, TOPIC);
-    ProjectSubscriptionName subName = ProjectSubscriptionName.of(PROJECT, SUBSCRIPTION);
-
-    try (TopicAdminClient topicAdmin = TopicAdminClient.create(topicSettings);
-        SubscriptionAdminClient subAdmin = SubscriptionAdminClient.create(subSettings)) {
-      try {
-        topicAdmin.deleteTopic(topicName.toString());
-      } catch (Exception ignored) {
-        // first run
-      }
-      try {
-        subAdmin.deleteSubscription(subName.toString());
-      } catch (Exception ignored) {
-        // first run
-      }
-      topicAdmin.createTopic(topicName.toString());
-      subAdmin.createSubscription(
-          subName.toString(), topicName.toString(), PushConfig.getDefaultInstance(), 60);
-    }
-
-    Publisher publisher =
-        Publisher.newBuilder(topicName.toString())
-            .setChannelProvider(channelProvider)
-            .setCredentialsProvider(credentialsProvider)
-            .build();
+    Publisher publisher = PubSubEmulatorFixtures.newPublisher(emulator, PROJECT, TOPIC);
     try {
       byte[] payload = examplePayload();
       for (int i = 0; i < 50; i++) {
@@ -149,8 +96,8 @@ class PubSubMicroBatchStreamIT {
     if (spark != null) {
       spark.stop();
     }
-    if (channel != null) {
-      channel.shutdownNow();
+    if (emulator != null) {
+      emulator.close();
     }
   }
 
@@ -193,25 +140,7 @@ class PubSubMicroBatchStreamIT {
   @Test
   void idleBatchGatherKeepsQueryActive(@TempDir Path tempDir) throws Exception {
     String idleSubscription = "it-idle-subscription";
-    ProjectTopicName topicName = ProjectTopicName.of(PROJECT, TOPIC);
-    ProjectSubscriptionName idleName = ProjectSubscriptionName.of(PROJECT, idleSubscription);
-    FixedTransportChannelProvider channelProvider =
-        FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
-    NoCredentialsProvider credentialsProvider = NoCredentialsProvider.create();
-    SubscriptionAdminSettings subSettings =
-        SubscriptionAdminSettings.newBuilder()
-            .setTransportChannelProvider(channelProvider)
-            .setCredentialsProvider(credentialsProvider)
-            .build();
-    try (SubscriptionAdminClient subAdmin = SubscriptionAdminClient.create(subSettings)) {
-      try {
-        subAdmin.deleteSubscription(idleName.toString());
-      } catch (Exception ignored) {
-        // first run
-      }
-      subAdmin.createSubscription(
-          idleName.toString(), topicName.toString(), PushConfig.getDefaultInstance(), 60);
-    }
+    PubSubEmulatorFixtures.recreateSubscriptionOnTopic(emulator, PROJECT, TOPIC, idleSubscription);
 
     Path checkpoint = Files.createDirectory(tempDir.resolve("checkpoint"));
     Dataset<Row> stream =
@@ -245,42 +174,8 @@ class PubSubMicroBatchStreamIT {
     String topic = "it-available-now-topic";
     String subscription = "it-available-now-subscription";
     int published = 15;
-    ProjectTopicName topicName = ProjectTopicName.of(PROJECT, topic);
-    ProjectSubscriptionName subName = ProjectSubscriptionName.of(PROJECT, subscription);
-    FixedTransportChannelProvider channelProvider =
-        FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
-    NoCredentialsProvider credentialsProvider = NoCredentialsProvider.create();
-    TopicAdminSettings topicSettings =
-        TopicAdminSettings.newBuilder()
-            .setTransportChannelProvider(channelProvider)
-            .setCredentialsProvider(credentialsProvider)
-            .build();
-    SubscriptionAdminSettings subSettings =
-        SubscriptionAdminSettings.newBuilder()
-            .setTransportChannelProvider(channelProvider)
-            .setCredentialsProvider(credentialsProvider)
-            .build();
-    try (TopicAdminClient topicAdmin = TopicAdminClient.create(topicSettings);
-        SubscriptionAdminClient subAdmin = SubscriptionAdminClient.create(subSettings)) {
-      try {
-        subAdmin.deleteSubscription(subName.toString());
-      } catch (Exception ignored) {
-        // first run
-      }
-      try {
-        topicAdmin.deleteTopic(topicName.toString());
-      } catch (Exception ignored) {
-        // first run
-      }
-      topicAdmin.createTopic(topicName.toString());
-      subAdmin.createSubscription(
-          subName.toString(), topicName.toString(), PushConfig.getDefaultInstance(), 60);
-    }
-    Publisher publisher =
-        Publisher.newBuilder(topicName.toString())
-            .setChannelProvider(channelProvider)
-            .setCredentialsProvider(credentialsProvider)
-            .build();
+    PubSubEmulatorFixtures.recreateTopicAndSubscription(emulator, PROJECT, topic, subscription);
+    Publisher publisher = PubSubEmulatorFixtures.newPublisher(emulator, PROJECT, topic);
     try {
       byte[] payload = examplePayload();
       for (int i = 0; i < published; i++) {
