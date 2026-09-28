@@ -99,3 +99,14 @@ The published POM pins `google-cloud-pubsub`, `google-auth-library-oauth2-http`,
 
 Snapshots are useful internally (`0.8.2-SNAPSHOT`) but are **not** published to Maven Central.
 Use GitHub Packages or GCS for snapshot distribution if needed (`-Pgithub-packages`).
+
+### Coverage
+
+JaCoCo reports are generated with the `spark35` and `coverage` profiles;
+Coveralls upload uses a separate `coveralls` profile (no upload during normal local builds).
+
+Shortcut for the default Spark 3.5 baseline: `mvn -Pcoverage,coverage-report` (with emulator
+when integration tests run).
+
+CI publishes from the Spark 3.5 matrix job when the repository secret `COVERALLS_REPO_TOKEN` is
+set (Coveralls repo token).

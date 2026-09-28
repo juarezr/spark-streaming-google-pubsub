@@ -61,9 +61,24 @@ jobs:
 
       - name: Integration tests + package
         id: integration-tests-package
+        if: matrix.spark != '3.5' || secrets.COVERALLS_REPO_TOKEN == ''
         env:
           PUBSUB_EMULATOR_HOST: localhost:8085
         run: mvn -B -P${{ matrix.profile }} -Dspotless.check.skip=true verify
+
+      - name: Integration tests + package + coverage for ${{ matrix.profile }}
+        id: integration-tests-package-coverage
+        if: matrix.spark == '3.5' && secrets.COVERALLS_REPO_TOKEN != ''
+        env:
+          PUBSUB_EMULATOR_HOST: localhost:8085
+        run: mvn -B -P${{ matrix.profile }},coverage -Dspotless.check.skip=true verify
+
+      - name: Publish coverage to Coveralls
+        id: publish-coverage-coveralls
+        if: matrix.spark == '3.5' && secrets.COVERALLS_REPO_TOKEN != ''
+        env:
+          COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
+        run: mvn -B -Pcoveralls coveralls:report -DrepoToken="$COVERALLS_REPO_TOKEN"
 
       - name: Spotless Source Code Check
         id: spotless-check
