@@ -59,6 +59,59 @@ final class PubSubClient implements Closeable, Serializable {
 
   private final AtomicLong lastSeenNewestPublishMillis = new AtomicLong(Long.MIN_VALUE);
 
+  final class PubSubMessageReceiver implements MessageReceiver {
+
+    @Override
+    public void receiveMessage(PubsubMessage message, AckReplyConsumer consumer) {
+      if (stopped != null && stopped.get()) {
+        consumer.nack();
+        return;
+      }
+      PulledMessage pulled = toPulled(message);
+      long cap = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
+      while (queuedBytes != null && queuedBytes.get() >= cap && stopped != null && !stopped.get()) {
+        try {
+          TimeUnit.MILLISECONDS.sleep(10);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          consumer.nack();
+          return;
+        }
+      }
+      if (stopped != null && stopped.get()) {
+        consumer.nack();
+        return;
+      }
+      consumers.put(pulled.ackId(), consumer);
+      queuedBytes.addAndGet(pulled.data().length);
+      outstandingBytes.addAndGet(pulled.data().length);
+      try {
+        queue.put(new HeldMessage(pulled, consumer));
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        consumers.remove(pulled.ackId());
+        queuedBytes.addAndGet(-pulled.data().length);
+        outstandingBytes.addAndGet(-pulled.data().length);
+        consumer.nack();
+      }
+    }
+
+    private PulledMessage toPulled(PubsubMessage message) {
+      byte[] data = message.getData().toByteArray();
+      long publishMillis =
+          message.getPublishTime().getSeconds() * 1000L
+              + message.getPublishTime().getNanos() / 1_000_000L;
+      String messageId = message.getMessageId();
+      return new PulledMessage(
+          messageId,
+          data,
+          message.getAttributesMap(),
+          publishMillis,
+          message.getOrderingKey(),
+          messageId);
+    }
+  }
+
   static final class HeldMessage {
     final PulledMessage message;
     final AckReplyConsumer consumer;
@@ -98,7 +151,7 @@ final class PubSubClient implements Closeable, Serializable {
     try {
       applySeekIfNeeded();
       Subscriber.Builder builder =
-          Subscriber.newBuilder(this.config.subscriptionPath(), receiver());
+          Subscriber.newBuilder(this.config.subscriptionPath(), new PubSubMessageReceiver());
       builder.setFlowControlSettings(flowControl());
       org.threeten.bp.Duration ackExtend =
           org.threeten.bp.Duration.ofSeconds(
@@ -135,57 +188,6 @@ final class PubSubClient implements Closeable, Serializable {
       flow.setMaxOutstandingElementCount(elements);
     }
     return flow.build();
-  }
-
-  private MessageReceiver receiver() {
-    return (PubsubMessage message, AckReplyConsumer consumer) -> {
-      if (stopped != null && stopped.get()) {
-        consumer.nack();
-        return;
-      }
-      PulledMessage pulled = toPulled(message);
-      long cap = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
-      while (queuedBytes != null && queuedBytes.get() >= cap && stopped != null && !stopped.get()) {
-        try {
-          TimeUnit.MILLISECONDS.sleep(10);
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          consumer.nack();
-          return;
-        }
-      }
-      if (stopped != null && stopped.get()) {
-        consumer.nack();
-        return;
-      }
-      consumers.put(pulled.ackId(), consumer);
-      queuedBytes.addAndGet(pulled.data().length);
-      outstandingBytes.addAndGet(pulled.data().length);
-      try {
-        queue.put(new HeldMessage(pulled, consumer));
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        consumers.remove(pulled.ackId());
-        queuedBytes.addAndGet(-pulled.data().length);
-        outstandingBytes.addAndGet(-pulled.data().length);
-        consumer.nack();
-      }
-    };
-  }
-
-  private PulledMessage toPulled(PubsubMessage message) {
-    byte[] data = message.getData().toByteArray();
-    long publishMillis =
-        message.getPublishTime().getSeconds() * 1000L
-            + message.getPublishTime().getNanos() / 1_000_000L;
-    String messageId = message.getMessageId();
-    return new PulledMessage(
-        messageId,
-        data,
-        message.getAttributesMap(),
-        publishMillis,
-        message.getOrderingKey(),
-        messageId);
   }
 
   private void applySeekIfNeeded() throws IOException {

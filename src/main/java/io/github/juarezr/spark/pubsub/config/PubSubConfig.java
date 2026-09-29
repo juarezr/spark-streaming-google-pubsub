@@ -216,14 +216,14 @@ public final class PubSubConfig implements Serializable {
   private static void rejectRemovedOptions(Map<String, String> normalized) {
     if (normalized.containsKey("batchtime")) {
       throw new IllegalArgumentException(
-          "batchTime was removed in 0.9.0; use receiveTime (no alias)");
+          "batchTime was removed in 0.9.1; use receiveTime (no alias)");
     }
     if (normalized.containsKey("pullmaxmessages")) {
       throw new IllegalArgumentException(
-          "pullMaxMessages was removed in 0.9.0; unary Pull is gone");
+          "pullMaxMessages was removed in 0.9.1; unary Pull is gone");
     }
     if (normalized.containsKey("pulldeadline")) {
-      throw new IllegalArgumentException("pullDeadline was removed in 0.9.0; unary Pull is gone");
+      throw new IllegalArgumentException("pullDeadline was removed in 0.9.1; unary Pull is gone");
     }
   }
 

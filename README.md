@@ -9,6 +9,7 @@ Read a subscription into Structured Streaming with `.format("google-pubsub")`.
 ![Main branch](https://img.shields.io/github/check-suites/juarezr/spark-streaming-google-pubsub/main?logo=github)
 [![CI](https://github.com/juarezr/spark-streaming-google-pubsub/actions/workflows/ci.yml/badge.svg)](https://github.com/juarezr/spark-streaming-google-pubsub/actions/workflows/ci.yml)
 [![Release](https://github.com/juarezr/spark-streaming-google-pubsub/actions/workflows/release.yml/badge.svg)](https://github.com/juarezr/spark-streaming-google-pubsub/actions/workflows/release.yml)
+[![Coverage Status](https://coveralls.io/repos/github/juarezr/spark-streaming-google-pubsub/badge.svg?branch=main)](https://coveralls.io/github/juarezr/spark-streaming-google-pubsub?branch=main)
 
 ## Why this connector
 
@@ -24,8 +25,8 @@ Authentication uses **Application Default Credentials (ADC)** unless you set `cr
 
 | Spark   | Scala | Artifact                                                     |
 |---------|-------|--------------------------------------------------------------|
-| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.0` |
-| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.9.0` |
+| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.1` |
+| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.9.1` |
 
 Prefer `--packages` or a Maven/Gradle dependency so Google client libraries come in as transitives.
 Fat JARs (`*-all.jar`) are not on Maven Central; build with `mvn package` or download them from
@@ -329,7 +330,7 @@ recovered
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.0 \
+  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.1 \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -338,7 +339,7 @@ gcloud dataproc jobs submit spark \
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.9.0-all.jar \
+  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.9.1-all.jar \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -351,7 +352,9 @@ Configure a secret, instance profile, or GCP service account for ADC. Use the sa
 
 ## Contributing
 
-JDK 11+ (17 recommended), Maven 3.9+.
+### Build, Lint, and Test
+
+Build: JDK 11+ (17 recommended), Maven 3.9+.
 
 ```bash
 # Spark 3.5 / Scala 2.12 (default)
@@ -369,6 +372,8 @@ mvn -Pspark35 spotless:apply
 ```
 
 Unit tests: `mvn -Pspark35 test`.
+
+### Testing in the Emulator
 
 Integration tests need a Pub/Sub emulator:
 
@@ -397,12 +402,32 @@ mvn -Pspark35 -DskipTests package
 
 spark-submit \
   --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
-  --jars target/spark-streaming-google-pubsub_2.12-0.9.0-all.jar \
+  --jars target/spark-streaming-google-pubsub_2.12-0.9.1-all.jar \
   examples/java/JavaStructuredStreamingExample.java \
   YOUR_PROJECT YOUR_SUBSCRIPTION /tmp/pubsub-cp /tmp/pubsub-out
 ```
 
-Publishing: [`docs/publishing-maven-central.md`](docs/publishing-maven-central.md).
+### Coverage
+
+JaCoCo reports are generated with the `coverage` profile; Coveralls upload uses a separate
+`coveralls` profile (no upload during normal local builds).
+
+```bash
+# 1) Generate report (Pub/Sub emulator required for full IT coverage — same as verify)
+mvn -Pcoverage,spark35 clean verify
+# open target/site/jacoco/index.html
+
+# 2) Publish to Coveralls (after step 1)
+mvn -Pcoveralls coveralls:report -DrepoToken="$COVERALLS_REPO_TOKEN"
+```
+
+Shortcut for the default Spark 3.5 baseline: `mvn -Pcoverage,coverage-report` (with emulator
+when integration tests run).
+
+### See also
+
+- Publishing: [`docs/publishing-maven-central.md`](docs/publishing-maven-central.md).
+- CI coverage: [`docs/coverage.md`](docs/coverage.md).
 
 ## License
 
