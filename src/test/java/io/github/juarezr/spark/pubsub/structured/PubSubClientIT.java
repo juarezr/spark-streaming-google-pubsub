@@ -9,6 +9,7 @@ import com.google.pubsub.v1.PubsubMessage;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import io.github.juarezr.spark.pubsub.config.SeekMode;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -45,8 +46,6 @@ class PubSubClientIT {
   @SuppressWarnings("null")
   @Test
   void pollReceivesPublishedMessagesAndAcknowledgeClearsConsumers() throws Exception {
-    publishMessages("alpha", "beta", "gamma");
-
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId(PROJECT)
@@ -57,7 +56,8 @@ class PubSubClientIT {
     PubSubClient client = new PubSubClient(config);
     try {
       client.start();
-      List<PulledMessage> polled = client.poll(Duration.ofSeconds(30));
+      publishMessages("alpha", "beta", "gamma");
+      List<PulledMessage> polled = pollUntilCount(client, 3, Duration.ofSeconds(30));
       assertEquals(3, polled.size());
       List<String> bodies =
           polled.stream().map(m -> new String(m.data())).sorted().collect(Collectors.toList());
@@ -92,6 +92,17 @@ class PubSubClientIT {
     } finally {
       client.close();
     }
+  }
+
+  /** Collect messages across multiple polls until {@code count} or {@code timeout}. */
+  private static List<PulledMessage> pollUntilCount(
+      PubSubClient client, int count, Duration timeout) {
+    long deadlineNanos = System.nanoTime() + timeout.toNanos();
+    List<PulledMessage> collected = new ArrayList<>();
+    while (System.nanoTime() < deadlineNanos && collected.size() < count) {
+      collected.addAll(client.poll(Duration.ofSeconds(2)));
+    }
+    return collected;
   }
 
   private void publishMessages(String... payloads) throws Exception {
