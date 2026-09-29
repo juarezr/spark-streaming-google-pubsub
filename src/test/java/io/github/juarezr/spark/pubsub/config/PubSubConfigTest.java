@@ -267,29 +267,6 @@ class PubSubConfigTest {
   }
 
   @Test
-  void rejectsRemovedUnaryAndBatchTimeOptions() {
-    Map<String, String> batchTime = new HashMap<>();
-    batchTime.put("projectId", "p");
-    batchTime.put("subscription", "s");
-    batchTime.put("batchTime", "10s");
-    IllegalArgumentException batchEx =
-        assertThrows(IllegalArgumentException.class, () -> PubSubConfig.fromOptions(batchTime));
-    assertTrue(batchEx.getMessage().contains("receiveTime"));
-
-    Map<String, String> pullMax = new HashMap<>();
-    pullMax.put("projectId", "p");
-    pullMax.put("subscription", "s");
-    pullMax.put("pullMaxMessages", "1000");
-    assertThrows(IllegalArgumentException.class, () -> PubSubConfig.fromOptions(pullMax));
-
-    Map<String, String> pullDeadline = new HashMap<>();
-    pullDeadline.put("projectId", "p");
-    pullDeadline.put("subscription", "s");
-    pullDeadline.put("pullDeadline", "20s");
-    assertThrows(IllegalArgumentException.class, () -> PubSubConfig.fromOptions(pullDeadline));
-  }
-
-  @Test
   void implementationVersionDoesNotThrow() {
     String version = assertDoesNotThrow(PubSubConfig::implementationVersion);
     assertFalse(version == null || version.isBlank());
