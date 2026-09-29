@@ -40,7 +40,7 @@ jobs:
 
       - name: Unit tests
         id: unit-tests
-        run: mvn -B -P${{ matrix.profile }} -Dspotless.check.skip=true test
+        run: mvn -B -P${{ matrix.profile }}${{ matrix.spark == '3.5' && ',coverage' || '' }} -Dspotless.check.skip=true test
 
       - name: Start Pub/Sub emulator
         id: start-pubsub-emulator
@@ -48,7 +48,7 @@ jobs:
           docker run -d --name pubsub-emulator -p 8085:8085 \
             gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
             gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if (echo > /dev/tcp/127.0.0.1/8085) >/dev/null 2>&1; then
               echo "Emulator is up"
               exit 0
@@ -61,24 +61,21 @@ jobs:
 
       - name: Integration tests + package
         id: integration-tests-package
-        if: matrix.spark != '3.5' || secrets.COVERALLS_REPO_TOKEN == ''
         env:
           PUBSUB_EMULATOR_HOST: localhost:8085
-        run: mvn -B -P${{ matrix.profile }} -Dspotless.check.skip=true verify
-
-      - name: Integration tests + package + coverage for ${{ matrix.profile }}
-        id: integration-tests-package-coverage
-        if: matrix.spark == '3.5' && secrets.COVERALLS_REPO_TOKEN != ''
-        env:
-          PUBSUB_EMULATOR_HOST: localhost:8085
-        run: mvn -B -P${{ matrix.profile }},coverage -Dspotless.check.skip=true verify
+        run: mvn -B -P${{ matrix.profile }}${{ matrix.spark == '3.5' && ',coverage' || '' }} -Dspotless.check.skip=true verify
 
       - name: Publish coverage to Coveralls
         id: publish-coverage-coveralls
-        if: matrix.spark == '3.5' && secrets.COVERALLS_REPO_TOKEN != ''
+        if: matrix.spark == '3.5'
         env:
           COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
-        run: mvn -B -Pcoveralls coveralls:report -DrepoToken="$COVERALLS_REPO_TOKEN"
+        run: |
+          if [ -z "${COVERALLS_REPO_TOKEN}" ]; then
+            echo "COVERALLS_REPO_TOKEN not configured; skipping Coveralls upload."
+            exit 0
+          fi
+          mvn -B -Pcoveralls coveralls:report -DrepoToken="$COVERALLS_REPO_TOKEN"
 
       - name: Spotless Source Code Check
         id: spotless-check
