@@ -85,6 +85,7 @@ final class AutoBatchTime {
   private long lastCycleNanos;
   private long estimatedWriteNanos;
   private boolean lastGatherEmpty;
+  private int lastGatherCount;
   private boolean pendingWrite;
   private int probeNoiseCount;
   private int probeAttempts;
@@ -251,11 +252,12 @@ final class AutoBatchTime {
     return base;
   }
 
-  void onGatherFinished(long gatherNanos, boolean nonEmpty) {
+  void onGatherFinished(long gatherNanos, int messagesCount) {
     lastGatherNanos = gatherNanos;
-    lastGatherEmpty = !nonEmpty;
+    lastGatherEmpty = messagesCount <= 0;
+    lastGatherCount = messagesCount;
     lastReturnNanos = nanoTime.getAsLong();
-    pendingWrite = nonEmpty;
+    pendingWrite = messagesCount > 0;
   }
 
   void onCommit() {
@@ -403,14 +405,16 @@ final class AutoBatchTime {
     boolean behind = cycle > intervalNanos + margin;
     if (!stabilizedForLogging || postStableLogRemaining > 0) {
       LOG.info(
-          "AUTO: write-first gather={} write={} writeEst={} receive {} -> {} cycle={} behind={}",
+          "AUTO: write-first gather={} write={} writeEst={} receive {} -> {} cycle={} behind={}"
+              + " count={}",
           format(Duration.ofNanos(lastGatherNanos)),
           format(Duration.ofNanos(lastWriteNanos)),
           format(Duration.ofNanos(writeEst)),
           format(priorReceive),
           format(currentReceive),
           format(Duration.ofNanos(cycle)),
-          behind);
+          behind,
+          PubSubConfig.formatCount(lastGatherCount));
     }
     if (postStableLogRemaining > 0) {
       postStableLogRemaining--;

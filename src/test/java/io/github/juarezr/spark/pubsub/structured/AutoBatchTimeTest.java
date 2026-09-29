@@ -96,7 +96,7 @@ class AutoBatchTimeTest {
     assertEquals(Duration.ofSeconds(16), auto.batchInterval());
     assertEquals(Duration.ofSeconds(8), auto.receiveWindow(null));
 
-    auto.onGatherFinished(Duration.ofSeconds(5).toNanos(), false);
+    auto.onGatherFinished(Duration.ofSeconds(5).toNanos(), 0);
     now.addAndGet(Duration.ofSeconds(60).toNanos());
     assertFalse(auto.shouldProbe());
 
@@ -113,7 +113,7 @@ class AutoBatchTimeTest {
     assertFalse(auto.shouldProbe());
     assertEquals(Duration.ofSeconds(30), auto.currentReceive());
 
-    auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), true);
+    auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), 1);
     now.addAndGet(Duration.ofSeconds(20).toNanos());
     auto.onCommit();
     assertFalse(auto.shouldProbe());
@@ -133,7 +133,7 @@ class AutoBatchTimeTest {
     assertEquals(Duration.ofSeconds(50), auto.batchInterval());
 
     now.addAndGet(Duration.ofSeconds(6).toNanos());
-    auto.onGatherFinished(Duration.ofSeconds(6).toNanos(), true);
+    auto.onGatherFinished(Duration.ofSeconds(6).toNanos(), 1);
     now.addAndGet(Duration.ofSeconds(136).toNanos());
     auto.onCommit();
     assertFalse(auto.shouldProbe());
@@ -152,14 +152,14 @@ class AutoBatchTimeTest {
     assertEquals(Duration.ofSeconds(50), auto.batchInterval());
 
     now.addAndGet(Duration.ofSeconds(6).toNanos());
-    auto.onGatherFinished(Duration.ofSeconds(6).toNanos(), true);
+    auto.onGatherFinished(Duration.ofSeconds(6).toNanos(), 1);
     now.addAndGet(Duration.ofSeconds(136).toNanos());
     auto.onCommit();
     assertFalse(auto.shouldProbe());
     assertEquals(Duration.ofSeconds(50), auto.batchInterval());
 
     now.addAndGet(Duration.ofSeconds(48).toNanos());
-    auto.onGatherFinished(Duration.ofSeconds(48).toNanos(), true);
+    auto.onGatherFinished(Duration.ofSeconds(48).toNanos(), 1);
     now.addAndGet(Duration.ofSeconds(5).toNanos());
     auto.onCommit();
     now.addAndGet(Duration.ofSeconds(7).toNanos());
@@ -246,13 +246,13 @@ class AutoBatchTimeTest {
     assertFalse(auto.shouldProbe());
 
     now.addAndGet(Duration.ofSeconds(6).toNanos());
-    auto.onGatherFinished(Duration.ofSeconds(6).toNanos(), true);
+    auto.onGatherFinished(Duration.ofSeconds(6).toNanos(), 1);
     now.addAndGet(Duration.ofSeconds(136).toNanos());
     auto.onCommit();
     assertFalse(auto.shouldProbe());
 
     now.addAndGet(Duration.ofSeconds(48).toNanos());
-    auto.onGatherFinished(Duration.ofSeconds(48).toNanos(), true);
+    auto.onGatherFinished(Duration.ofSeconds(48).toNanos(), 1);
     now.addAndGet(Duration.ofSeconds(5).toNanos());
     auto.onCommit();
     now.addAndGet(Duration.ofSeconds(7).toNanos());
@@ -260,12 +260,12 @@ class AutoBatchTimeTest {
     assertEquals(Duration.ofSeconds(60), auto.batchInterval());
 
     now.addAndGet(Duration.ofSeconds(30).toNanos());
-    auto.onGatherFinished(Duration.ofSeconds(30).toNanos(), true);
+    auto.onGatherFinished(Duration.ofSeconds(30).toNanos(), 1);
     now.addAndGet(Duration.ofSeconds(1).toNanos());
     auto.onCommit();
     assertFalse(auto.shouldProbe());
     now.addAndGet(Duration.ofSeconds(30).toNanos());
-    auto.onGatherFinished(Duration.ofSeconds(30).toNanos(), true);
+    auto.onGatherFinished(Duration.ofSeconds(30).toNanos(), 1);
     now.addAndGet(Duration.ofSeconds(1).toNanos());
     auto.onCommit();
     assertFalse(auto.shouldProbe());
@@ -284,7 +284,7 @@ class AutoBatchTimeTest {
     assertFalse(auto.shouldProbe());
 
     for (int i = 0; i < 4; i++) {
-      auto.onGatherFinished(Duration.ofSeconds(58).toNanos(), true);
+      auto.onGatherFinished(Duration.ofSeconds(58).toNanos(), 1);
       now.addAndGet(Duration.ofSeconds(6).toNanos());
       auto.onCommit();
       assertFalse(auto.shouldProbe());
@@ -347,7 +347,7 @@ class AutoBatchTimeTest {
     assertFalse(auto.shouldProbe());
 
     for (int i = 0; i < 20; i++) {
-      auto.onGatherFinished(Duration.ofSeconds(45).toNanos(), true);
+      auto.onGatherFinished(Duration.ofSeconds(45).toNanos(), 1);
       now.addAndGet(Duration.ofSeconds(5).toNanos());
       auto.onCommit();
       assertFalse(auto.shouldProbe());
@@ -358,7 +358,7 @@ class AutoBatchTimeTest {
     Duration beforeSpike = auto.currentReceive();
     assertTrue(beforeSpike.compareTo(Duration.ofSeconds(50)) >= 0);
 
-    auto.onGatherFinished(Duration.ofSeconds(60).toNanos(), true);
+    auto.onGatherFinished(Duration.ofSeconds(60).toNanos(), 1);
     now.addAndGet(Duration.ofSeconds(11).toNanos());
     auto.onCommit();
     assertFalse(auto.shouldProbe());
@@ -378,7 +378,7 @@ class AutoBatchTimeTest {
     assertEquals(Duration.ofSeconds(40), auto.batchInterval());
     assertEquals(Duration.ofSeconds(20), auto.currentReceive());
 
-    auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), true);
+    auto.onGatherFinished(Duration.ofSeconds(20).toNanos(), 1);
     now.set(Duration.ofSeconds(100).toNanos());
     assertFalse(auto.shouldProbe());
 
@@ -430,7 +430,7 @@ class AutoBatchTimeTest {
     final long gather0 = gatherIntervals[0];
     final long write0 = writeIntervals[0];
     do {
-      auto.onGatherFinished(gather0, true);
+      auto.onGatherFinished(gather0, 1);
       now.addAndGet(write0);
       auto.onCommit();
       assertFalse(auto.shouldProbe());
@@ -439,7 +439,7 @@ class AutoBatchTimeTest {
     for (int i = 0; i < maxSteps && !auto.receiveFrozen(); i++) {
       final long gather = gatherIntervals[i % gatherIntervals.length];
       final long write = writeIntervals[i % writeIntervals.length];
-      auto.onGatherFinished(gather, true);
+      auto.onGatherFinished(gather, 1);
       now.addAndGet(write);
       auto.onCommit();
       assertFalse(auto.shouldProbe());
