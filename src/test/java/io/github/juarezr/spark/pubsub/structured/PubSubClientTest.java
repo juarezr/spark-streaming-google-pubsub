@@ -15,6 +15,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
@@ -93,6 +94,35 @@ class PubSubClientTest {
     assertEquals("b", messages.get(1).messageId());
     assertEquals(1, queue.size());
     assertEquals(2000L, client.lastSeenNewestPublishMillis());
+  }
+
+  @Test
+  void pollWaitsWithinTimeoutForLimitNextPollCap() throws Exception {
+    PubSubClient client = newPubSubClientReadyForPoll();
+    LinkedBlockingQueue<PubSubClient.HeldMessage> queue = new LinkedBlockingQueue<>();
+    queue.put(held("a", 1000L));
+    setField(client, "queue", queue);
+    setField(client, "queuedBytes", new AtomicLong(0));
+
+    Thread delayed =
+        new Thread(
+            () -> {
+              try {
+                TimeUnit.MILLISECONDS.sleep(100);
+                queue.put(held("b", 2000L));
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+              }
+            });
+    delayed.start();
+
+    client.limitNextPoll(2);
+    List<PulledMessage> messages = client.poll(Duration.ofSeconds(2));
+
+    delayed.join(TimeUnit.SECONDS.toMillis(5));
+    assertEquals(2, messages.size());
+    assertEquals("a", messages.get(0).messageId());
+    assertEquals("b", messages.get(1).messageId());
   }
 
   @Test
