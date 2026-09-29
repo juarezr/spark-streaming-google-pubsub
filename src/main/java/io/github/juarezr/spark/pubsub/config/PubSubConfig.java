@@ -262,6 +262,44 @@ public final class PubSubConfig implements Serializable {
     }
   }
 
+  static String formatSize(long size) {
+    if (size <= 0) {
+      return "0";
+    }
+    if (size < 1024) {
+      return size + "B";
+    }
+    if (size < 1024 * 1024) {
+      return (size / 1024) + "KB";
+    }
+    if (size < 1024 * 1024 * 1024) {
+      return (size / 1024 / 1024) + "MB";
+    }
+    if (size < 1024 * 1024 * 1024 * 1024) {
+      return (size / 1024 / 1024 / 1024) + "GB";
+    }
+    if (size < 1024 * 1024 * 1024 * 1024) {
+      return (size / 1024 / 1024 / 1024 / 1024) + "TB";
+    }
+    return size + "B";
+  }
+
+  public static String formatCount(long size) {
+    if (size < 1024 * 1024) {
+      return (size / 1024) + "K";
+    }
+    if (size < 1024 * 1024 * 1024) {
+      return (size / 1024 / 1024) + "M";
+    }
+    if (size < 1024 * 1024 * 1024 * 1024) {
+      return (size / 1024 / 1024 / 1024) + "G";
+    }
+    if (size < 1024 * 1024 * 1024 * 1024) {
+      return (size / 1024 / 1024 / 1024 / 1024) + "T";
+    }
+    return size + "";
+  }
+
   static Instant parseSeekTime(String raw) {
     return parseInstant(SEEK_TIME, raw);
   }
@@ -431,7 +469,7 @@ public final class PubSubConfig implements Serializable {
 
   String startupSummary() {
     String receive = receiveTime == null ? "auto" : formatDuration(receiveTime);
-    String size = batchSize <= 0 ? "off" : batchSize + "b";
+    String size = batchSize <= 0 ? "off" : formatSize(batchSize);
     String count = batchCount <= 0 ? "off" : Long.toString(batchCount);
     StringBuilder line = new StringBuilder();
     line.append("gatherMode=")
