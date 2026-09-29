@@ -217,17 +217,16 @@ connector will infer a sane value following this probe:
 flowchart LR
   probe[PROBE empty micro-batch]
   seed[batchInterval = idle gap]
-  half[receiveTime = batchInterval / 2]
-  idleRaise[Idle leftover after a micro-batch: re-measure batchInterval once]
-  adjust[Half overrun-shrink or idle-raise by half leftover]
-  freeze[Freeze when stable 5 adjusts min 5 or max 32]
-  probe --> seed --> half --> idleRaise --> adjust --> freeze
+  half[first receive = interval / 2]
+  idleRaise[One idle re-measure of batchInterval]
+  writeFirst[receive = interval minus writeEst minus margin]
+  probe --> seed --> half --> idleRaise --> writeFirst
 ```
 
-Each measure calculates `receiveTime` by the gather messages + write output time + an margin of
-1.6% × batch interval, so longer `ProcessingTime` triggers get proportionally longer margin.
-The probe above keeps approximating `receiveTime` until it is unchanged for five consecutive tune
-steps; otherwise it stops at 32 steps with a warning.
+`writeEst` is the max of recent batch write times and a reserve of `max(1s, 5/60 × batch interval)`.
+Idle time inside a trigger window does **not** raise `receiveTime`. Margin is `max(1s, 1.6% ×
+batch interval)`. Receive is rate-limited per batch and can keep adapting when write time changes;
+after estimates stabilize, the driver logs 20 more batches at INFO for analysis.
 
 When `ackDeadline` omitted is `3 ×` the inferred batch interval (180s at 60s). Subscriber keeps extending
 until commit. `maxRetryTime` omitted is `min(90s, ackDeadline)`.
