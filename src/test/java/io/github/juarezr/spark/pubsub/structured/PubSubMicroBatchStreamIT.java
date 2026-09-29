@@ -9,6 +9,7 @@ import com.google.protobuf.ByteString;
 import com.google.pubsub.v1.PubsubMessage;
 import io.github.juarezr.spark.pubsub.config.AckMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
+import io.github.juarezr.spark.pubsub.testsupport.SparkProfileFingerprint;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -37,6 +38,10 @@ import org.junit.jupiter.api.io.TempDir;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PubSubMicroBatchStreamIT {
+
+  static {
+    SparkProfileFingerprint.sparkVersion();
+  }
 
   private static final String PROJECT = "test-project";
   private static final String TOPIC = "it-topic";
@@ -123,12 +128,12 @@ class PubSubMicroBatchStreamIT {
     StreamingQuery query =
         stream
             .writeStream()
+            .option("checkpointLocation", checkpoint.toString())
             .foreachBatch(
                 (Dataset<Row> batch, Long id) -> {
                   seen.addAndGet((int) batch.count());
                   batch.write().mode("append").json(output.toString());
                 })
-            .option("checkpointLocation", checkpoint.toString())
             .trigger(Trigger.ProcessingTime("100 milliseconds"))
             .start();
 
@@ -158,8 +163,8 @@ class PubSubMicroBatchStreamIT {
     StreamingQuery query =
         stream
             .writeStream()
-            .foreachBatch((Dataset<Row> batch, Long id) -> {})
             .option("checkpointLocation", checkpoint.toString())
+            .foreachBatch((Dataset<Row> batch, Long id) -> {})
             .trigger(Trigger.ProcessingTime("100 milliseconds"))
             .start();
 
@@ -210,12 +215,12 @@ class PubSubMicroBatchStreamIT {
     StreamingQuery query =
         stream
             .writeStream()
+            .option("checkpointLocation", checkpoint.toString())
             .foreachBatch(
                 (Dataset<Row> batch, Long id) -> {
                   seen.addAndGet((int) batch.count());
                   batch.write().mode("append").json(output.toString());
                 })
-            .option("checkpointLocation", checkpoint.toString())
             .trigger(Trigger.AvailableNow())
             .start();
 
