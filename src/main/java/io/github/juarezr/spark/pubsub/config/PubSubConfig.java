@@ -28,6 +28,13 @@ public final class PubSubConfig implements Serializable {
   public static final String ACK_DEADLINE = "ackDeadline";
   public static final String GATHER_MODE = "gatherMode";
   public static final String RECEIVE_TIME = "receiveTime";
+
+  /**
+   * Spark {@code Trigger.ProcessingTime} hint for auto {@code receiveTime} (same duration as
+   * trigger).
+   */
+  public static final String PROCESSING_TIME = "processingTime";
+
   public static final String BATCH_SIZE = "batchSize";
   public static final String BATCH_COUNT = "batchCount";
   public static final String NUM_WRITERS = "numWriters";
@@ -57,6 +64,7 @@ public final class PubSubConfig implements Serializable {
   private final Duration ackDeadline;
   private final GatherMode gatherMode;
   private final Duration receiveTime;
+  private final Duration processingTime;
   private final long batchSize;
   private final long batchCount;
   private final String numWriters;
@@ -80,6 +88,7 @@ public final class PubSubConfig implements Serializable {
         resolveMaxRetryTime(builder.maxRetryTime, builder.maxRetryTimeSet, ackDeadline);
     this.gatherMode = builder.gatherMode;
     this.receiveTime = builder.receiveTime;
+    this.processingTime = builder.processingTime;
     this.batchSize = builder.batchSize;
     this.batchCount = builder.batchCount;
     this.numWriters = builder.numWriters;
@@ -103,6 +112,9 @@ public final class PubSubConfig implements Serializable {
     }
     if (receiveTime != null && (receiveTime.isZero() || receiveTime.isNegative())) {
       throw new IllegalArgumentException("receiveTime must be > 0");
+    }
+    if (processingTime != null && (processingTime.isZero() || processingTime.isNegative())) {
+      throw new IllegalArgumentException("processingTime must be > 0");
     }
     if (batchSize != 0 && batchSize < 1024L * 1024L) {
       throw new IllegalArgumentException("batchSize must be 0/blank or at least 1m");
@@ -179,6 +191,10 @@ public final class PubSubConfig implements Serializable {
     String receiveTime = first(normalized, "receivetime");
     if (receiveTime != null) {
       b.receiveTime(parseDuration(RECEIVE_TIME, receiveTime));
+    }
+    String processingTime = first(normalized, "processingtime");
+    if (processingTime != null) {
+      b.processingTime(parseDuration(PROCESSING_TIME, processingTime));
     }
     String batchSize = first(normalized, "batchsize");
     if (batchSize != null) {
@@ -388,6 +404,11 @@ public final class PubSubConfig implements Serializable {
     return receiveTime;
   }
 
+  /** Optional Spark processing-time trigger hint when {@code receiveTime} is omitted. */
+  public Duration processingTime() {
+    return processingTime;
+  }
+
   public long batchSize() {
     return batchSize;
   }
@@ -476,6 +497,8 @@ public final class PubSubConfig implements Serializable {
         .append(gatherMode)
         .append(" receiveTime=")
         .append(receive)
+        .append(" processingTime=")
+        .append(processingTime == null ? "-" : formatDuration(processingTime))
         .append(" ackDeadline=")
         .append(ackDeadline == null ? "auto" : formatDuration(ackDeadline))
         .append(" maxRetryTime=")
@@ -537,6 +560,7 @@ public final class PubSubConfig implements Serializable {
     private Duration ackDeadline;
     private GatherMode gatherMode = GatherMode.BATCH;
     private Duration receiveTime;
+    private Duration processingTime;
     private long batchSize = DEFAULT_BATCH_SIZE;
     private long batchCount;
     private String numWriters = "1";
@@ -587,6 +611,11 @@ public final class PubSubConfig implements Serializable {
 
     public Builder receiveTime(Duration receiveTime) {
       this.receiveTime = receiveTime;
+      return this;
+    }
+
+    public Builder processingTime(Duration processingTime) {
+      this.processingTime = processingTime;
       return this;
     }
 

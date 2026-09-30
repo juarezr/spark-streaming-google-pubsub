@@ -15,6 +15,18 @@ import org.junit.jupiter.api.Test;
 class PubSubConfigTest {
 
   @Test
+  void fromOptionsParsesProcessingTime() {
+    Map<String, String> options = new HashMap<>();
+    options.put("projectId", "p");
+    options.put("subscription", "s");
+    options.put("processingTime", "60s");
+
+    PubSubConfig config = PubSubConfig.fromOptions(options);
+
+    assertEquals(Duration.ofSeconds(60), config.processingTime());
+  }
+
+  @Test
   void fromOptionsParsesRequiredAndDefaults() {
     Map<String, String> options = new HashMap<>();
     options.put("projectId", "my-project");

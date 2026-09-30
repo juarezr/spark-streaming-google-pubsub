@@ -50,7 +50,6 @@ class PubSubMessageReceiverIT {
     PubSubEmulatorFixtures.recreateSubscriptionOnTopic(emulator, PROJECT, TOPIC, SUBSCRIPTION);
   }
 
-  @SuppressWarnings("null")
   @Test
   void receiveMessageMapsAttributesOrderingKeyAndBody() throws Exception {
     PubSubConfig config =
@@ -85,7 +84,6 @@ class PubSubMessageReceiverIT {
     }
   }
 
-  @SuppressWarnings("null")
   @Test
   void limitNextPollCapsDrainWithoutLosingMessages() throws Exception {
     PubSubConfig config =

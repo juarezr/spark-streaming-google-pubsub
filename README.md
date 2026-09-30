@@ -92,6 +92,7 @@ Full script: [`examples/python/structured_streaming_example.py`](examples/python
 | `ackDeadline` | auto (`3 ×` batch interval, seed 180s) | Lease step; Subscriber renews until Spark commits. Omit to infer. |
 | `gatherMode` | `batch` | `batch` collects until `receiveTime` / caps; `pull` returns a batch as soon as messages arrive |
 | `receiveTime` | auto | How long this batch may take from the queue. Omit with `Trigger.ProcessingTime` |
+| `processingTime` | | Spark `Trigger.ProcessingTime` duration (e.g. `60s`). When `receiveTime` is auto, sets the batch interval hint so startup probe gaps are not mistaken for the trigger |
 | `batchSize` | `64m` | Max payload bytes per batch and Subscriber outstanding bytes. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
 | `batchCount` | | Max messages per batch. Capped by Spark `maxRowsPerTrigger` |
 | `numWriters` | `1` | Spark tasks per micro-batch; integer ≥1 or `auto` (driver CPU count) |
@@ -187,7 +188,7 @@ An idle cycle does not start an empty micro-batch, so the sink does not write an
 
 | Spark trigger | What the connector does |
 | :------------ | :---------------------- |
-| `ProcessingTime` | Recommended for 24×7 jobs. Omit `receiveTime`; it is sized from the batch interval so write time still fits. |
+| `ProcessingTime` | Recommended for 24×7 jobs. Omit `receiveTime`; pass the same duration as `processingTime` (or let probe infer a trigger-scale gap ≥45s). Receive is then `interval − write − margin`. |
 | `AvailableNow` | Drain until idle or `limitTime`, then stop. Use for recovery, not a live feed that never goes quiet. |
 | `Once` | Set `receiveTime` yourself. Without it the job can stop before the first receive. |
 | `Continuous` | Not supported. |
