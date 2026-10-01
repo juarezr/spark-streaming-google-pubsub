@@ -241,10 +241,38 @@ until commit. `maxRetryTime` omitted is `min(90s, ackDeadline)`.
 | Fewer files | omit `receiveTime`, keep `numWriters=1`, partition in the application |
 | Recovery drain | `Trigger.AvailableNow`, `seek=snapshot` or `seek=timestamp`, optional `limitTime` |
 
-`numWriters` only splits the already-received batch into Spark tasks. It does not start more
-receive loops.
+### Recommendations
 
 The driver holds payloads, ack ids, and attributes. Leave about 3–5× `batchSize` as heap headroom.
+
+The parameter `numWriters` only splits the already-received batch into Spark tasks.
+It does not start more receive loops.
+
+Notice that the subscription `Oldest Unacked` metric **will not go to zero** while the topic keeps publishing
+and the pipeline holds in-flight batches (pulled, processing, or within Pub/Sub flow-control windows).
+Zero unacked messages is the wrong success criterion; **stable or slowly declining** backlog with
+bounded oldest age is the right one. The workload should trend towards a stable plateau under sustained pull/processing.
+
+Check this example of a workload with micro-batch scheduled at each 60 secs and `batchSize` at 64MiB:
+
+```mermaid
+flowchart LR
+  publish["Topic publish ~1100/s"]
+  subQueue["Subscription backlog"]
+  gather["Connector gather up to receiveTime ~54s"]
+  batchCap["batchSize 64MiB caps msgs ~55k-106k"]
+  sparkBatch["Spark micro-batch ~60s"]
+  parquet["Parquet write ~0.5s"]
+  ack["Ack after commit"]
+  publish --> subQueue
+  subQueue --> gather
+  gather --> batchCap
+  batchCap --> sparkBatch
+  sparkBatch --> parquet
+  parquet --> ack
+  ack --> subQueue
+```
+
 
 ## Reliability
 
