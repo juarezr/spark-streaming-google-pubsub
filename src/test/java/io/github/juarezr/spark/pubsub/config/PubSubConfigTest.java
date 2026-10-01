@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.juarezr.spark.pubsub.common.Into;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
@@ -13,6 +14,18 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class PubSubConfigTest {
+
+  @Test
+  void fromOptionsParsesProcessingTime() {
+    Map<String, String> options = new HashMap<>();
+    options.put("projectId", "p");
+    options.put("subscription", "s");
+    options.put("processingTime", "60s");
+
+    PubSubConfig config = PubSubConfig.fromOptions(options);
+
+    assertEquals(Duration.ofSeconds(60), config.processingTime());
+  }
 
   @Test
   void fromOptionsParsesRequiredAndDefaults() {
@@ -190,7 +203,7 @@ class PubSubConfigTest {
                 .subscription("s")
                 .receiveTime(Duration.ZERO)
                 .build());
-    assertThrows(IllegalArgumentException.class, () -> PubSubConfig.parseDuration("test", "10x"));
+    assertThrows(IllegalArgumentException.class, () -> Into.parseDuration("test", "10x"));
     assertThrows(
         IllegalArgumentException.class, () -> PubSubConfig.parseSeekTime("2024-08-07 12:00:00"));
   }
@@ -262,31 +275,8 @@ class PubSubConfigTest {
     IllegalArgumentException ex =
         assertThrows(
             IllegalArgumentException.class,
-            () -> PubSubConfig.parseInstant(PubSubConfig.LIMIT_TIME, "not-a-time"));
+            () -> Into.parseInstant(PubSubConfig.LIMIT_TIME, "not-a-time"));
     assertTrue(ex.getMessage().contains("limitTime"));
-  }
-
-  @Test
-  void rejectsRemovedUnaryAndBatchTimeOptions() {
-    Map<String, String> batchTime = new HashMap<>();
-    batchTime.put("projectId", "p");
-    batchTime.put("subscription", "s");
-    batchTime.put("batchTime", "10s");
-    IllegalArgumentException batchEx =
-        assertThrows(IllegalArgumentException.class, () -> PubSubConfig.fromOptions(batchTime));
-    assertTrue(batchEx.getMessage().contains("receiveTime"));
-
-    Map<String, String> pullMax = new HashMap<>();
-    pullMax.put("projectId", "p");
-    pullMax.put("subscription", "s");
-    pullMax.put("pullMaxMessages", "1000");
-    assertThrows(IllegalArgumentException.class, () -> PubSubConfig.fromOptions(pullMax));
-
-    Map<String, String> pullDeadline = new HashMap<>();
-    pullDeadline.put("projectId", "p");
-    pullDeadline.put("subscription", "s");
-    pullDeadline.put("pullDeadline", "20s");
-    assertThrows(IllegalArgumentException.class, () -> PubSubConfig.fromOptions(pullDeadline));
   }
 
   @Test

@@ -231,7 +231,7 @@ final class PubSubMicroBatchStream
                 : gatherMessagesUntilDeadline(limits);
     long gatherFinished = System.nanoTime();
 
-    this.autoBatchTime.onGatherFinished(gatherFinished - gatherStarted, !pulled.isEmpty());
+    this.autoBatchTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
     return pulled;
   }
 

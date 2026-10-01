@@ -15,6 +15,11 @@ final class PubSubMetadataColumn implements MetadataColumn {
   }
 
   @Override
+  public String toString() {
+    return name + ":" + dataType + (nullable ? "?" : "");
+  }
+
+  @Override
   public String name() {
     return name;
   }

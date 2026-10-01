@@ -25,8 +25,8 @@ Authentication uses **Application Default Credentials (ADC)** unless you set `cr
 
 | Spark   | Scala | Artifact                                                     |
 |---------|-------|--------------------------------------------------------------|
-| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.1` |
-| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.9.1` |
+| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.2` |
+| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.9.2` |
 
 Prefer `--packages` or a Maven/Gradle dependency so Google client libraries come in as transitives.
 Fat JARs (`*-all.jar`) are not on Maven Central; build with `mvn package` or download them from
@@ -92,6 +92,7 @@ Full script: [`examples/python/structured_streaming_example.py`](examples/python
 | `ackDeadline` | auto (`3 ×` batch interval, seed 180s) | Lease step; Subscriber renews until Spark commits. Omit to infer. |
 | `gatherMode` | `batch` | `batch` collects until `receiveTime` / caps; `pull` returns a batch as soon as messages arrive |
 | `receiveTime` | auto | How long this batch may take from the queue. Omit with `Trigger.ProcessingTime` |
+| `processingTime` | | Spark `Trigger.ProcessingTime` duration (e.g. `60s`). When `receiveTime` is auto, sets the batch interval hint so startup probe gaps are not mistaken for the trigger |
 | `batchSize` | `64m` | Max payload bytes per batch and Subscriber outstanding bytes. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
 | `batchCount` | | Max messages per batch. Capped by Spark `maxRowsPerTrigger` |
 | `numWriters` | `1` | Spark tasks per micro-batch; integer ≥1 or `auto` (driver CPU count) |
@@ -187,7 +188,7 @@ An idle cycle does not start an empty micro-batch, so the sink does not write an
 
 | Spark trigger | What the connector does |
 | :------------ | :---------------------- |
-| `ProcessingTime` | Recommended for 24×7 jobs. Omit `receiveTime`; it is sized from the batch interval so write time still fits. |
+| `ProcessingTime` | Recommended for 24×7 jobs. Omit `receiveTime`; pass the same duration as `processingTime` (or let probe infer a trigger-scale gap ≥45s). Receive is then `interval − write − margin`. |
 | `AvailableNow` | Drain until idle or `limitTime`, then stop. Use for recovery, not a live feed that never goes quiet. |
 | `Once` | Set `receiveTime` yourself. Without it the job can stop before the first receive. |
 | `Continuous` | Not supported. |
@@ -201,36 +202,39 @@ When using `Trigger.AvailableNow` keeps receiving until the batch caps or the qu
 (three empty 1s polls). Set `batchCount` or `batchSize` so a large backlog is split across batches.
 `limitTime` is only valid with this trigger.
 
-### Auto tunning
+### Tuning receiveTime
 
-When to set `receiveTime` yourself:
+**When to set `receiveTime` yourself**
 
-- `Trigger.Once()`
-- A short receive for low latency (more output files)
-- A short receive and a longer batch interval, so the subscription buffers while Spark sleeps
-- Do not set `receiveTime` equal to the batch interval: Spark still needs time to write.
+- `Trigger.Once()` (required — auto tuning does not run the same way)
+- You want lower latency and more, smaller output files
+- You want a **shorter** pull window than the Spark batch interval so messages buffer in Pub/Sub while Spark is idle
+- Do **not** set `receiveTime` equal to the full batch interval — Spark still needs time to run the query and commit the sink
 
-Leave it unset for `Trigger.ProcessingTime` if you are unsure about the best value. The
-connector will infer a sane value following this probe:
+**When to leave `receiveTime` unset**
 
-```mermaid
-flowchart LR
-  probe[PROBE empty micro-batch]
-  seed[batchInterval = idle gap]
-  half[receiveTime = batchInterval / 2]
-  idleRaise[Idle leftover after a micro-batch: re-measure batchInterval once]
-  adjust[Half overrun-shrink or idle-raise by half leftover]
-  freeze[Freeze when stable 5 adjusts min 5 or max 32]
-  probe --> seed --> half --> idleRaise --> adjust --> freeze
-```
+- Recommended for `Trigger.ProcessingTime`, so the connector infer its value (auto tuning).
 
-Each measure calculates `receiveTime` by the gather messages + write output time + an margin of
-1.6% × batch interval, so longer `ProcessingTime` triggers get proportionally longer margin.
-The probe above keeps approximating `receiveTime` until it is unchanged for five consecutive tune
-steps; otherwise it stops at 32 steps with a warning.
+### Auto tuning
 
-When `ackDeadline` omitted is `3 ×` the inferred batch interval (180s at 60s). Subscriber keeps extending
-until commit. `maxRetryTime` omitted is `min(90s, ackDeadline)`.
+The connector learns the Spark batch interval, then sets each pull window so that **gather + write** fits inside that interval. This is acomplished in the following steps:
+
+1. **Startup** — When the `receiveTime` is omitted:
+    1. One or more empty micro-batches measure idle time between Spark triggers (`batchInterval`)
+    2. Gaps under 30s are ignored unless you pass `processingTime` as a hint.
+2. **Steady state** — In each micro-batch:
+    1. Pull from the queue for up to `receiveTime`, or until `batchSize` / `batchCount` caps/parameters.
+    2. Then Spark writes and commits the micro-batch.
+    3. After commit the connector acks the messages in the subscription.
+3. **Tuning** — Before the next micro-batch:
+    1. The next `receiveTime` is adjusted using the formula `receiveTime = batchInterval − writeBudget − margin`.
+    2. The **writeBudget** is conservative at first, but after some cycles it tracks recent commit times once estimates have stabilized.
+    3. The **margin** is infered as: `margin = max(1s, 1/60 batchInterval)`.
+
+#### Related defaults when omitted
+
+- **`ackDeadline`** — about **3×** the inferred batch interval (clamped between 60s and 600s). The subscriber extends leases until Spark commits.
+- **`maxRetryTime`** — `min(90s, ackDeadline)` for ack/nack retries.
 
 ## Performance
 
@@ -241,10 +245,37 @@ until commit. `maxRetryTime` omitted is `min(90s, ackDeadline)`.
 | Fewer files | omit `receiveTime`, keep `numWriters=1`, partition in the application |
 | Recovery drain | `Trigger.AvailableNow`, `seek=snapshot` or `seek=timestamp`, optional `limitTime` |
 
-`numWriters` only splits the already-received batch into Spark tasks. It does not start more
-receive loops.
+### Recommendations
 
 The driver holds payloads, ack ids, and attributes. Leave about 3–5× `batchSize` as heap headroom.
+
+The parameter `numWriters` only splits the already-received batch into Spark tasks.
+It does not start more receive loops.
+
+Notice that the subscription `Oldest Unacked` metric **will not go to zero** while the topic keeps publishing
+and the pipeline holds in-flight batches (pulled, processing, or within Pub/Sub flow-control windows).
+Zero unacked messages is the wrong success criterion; **stable or slowly declining** backlog with
+bounded oldest age is the right one. The workload should trend towards a stable plateau under sustained pull/processing.
+
+Check this example of a workload with micro-batch scheduled at each 60 secs and `batchSize` at 64MiB:
+
+```mermaid
+flowchart LR
+  publish["Topic publish ~1100/s"]
+  subQueue["Subscription backlog"]
+  gather["Connector gather up to receiveTime ~54s"]
+  batchCap["batchSize 64MiB caps msgs ~55k-106k"]
+  sparkBatch["Spark micro-batch ~60s"]
+  parquet["Parquet write ~0.5s"]
+  ack["Ack after commit"]
+  publish --> subQueue
+  subQueue --> gather
+  gather --> batchCap
+  batchCap --> sparkBatch
+  sparkBatch --> parquet
+  parquet --> ack
+  ack --> subQueue
+```
 
 ## Reliability
 
@@ -330,7 +361,7 @@ recovered
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.1 \
+  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.2 \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -339,7 +370,7 @@ gcloud dataproc jobs submit spark \
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.9.1-all.jar \
+  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.9.2-all.jar \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -402,7 +433,7 @@ mvn -Pspark35 -DskipTests package
 
 spark-submit \
   --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
-  --jars target/spark-streaming-google-pubsub_2.12-0.9.1-all.jar \
+  --jars target/spark-streaming-google-pubsub_2.12-0.9.2-all.jar \
   examples/java/JavaStructuredStreamingExample.java \
   YOUR_PROJECT YOUR_SUBSCRIPTION /tmp/pubsub-cp /tmp/pubsub-out
 ```

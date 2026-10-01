@@ -16,6 +16,11 @@ final class PubSubScan implements Scan {
   }
 
   @Override
+  public String toString() {
+    return description();
+  }
+
+  @Override
   public StructType readSchema() {
     return readSchema;
   }

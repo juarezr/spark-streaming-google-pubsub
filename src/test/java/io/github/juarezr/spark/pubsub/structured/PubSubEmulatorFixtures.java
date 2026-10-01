@@ -95,11 +95,29 @@ final class PubSubEmulatorFixtures {
 
   static Publisher newPublisher(EmulatorChannel emulator, String project, String topic)
       throws Exception {
+    return newPublisher(emulator, project, topic, false);
+  }
+
+  /**
+   * Publisher with {@code setEnableMessageOrdering(true)} for messages that set an ordering key.
+   */
+  static Publisher newOrderingPublisher(EmulatorChannel emulator, String project, String topic)
+      throws Exception {
+    return newPublisher(emulator, project, topic, true);
+  }
+
+  static Publisher newPublisher(
+      EmulatorChannel emulator, String project, String topic, boolean enableMessageOrdering)
+      throws Exception {
     ProjectTopicName topicName = ProjectTopicName.of(project, topic);
-    return Publisher.newBuilder(topicName.toString())
-        .setChannelProvider(emulator.channelProvider())
-        .setCredentialsProvider(emulator.credentialsProvider())
-        .build();
+    Publisher.Builder builder =
+        Publisher.newBuilder(topicName.toString())
+            .setChannelProvider(emulator.channelProvider())
+            .setCredentialsProvider(emulator.credentialsProvider());
+    if (enableMessageOrdering) {
+      builder.setEnableMessageOrdering(true);
+    }
+    return builder.build();
   }
 
   static final class EmulatorChannel implements AutoCloseable {

@@ -1,11 +1,10 @@
 package io.github.juarezr.spark.pubsub.structured;
 
-import java.time.Instant;
+import io.github.juarezr.spark.pubsub.common.Into;
 import java.util.List;
 
 /** Oldest and newest Pub/Sub publish times from a gather, for logs and age. */
 final class PublishTimeWindow {
-  static final String NONE = "none";
 
   private final long oldestMillis;
   private final long newestMillis;
@@ -48,25 +47,11 @@ final class PublishTimeWindow {
   }
 
   String oldestIso() {
-    return formatIso(oldestMillis);
+    return Into.timeIso(oldestMillis);
   }
 
   String newestIso() {
-    return formatIso(newestMillis);
-  }
-
-  static String formatIso(Long millis) {
-    if (millis == null) {
-      return NONE;
-    }
-    return formatIso(millis.longValue());
-  }
-
-  static String formatIso(long millis) {
-    if (millis == Long.MIN_VALUE) {
-      return NONE;
-    }
-    return Instant.ofEpochMilli(millis).toString();
+    return Into.timeIso(newestMillis);
   }
 
   String formatStats(long batchId, String prefix) {

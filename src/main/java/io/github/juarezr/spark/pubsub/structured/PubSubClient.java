@@ -224,11 +224,11 @@ final class PubSubClient implements Closeable, Serializable {
         seek.setTime(Timestamp.newBuilder().setSeconds(0).setNanos(0).build());
         break;
       case TIMESTAMP:
-        final Instant instant = this.config.seekTimeAsInstant();
+        final Instant seekInstant = this.config.seekTimeAsInstant();
         final Timestamp seekTime =
             Timestamp.newBuilder()
-                .setSeconds(instant.getEpochSecond())
-                .setNanos(instant.getNano())
+                .setSeconds(seekInstant.getEpochSecond())
+                .setNanos(seekInstant.getNano())
                 .build();
         seek.setTime(seekTime);
         break;
@@ -302,8 +302,9 @@ final class PubSubClient implements Closeable, Serializable {
   }
 
   /**
-   * Wait up to {@code timeout} for the first message, then drain what is already queued up to
-   * {@link #limitNextPoll(int)}. Does not ack.
+   * Wait up to {@code timeout} for messages, up to {@link #limitNextPoll(int)}. When capped, keeps
+   * waiting within the same timeout until the cap is reached or the deadline passes. When uncapped,
+   * waits only for the first message, then drains the queue without blocking. Does not ack.
    */
   List<PulledMessage> poll(Duration timeout) {
     ensureStarted();
@@ -313,15 +314,34 @@ final class PubSubClient implements Closeable, Serializable {
     if (max <= 0) {
       return messages;
     }
+    long deadlineNanos = System.nanoTime() + Math.max(1L, timeout.toNanos());
     try {
-      HeldMessage first = queue.poll(Math.max(1L, timeout.toNanos()), TimeUnit.NANOSECONDS);
+      long waitNanos = deadlineNanos - System.nanoTime();
+      if (waitNanos <= 0L) {
+        return messages;
+      }
+      HeldMessage first = queue.poll(waitNanos, TimeUnit.NANOSECONDS);
       if (first == null) {
         return messages;
       }
       take(first, messages);
-      HeldMessage next;
-      while (messages.size() < max && (next = queue.poll()) != null) {
-        take(next, messages);
+      if (max == Integer.MAX_VALUE) {
+        HeldMessage next;
+        while ((next = queue.poll()) != null) {
+          take(next, messages);
+        }
+      } else {
+        while (messages.size() < max) {
+          waitNanos = deadlineNanos - System.nanoTime();
+          if (waitNanos <= 0L) {
+            break;
+          }
+          HeldMessage next = queue.poll(waitNanos, TimeUnit.NANOSECONDS);
+          if (next == null) {
+            break;
+          }
+          take(next, messages);
+        }
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();

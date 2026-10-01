@@ -65,4 +65,7 @@ service-account.json
 # Local tooling
 .tools/
 .notes/
+*.pdf
+
+## End of the .gitignore file ##
 

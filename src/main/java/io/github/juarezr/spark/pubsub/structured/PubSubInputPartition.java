@@ -19,6 +19,11 @@ final class PubSubInputPartition implements InputPartition {
             : Collections.unmodifiableList(new ArrayList<>(messages));
   }
 
+  @Override
+  public String toString() {
+    return "pubsub=" + messages.size();
+  }
+
   List<PulledMessage> messages() {
     return messages;
   }
