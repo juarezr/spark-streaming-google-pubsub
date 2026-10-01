@@ -1,5 +1,6 @@
 package io.github.juarezr.spark.pubsub.structured;
 
+import io.github.juarezr.spark.pubsub.common.Into;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -36,6 +37,11 @@ final class PulledMessage implements Serializable {
     this.publishTimeMillis = publishTimeMillis;
     this.orderingKey = orderingKey == null ? "" : orderingKey;
     this.ackId = Objects.requireNonNull(ackId, "ackId");
+  }
+
+  @Override
+  public String toString() {
+    return messageId + "@" + Into.timeIso(publishTimeMillis);
   }
 
   String messageId() {

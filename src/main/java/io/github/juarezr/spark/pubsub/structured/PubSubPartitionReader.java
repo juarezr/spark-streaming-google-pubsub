@@ -28,6 +28,11 @@ final class PubSubPartitionReader implements PartitionReader<InternalRow> {
   }
 
   @Override
+  public String toString() {
+    return "pubsub@" + current == null ? "0" : current.toString();
+  }
+
+  @Override
   public boolean next() {
     if (iterator.hasNext()) {
       current = iterator.next();
