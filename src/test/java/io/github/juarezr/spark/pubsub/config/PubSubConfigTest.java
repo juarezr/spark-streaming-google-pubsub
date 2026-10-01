@@ -16,6 +16,20 @@ import org.junit.jupiter.api.Test;
 class PubSubConfigTest {
 
   @Test
+  void fromOptionsIgnoresAutoPlaceholderForProcessingTime() {
+    Map<String, String> options = new HashMap<>();
+    options.put("projectId", "p");
+    options.put("subscription", "s");
+    options.put("processingTime", "auto");
+    options.put("receiveTime", "AUTO");
+
+    PubSubConfig config = PubSubConfig.fromOptions(options);
+
+    assertEquals(null, config.processingTime());
+    assertEquals(null, config.receiveTime());
+  }
+
+  @Test
   void fromOptionsParsesProcessingTime() {
     Map<String, String> options = new HashMap<>();
     options.put("projectId", "p");
