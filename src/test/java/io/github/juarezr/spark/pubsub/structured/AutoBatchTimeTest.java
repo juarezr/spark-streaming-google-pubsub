@@ -202,13 +202,12 @@ class AutoBatchTimeTest {
 
   @Test
   void clampReceiveUsesWriteReserveWhenMeasuredWriteIsTiny() {
+    long writeEstReserve = AutoBatchTime.receiveWriteReserveNanos(Duration.ofSeconds(60).toNanos());
     Duration target =
-        AutoBatchTime.receiveFromWriteEstimate(
-            Duration.ofSeconds(60), Duration.ofSeconds(1).toNanos());
+        AutoBatchTime.receiveFromWriteEstimate(Duration.ofSeconds(60), writeEstReserve);
     assertEquals(Duration.ofSeconds(54), target);
     Duration clamped =
-        AutoBatchTime.clampReceive(
-            Duration.ofSeconds(58), Duration.ofSeconds(60), Duration.ofSeconds(1).toNanos());
+        AutoBatchTime.clampReceive(Duration.ofSeconds(58), Duration.ofSeconds(60), writeEstReserve);
     assertEquals(Duration.ofSeconds(54), clamped);
   }
 
@@ -229,10 +228,32 @@ class AutoBatchTimeTest {
     Duration clamped =
         AutoBatchTime.clampReceive(Duration.ofSeconds(110), Duration.ofSeconds(120), writeEst);
     long margin = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(120).toNanos());
-    long reserve = AutoBatchTime.receiveWriteReserveNanos(Duration.ofSeconds(120).toNanos());
-    long writeForMax = Math.max(writeEst, reserve);
-    long expectedMax = Duration.ofSeconds(120).toNanos() - writeForMax - margin;
+    long expectedMax = Duration.ofSeconds(120).toNanos() - writeEst - margin;
     assertEquals(Duration.ofNanos(expectedMax), clamped);
+  }
+
+  @Test
+  void deploy10StyleLowMeasuredWriteAfterStableRaisesReceiveAboveFiftyFour() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    long gatherNanos = Duration.ofSeconds(54).toNanos();
+    long writeNanos = Duration.ofMillis(500).toNanos();
+    for (int i = 0; i < 20; i++) {
+      auto.onGatherFinished(gatherNanos, 55_000);
+      now.addAndGet(writeNanos);
+      auto.onCommit();
+      assertFalse(auto.shouldProbe());
+    }
+    assertTrue(auto.receiveFrozen());
+    assertTrue(
+        auto.currentReceive().compareTo(Duration.ofSeconds(55)) >= 0,
+        "receive=" + auto.currentReceive());
+    assertTrue(auto.currentReceive().compareTo(Duration.ofSeconds(58)) <= 0);
   }
 
   @Test

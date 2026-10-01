@@ -31,8 +31,8 @@ import org.slf4j.LoggerFactory;
  *   Auto -> Auto : one idle raise of batchInterval if Spark slept
  *   Auto -> Auto : onCommit: write sample\nreceive = interval − max(write, reserve) − margin
  *   note right of Auto
- *     margin = max(1s, 1.6% interval)
- *     write reserve = max(1s, 5/60 interval)
+ *     margin = max(1s, 1/60 interval)
+ *     write reserve = max(1s, 5/60 interval) until stable; then max(smoothed write + margin, 1s)
  *     rate limit receive step per batch
  *     sanity reset if write estimate biased
  *     INFO log 20 batches after stable
@@ -48,7 +48,7 @@ final class AutoBatchTime {
   static final long SEED_MIN_NANOS = TimeUnit.SECONDS.toNanos(10);
 
   /** Minimum inter-probe gap before accepting inferred Spark batch interval (without hint). */
-  static final long PROBE_INTERVAL_MIN_NANOS = TimeUnit.SECONDS.toNanos(45);
+  static final long PROBE_INTERVAL_MIN_NANOS = TimeUnit.SECONDS.toNanos(30);
 
   static final int PROBE_GAP_SAMPLES = 3;
   static final int CYCLE_SMOOTH_SAMPLES = 5;
@@ -239,8 +239,7 @@ final class AutoBatchTime {
       probeStartedNanos = now;
       lastOffsetStartNanos = now;
       LOG.warn(
-          "AUTO: probeAttempt={} inferred batch interval {} is under 10s; not seeding (keep"
-              + " probing)",
+          "AUTO: probeAttempt={} inferred batch interval < 10s; not seeding (keep probing)",
           probeAttempts,
           format(Duration.ofNanos(gapFromStart)));
       return true;
@@ -255,8 +254,7 @@ final class AutoBatchTime {
     long candidate = maxProbeGapNanos();
     if (candidate < PROBE_INTERVAL_MIN_NANOS) {
       LOG.warn(
-          "AUTO: probeAttempt={} gap {} below trigger-scale minimum {}; keep probing (max sample"
-              + " {})",
+          "AUTO: probeAttempt={} gap {} below trigger-scale min {}; keep probing (max sample {})",
           probeAttempts,
           format(Duration.ofNanos(gapFromStart)),
           format(Duration.ofNanos(PROBE_INTERVAL_MIN_NANOS)),
@@ -465,10 +463,10 @@ final class AutoBatchTime {
     long margin = receiveWriteMarginNanos(intervalNanos);
     runSanityChecks(intervalNanos, margin);
 
-    long writeEst = computeEstimatedWrite(intervalNanos);
-    estimatedWriteNanos = writeEst;
+    long writeBudget = computeEstimatedWrite(intervalNanos);
+    estimatedWriteNanos = writeBudget;
     Duration priorReceive = currentReceive;
-    Duration target = receiveFromWriteEstimate(batchInterval, writeEst);
+    Duration target = receiveFromWriteEstimate(batchInterval, writeBudget);
 
     long priorNanos = priorReceive == null ? 0L : priorReceive.toNanos();
     long targetNanos = target.toNanos();
@@ -479,7 +477,7 @@ final class AutoBatchTime {
       targetNanos = priorNanos - MAX_RECEIVE_STEP_NANOS;
     }
     target = Duration.ofNanos(targetNanos);
-    target = clampReceive(target, batchInterval, writeEst);
+    target = clampReceive(target, batchInterval, writeBudget);
 
     if (priorReceive != null
         && receiveDeltaNanos(priorReceive, target) <= STABLE_RECEIVE_DELTA_NANOS) {
@@ -505,13 +503,13 @@ final class AutoBatchTime {
     long cycle = lastCycleNanos > 0 ? lastCycleNanos : lastGatherNanos + calcWriteTime(now);
     boolean behind = cycle > intervalNanos + margin;
     if (!stabilizedForLogging || postStableLogRemaining > 0 || autoCycles <= STARTUP_LOG_BATCHES) {
-      String hint = processingTimeHint == null ? "-" : format(processingTimeHint);
+      String hint = processingTimeHint == null ? "auto" : format(processingTimeHint);
       LOG.info(
-          "AUTO: write-first gather={} write={} writeEst={} receive {} -> {} cycle={} behind={}"
+          "AUTO: write-first gather={} write={} writeBudget={} receive {} -> {} cycle={} behind={}"
               + " count={} interval={} processingTimeHint={}",
           format(Duration.ofNanos(lastGatherNanos)),
           format(Duration.ofNanos(lastWriteNanos)),
-          format(Duration.ofNanos(writeEst)),
+          format(Duration.ofNanos(writeBudget)),
           format(priorReceive),
           format(currentReceive),
           format(Duration.ofNanos(cycle)),
@@ -524,8 +522,8 @@ final class AutoBatchTime {
       postStableLogRemaining--;
       if (postStableLogRemaining == 0) {
         LOG.info(
-            "AUTO: post-stable logging complete; writeEst={} receive={}",
-            format(Duration.ofNanos(writeEst)),
+            "AUTO: post-stable logging complete; writeBudget={} receive={}",
+            format(Duration.ofNanos(writeBudget)),
             format(currentReceive));
       }
     }
@@ -540,7 +538,7 @@ final class AutoBatchTime {
       }
       if (writeSpikeStreak >= SANITY_STREAK_THRESHOLD) {
         LOG.warn(
-            "AUTO: write {} exceeds 2× writeEst {} for {} batch(es); resetting write samples",
+            "AUTO: write {} exceeds 2x writeBudget {} for {} batch(es); resetting write samples",
             format(Duration.ofNanos(lastWriteNanos)),
             format(Duration.ofNanos(estimatedWriteNanos)),
             writeSpikeStreak);
@@ -555,8 +553,8 @@ final class AutoBatchTime {
       chronicBehindStreak = 0;
     }
 
-    long writeEst = computeEstimatedWrite(intervalNanos);
-    long maxReceive = intervalNanos - writeEst - margin;
+    long writeBudget = computeEstimatedWrite(intervalNanos);
+    long maxReceive = intervalNanos - writeBudget - margin;
     if (chronicBehindStreak >= SANITY_STREAK_THRESHOLD
         && currentReceive != null
         && currentReceive.toNanos() >= maxReceive - STABLE_RECEIVE_DELTA_NANOS) {
@@ -647,7 +645,13 @@ final class AutoBatchTime {
 
   private long computeEstimatedWrite(long intervalNanos) {
     long reserve = receiveWriteReserveNanos(intervalNanos);
-    return Math.max(reserve, smoothedWriteNanos());
+    long smoothed = smoothedWriteNanos();
+    if (stabilizedForLogging && recentWriteCount >= WRITE_SMOOTH_SAMPLES && smoothed > 0L) {
+      long margin = receiveWriteMarginNanos(intervalNanos);
+      long adaptive = smoothed + margin;
+      return Math.max(RECEIVE_WRITE_MARGIN_MIN_NANOS, adaptive);
+    }
+    return Math.max(reserve, smoothed);
   }
 
   private void enterZeroTrigger() {
@@ -685,8 +689,7 @@ final class AutoBatchTime {
   static Duration receiveFromWriteEstimate(Duration batchInterval, long writeEstNanos) {
     long intervalNanos = batchInterval.toNanos();
     long margin = receiveWriteMarginNanos(intervalNanos);
-    long reserve = receiveWriteReserveNanos(intervalNanos);
-    long writeForBudget = Math.max(Math.max(writeEstNanos, 0L), reserve);
+    long writeForBudget = Math.max(writeEstNanos, 0L);
     long floor = receiveFloorNanos(intervalNanos);
     long v = intervalNanos - writeForBudget - margin;
     if (v < floor) {

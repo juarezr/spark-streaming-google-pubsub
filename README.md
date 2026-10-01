@@ -202,35 +202,39 @@ When using `Trigger.AvailableNow` keeps receiving until the batch caps or the qu
 (three empty 1s polls). Set `batchCount` or `batchSize` so a large backlog is split across batches.
 `limitTime` is only valid with this trigger.
 
-### Auto tunning
+### Tuning receiveTime
 
-When to set `receiveTime` yourself:
+**When to set `receiveTime` yourself**
 
-- `Trigger.Once()`
-- A short receive for low latency (more output files)
-- A short receive and a longer batch interval, so the subscription buffers while Spark sleeps
-- Do not set `receiveTime` equal to the batch interval: Spark still needs time to write.
+- `Trigger.Once()` (required — auto tuning does not run the same way)
+- You want lower latency and more, smaller output files
+- You want a **shorter** pull window than the Spark batch interval so messages buffer in Pub/Sub while Spark is idle
+- Do **not** set `receiveTime` equal to the full batch interval — Spark still needs time to run the query and commit the sink
 
-Leave it unset for `Trigger.ProcessingTime` if you are unsure about the best value. The
-connector will infer a sane value following this probe:
+**When to leave `receiveTime` unset**
 
-```mermaid
-flowchart LR
-  probe[PROBE empty micro-batch]
-  seed[batchInterval = idle gap]
-  half[first receive = interval / 2]
-  idleRaise[One idle re-measure of batchInterval]
-  writeFirst[receive = interval minus writeEst minus margin]
-  probe --> seed --> half --> idleRaise --> writeFirst
-```
+- Recommended for `Trigger.ProcessingTime`, so the connector infer its value (auto tuning).
 
-`writeEst` is the max of recent batch write times and a reserve of `max(1s, 5/60 × batch interval)`.
-Idle time inside a trigger window does **not** raise `receiveTime`. Margin is `max(1s, 1.6% ×
-batch interval)`. Receive is rate-limited per batch and can keep adapting when write time changes;
-after estimates stabilize, the driver logs 20 more batches at INFO for analysis.
+### Auto tuning
 
-When `ackDeadline` omitted is `3 ×` the inferred batch interval (180s at 60s). Subscriber keeps extending
-until commit. `maxRetryTime` omitted is `min(90s, ackDeadline)`.
+The connector learns the Spark batch interval, then sets each pull window so that **gather + write** fits inside that interval. This is acomplished in the following steps:
+
+1. **Startup** — When the `receiveTime` is omitted:
+    1. One or more empty micro-batches measure idle time between Spark triggers (`batchInterval`)
+    2. Gaps under 30s are ignored unless you pass `processingTime` as a hint.
+2. **Steady state** — In each micro-batch:
+    1. Pull from the queue for up to `receiveTime`, or until `batchSize` / `batchCount` caps/parameters.
+    2. Then Spark writes and commits the micro-batch.
+    3. After commit the connector acks the messages in the subscription.
+3. **Tuning** — Before the next micro-batch:
+    1. The next `receiveTime` is adjusted using the formula `receiveTime = batchInterval − writeBudget − margin`.
+    2. The **writeBudget** is conservative at first, but after some cycles it tracks recent commit times once estimates have stabilized.
+    3. The **margin** is infered as: `margin = max(1s, 1/60 batchInterval)`.
+
+#### Related defaults when omitted
+
+- **`ackDeadline`** — about **3×** the inferred batch interval (clamped between 60s and 600s). The subscriber extends leases until Spark commits.
+- **`maxRetryTime`** — `min(90s, ackDeadline)` for ack/nack retries.
 
 ## Performance
 
@@ -272,7 +276,6 @@ flowchart LR
   parquet --> ack
   ack --> subQueue
 ```
-
 
 ## Reliability
 
