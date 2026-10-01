@@ -2,11 +2,10 @@ package io.github.juarezr.spark.pubsub.structured;
 
 import com.google.api.core.ApiService.Listener;
 import com.google.api.core.ApiService.State;
-import com.google.api.gax.core.FixedCredentialsProvider;
+import com.google.api.gax.core.CredentialsProvider;
 import com.google.api.gax.rpc.NotFoundException;
 import com.google.api.gax.rpc.PermissionDeniedException;
 import com.google.api.gax.rpc.UnauthenticatedException;
-import com.google.auth.Credentials;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
 import io.grpc.Status;
@@ -68,10 +67,10 @@ final class PubSubConnectionErrors extends Listener implements Serializable {
     return false;
   }
 
-  void verifySubscriptionAccessible(Credentials credentials) throws IOException {
+  void verifySubscriptionAccessible(CredentialsProvider credentialsProvider) throws IOException {
 
     SubscriptionAdminSettings.Builder builder = SubscriptionAdminSettings.newBuilder();
-    builder.setCredentialsProvider(FixedCredentialsProvider.create(credentials));
+    builder.setCredentialsProvider(credentialsProvider);
 
     try (SubscriptionAdminClient admin = SubscriptionAdminClient.create(builder.build())) {
       admin.getSubscription(subscriptionPath);

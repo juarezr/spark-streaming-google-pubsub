@@ -3,8 +3,7 @@ package io.github.juarezr.spark.pubsub.structured;
 import com.google.api.core.ApiService;
 import com.google.api.gax.batching.FlowControlSettings;
 import com.google.api.gax.batching.FlowController;
-import com.google.api.gax.core.FixedCredentialsProvider;
-import com.google.auth.Credentials;
+import com.google.api.gax.core.CredentialsProvider;
 import com.google.cloud.pubsub.v1.AckReplyConsumer;
 import com.google.cloud.pubsub.v1.MessageReceiver;
 import com.google.cloud.pubsub.v1.Subscriber;
@@ -153,31 +152,13 @@ final class PubSubClient implements Closeable, Serializable {
 
     this.emulator = this.config.emulatorHost().map(PubSubEmulator::new).orElse(null);
     try {
-      Credentials credentials = this.credentialsProvider.getCredentials();
+      CredentialsProvider authProvider = this.credentialsProvider.getProvider();
       if (!this.config.emulatorHost().isPresent()) {
-        connectionErrors.verifySubscriptionAccessible(credentials);
+        connectionErrors.verifySubscriptionAccessible(authProvider);
       }
-      applySeekIfNeeded();
+      applySeekIfNeeded(authProvider);
 
-      Subscriber.Builder builder =
-          Subscriber.newBuilder(this.config.subscriptionPath(), new PubSubMessageReceiver());
-      builder.setFlowControlSettings(flowControl());
-
-      long ackExtendSecs = config.effectiveAckDeadline(null).getSeconds();
-      long ackExtendMax = Math.max(60L, ackExtendSecs);
-      org.threeten.bp.Duration ackExtend = org.threeten.bp.Duration.ofSeconds(ackExtendMax);
-      org.threeten.bp.Duration ackMaxPeriod = org.threeten.bp.Duration.ofMinutes(60);
-      builder.setMaxAckExtensionPeriod(ackMaxPeriod);
-      builder.setMaxDurationPerAckExtension(ackExtend);
-
-      if (this.emulator != null) {
-        this.emulator.configureSubscriber(builder);
-      } else {
-        builder.setCredentialsProvider(FixedCredentialsProvider.create(credentials));
-      }
-      this.subscriber = builder.build();
-      this.subscriber.addListener(connectionErrors, MoreExecutors.directExecutor());
-      this.subscriber.startAsync().awaitRunning();
+      startSubscriberAsyncWith(authProvider);
 
       this.connectionErrors.throwIfFatalConnection();
     } catch (Exception e) {
@@ -187,6 +168,29 @@ final class PubSubClient implements Closeable, Serializable {
       }
       throw new IOException("Unable to start Pub/Sub subscriber", e);
     }
+  }
+
+  private void startSubscriberAsyncWith(CredentialsProvider authProvider) {
+
+    Subscriber.Builder builder =
+        Subscriber.newBuilder(this.config.subscriptionPath(), new PubSubMessageReceiver());
+    builder.setFlowControlSettings(flowControl());
+
+    long ackExtendSecs = config.effectiveAckDeadline(null).getSeconds();
+    long ackExtendMax = Math.max(60L, ackExtendSecs);
+    org.threeten.bp.Duration ackExtend = org.threeten.bp.Duration.ofSeconds(ackExtendMax);
+    org.threeten.bp.Duration ackMaxPeriod = org.threeten.bp.Duration.ofMinutes(60);
+    builder.setMaxAckExtensionPeriod(ackMaxPeriod);
+    builder.setMaxDurationPerAckExtension(ackExtend);
+
+    if (this.emulator != null) {
+      this.emulator.configureSubscriber(builder);
+    } else {
+      builder.setCredentialsProvider(authProvider);
+    }
+    this.subscriber = builder.build();
+    this.subscriber.addListener(connectionErrors, MoreExecutors.directExecutor());
+    this.subscriber.startAsync().awaitRunning();
   }
 
   private FlowControlSettings flowControl() {
@@ -204,7 +208,7 @@ final class PubSubClient implements Closeable, Serializable {
     return flow.build();
   }
 
-  private void applySeekIfNeeded() throws IOException {
+  private void applySeekIfNeeded(CredentialsProvider authProvider) throws IOException {
     if (seekApplied || this.config.seekMode() == SeekMode.NONE) {
       return;
     }
@@ -215,8 +219,7 @@ final class PubSubClient implements Closeable, Serializable {
       if (adminEmulator != null) {
         adminEmulator.configureSubscriptionAdmin(builder);
       } else {
-        builder.setCredentialsProvider(
-            FixedCredentialsProvider.create(this.credentialsProvider.getCredentials()));
+        builder.setCredentialsProvider(authProvider);
       }
       try (SubscriptionAdminClient admin = SubscriptionAdminClient.create(builder.build())) {
         LOG.warn(

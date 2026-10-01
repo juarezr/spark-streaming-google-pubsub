@@ -1,5 +1,7 @@
 package io.github.juarezr.spark.pubsub.structured;
 
+import com.google.api.gax.core.CredentialsProvider;
+import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.auth.Credentials;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
@@ -22,7 +24,7 @@ final class PubSubCredentialsProvider implements Serializable {
     this.credentialsFile = credentialsFile;
   }
 
-  Credentials getCredentials() {
+  private Credentials getCredentials() {
     try {
       if (credentialsFile != null && !credentialsFile.isBlank()) {
         try (FileInputStream in = new FileInputStream(credentialsFile)) {
@@ -35,5 +37,10 @@ final class PubSubCredentialsProvider implements Serializable {
     } catch (IOException e) {
       throw new UncheckedIOException("Failed to load Google credentials (ADC or file)", e);
     }
+  }
+
+  CredentialsProvider getProvider() {
+    Credentials credentials = getCredentials();
+    return FixedCredentialsProvider.create(credentials);
   }
 }
