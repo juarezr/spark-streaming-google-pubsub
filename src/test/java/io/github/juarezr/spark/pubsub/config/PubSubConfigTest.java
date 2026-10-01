@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.juarezr.spark.pubsub.common.Into;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
@@ -202,7 +203,7 @@ class PubSubConfigTest {
                 .subscription("s")
                 .receiveTime(Duration.ZERO)
                 .build());
-    assertThrows(IllegalArgumentException.class, () -> PubSubConfig.parseDuration("test", "10x"));
+    assertThrows(IllegalArgumentException.class, () -> Into.parseDuration("test", "10x"));
     assertThrows(
         IllegalArgumentException.class, () -> PubSubConfig.parseSeekTime("2024-08-07 12:00:00"));
   }
@@ -274,7 +275,7 @@ class PubSubConfigTest {
     IllegalArgumentException ex =
         assertThrows(
             IllegalArgumentException.class,
-            () -> PubSubConfig.parseInstant(PubSubConfig.LIMIT_TIME, "not-a-time"));
+            () -> Into.parseInstant(PubSubConfig.LIMIT_TIME, "not-a-time"));
     assertTrue(ex.getMessage().contains("limitTime"));
   }
 

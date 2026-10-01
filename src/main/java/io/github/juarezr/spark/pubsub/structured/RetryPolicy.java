@@ -1,5 +1,6 @@
 package io.github.juarezr.spark.pubsub.structured;
 
+import io.github.juarezr.spark.pubsub.common.Into;
 import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
@@ -94,7 +95,7 @@ final class RetryPolicy {
               suppressedWarnings == 0
                   ? e.toString()
                   : e + " (" + suppressedWarnings + " retry warnings suppressed)";
-          String lastTime = PublishTimeWindow.formatIso(this.lastPublishTimeMillis.getAsLong());
+          String lastTime = Into.timeIso(this.lastPublishTimeMillis.getAsLong());
           LOG.warn(
               FAILURE_ON_ATTEMPT_MSG,
               operation,

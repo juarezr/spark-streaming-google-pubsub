@@ -3,6 +3,7 @@ package io.github.juarezr.spark.pubsub.structured;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+import io.github.juarezr.spark.pubsub.common.Into;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -90,8 +91,8 @@ class PubSubSourceMetricsTest {
     assertEquals(1_000L, window.newestAgeMs(5_000L));
     assertEquals("1970-01-01T00:00:01Z", window.oldestIso());
     assertEquals("1970-01-01T00:00:04Z", window.newestIso());
-    assertEquals("none", PublishTimeWindow.formatIso((Long) null));
-    assertEquals("none", PublishTimeWindow.formatIso(Long.MIN_VALUE));
+    assertEquals("none", Into.timeIso((Long) null));
+    assertEquals("none", Into.timeIso(Long.MIN_VALUE));
     assertNull(PublishTimeWindow.of(List.of()));
     assertNull(PublishTimeWindow.of(null));
   }

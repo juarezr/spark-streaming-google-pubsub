@@ -1,9 +1,9 @@
 package io.github.juarezr.spark.pubsub.config;
 
+import io.github.juarezr.spark.pubsub.common.Into;
 import java.io.Serializable;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.OffsetDateTime;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -153,7 +153,7 @@ public final class PubSubConfig implements Serializable {
       throw new IllegalArgumentException("seek=snapshot requires seekSnapshot");
     }
     if (limitTime != null && !limitTime.isBlank()) {
-      Instant limit = parseInstant(LIMIT_TIME, limitTime);
+      Instant limit = Into.parseInstant(LIMIT_TIME, limitTime);
       if (seekMode == SeekMode.TIMESTAMP) {
         Instant seek = parseSeekTime(seekTime);
         if (!limit.isAfter(seek)) {
@@ -178,11 +178,11 @@ public final class PubSubConfig implements Serializable {
     }
     String maxRetry = first(normalized, "maxretrytime");
     if (maxRetry != null) {
-      b.maxRetryTime(parseDuration(MAX_RETRY_TIME, maxRetry));
+      b.maxRetryTime(Into.parseDuration(MAX_RETRY_TIME, maxRetry));
     }
     String ackDeadline = first(normalized, "ackdeadline");
     if (ackDeadline != null) {
-      b.ackDeadline(parseDuration(ACK_DEADLINE, ackDeadline));
+      b.ackDeadline(Into.parseDuration(ACK_DEADLINE, ackDeadline));
     }
     String gatherMode = first(normalized, "gathermode");
     if (gatherMode != null) {
@@ -190,15 +190,15 @@ public final class PubSubConfig implements Serializable {
     }
     String receiveTime = first(normalized, "receivetime");
     if (receiveTime != null) {
-      b.receiveTime(parseDuration(RECEIVE_TIME, receiveTime));
+      b.receiveTime(Into.parseDuration(RECEIVE_TIME, receiveTime));
     }
     String processingTime = first(normalized, "processingtime");
     if (processingTime != null) {
-      b.processingTime(parseDuration(PROCESSING_TIME, processingTime));
+      b.processingTime(Into.parseDuration(PROCESSING_TIME, processingTime));
     }
     String batchSize = first(normalized, "batchsize");
     if (batchSize != null) {
-      b.batchSize(parseSize(BATCH_SIZE, batchSize));
+      b.batchSize(Into.parseSize(BATCH_SIZE, batchSize));
     }
     String batchCount = first(normalized, "batchcount");
     if (batchCount != null && !batchCount.isBlank()) {
@@ -237,101 +237,8 @@ public final class PubSubConfig implements Serializable {
     return cap.compareTo(lease) <= 0 ? cap : lease;
   }
 
-  static Duration parseDuration(String option, String raw) {
-    if (raw == null || raw.isBlank()) {
-      throw new IllegalArgumentException(option + " must not be blank");
-    }
-    String value = raw.trim().toLowerCase(Locale.ROOT);
-    try {
-      if (value.endsWith("ms")) {
-        return Duration.ofMillis(Long.parseLong(value.substring(0, value.length() - 2)));
-      }
-      if (value.endsWith("s")) {
-        return Duration.ofSeconds(Long.parseLong(value.substring(0, value.length() - 1)));
-      }
-      if (value.endsWith("m")) {
-        return Duration.ofMinutes(Long.parseLong(value.substring(0, value.length() - 1)));
-      }
-      return Duration.ofSeconds(Long.parseLong(value));
-    } catch (ArithmeticException | NumberFormatException e) {
-      throw new IllegalArgumentException(
-          "Invalid " + option + " '" + raw + "'. Use a number with ms, s, or m.", e);
-    }
-  }
-
-  static long parseSize(String option, String raw) {
-    if (raw == null || raw.isBlank()) {
-      return 0L;
-    }
-    String value = raw.trim().toLowerCase(Locale.ROOT);
-    long multiplier = 1L;
-    char suffix = value.charAt(value.length() - 1);
-    if (suffix == 'k' || suffix == 'm' || suffix == 'g') {
-      value = value.substring(0, value.length() - 1);
-      multiplier = suffix == 'k' ? 1024L : suffix == 'm' ? 1024L * 1024L : 1024L * 1024L * 1024L;
-    }
-    try {
-      return Math.multiplyExact(Long.parseLong(value), multiplier);
-    } catch (ArithmeticException | NumberFormatException e) {
-      throw new IllegalArgumentException(
-          "Invalid " + option + " '" + raw + "'. Use bytes or a k, m, or g suffix.", e);
-    }
-  }
-
-  static String formatSize(long size) {
-    if (size <= 0) {
-      return "0";
-    }
-    if (size < 1024) {
-      return size + "B";
-    }
-    if (size < 1024 * 1024) {
-      return (size / 1024) + "KB";
-    }
-    if (size < 1024 * 1024 * 1024) {
-      return (size / 1024 / 1024) + "MB";
-    }
-    if (size < 1024 * 1024 * 1024 * 1024) {
-      return (size / 1024 / 1024 / 1024) + "GB";
-    }
-    if (size < 1024 * 1024 * 1024 * 1024) {
-      return (size / 1024 / 1024 / 1024 / 1024) + "TB";
-    }
-    return size + "B";
-  }
-
-  public static String formatCount(long size) {
-    if (size < 1024 * 1024) {
-      return (size / 1024) + "K";
-    }
-    if (size < 1024 * 1024 * 1024) {
-      return (size / 1024 / 1024) + "M";
-    }
-    if (size < 1024 * 1024 * 1024 * 1024) {
-      return (size / 1024 / 1024 / 1024) + "G";
-    }
-    if (size < 1024 * 1024 * 1024 * 1024) {
-      return (size / 1024 / 1024 / 1024 / 1024) + "T";
-    }
-    return size + "";
-  }
-
   static Instant parseSeekTime(String raw) {
-    return parseInstant(SEEK_TIME, raw);
-  }
-
-  static Instant parseInstant(String option, String raw) {
-    String value = raw == null ? "" : raw.trim();
-    try {
-      if (!value.isEmpty() && value.chars().allMatch(Character::isDigit)) {
-        return Instant.ofEpochMilli(Long.parseLong(value));
-      }
-      return OffsetDateTime.parse(value).toInstant();
-    } catch (Exception e) {
-      throw new IllegalArgumentException(
-          "Invalid " + option + " '" + raw + "'. Use epoch milliseconds or RFC-3339 with Z/offset.",
-          e);
-    }
+    return Into.parseInstant(SEEK_TIME, raw);
   }
 
   private static String first(Map<String, String> map, String... keys) {
@@ -446,7 +353,7 @@ public final class PubSubConfig implements Serializable {
 
   /** Parsed {@link #limitTime()} value; empty when unset. */
   public Optional<Instant> limitTimeAsInstant() {
-    return limitTime().map(t -> parseInstant(LIMIT_TIME, t));
+    return limitTime().map(t -> Into.parseInstant(LIMIT_TIME, t));
   }
 
   public Optional<String> credentialsFile() {
@@ -489,8 +396,8 @@ public final class PubSubConfig implements Serializable {
   }
 
   String startupSummary() {
-    String receive = receiveTime == null ? "auto" : formatDuration(receiveTime);
-    String size = batchSize <= 0 ? "off" : formatSize(batchSize);
+    String receive = Into.elapsed(receiveTime, "auto");
+    String size = batchSize <= 0 ? "off" : Into.abrevBytes(batchSize);
     String count = batchCount <= 0 ? "off" : Long.toString(batchCount);
     StringBuilder line = new StringBuilder();
     line.append("gatherMode=")
@@ -498,11 +405,11 @@ public final class PubSubConfig implements Serializable {
         .append(" receiveTime=")
         .append(receive)
         .append(" processingTime=")
-        .append(processingTime == null ? "-" : formatDuration(processingTime))
+        .append(Into.elapsed(processingTime, "auto"))
         .append(" ackDeadline=")
-        .append(ackDeadline == null ? "auto" : formatDuration(ackDeadline))
+        .append(Into.elapsed(ackDeadline, "auto"))
         .append(" maxRetryTime=")
-        .append(formatDuration(maxRetryTime))
+        .append(Into.elapsed(maxRetryTime))
         .append(" ackMode=")
         .append(ackMode)
         .append(" seek=")
@@ -515,19 +422,6 @@ public final class PubSubConfig implements Serializable {
         .append(count);
     emulatorHost().ifPresent(host -> line.append(" emulatorHost=").append(host));
     return line.toString();
-  }
-
-  private static String formatDuration(Duration duration) {
-    if (duration == null) {
-      return "-";
-    }
-    long ms = duration.toMillis();
-    if (ms % 60000L == 0L) {
-      return (ms / 60000L) + "min";
-    } else if (ms % 1000L == 0L) {
-      return (ms / 1000L) + "s";
-    }
-    return ms + "ms";
   }
 
   public String subscriptionPath() {

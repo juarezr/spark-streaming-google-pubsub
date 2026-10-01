@@ -224,11 +224,11 @@ final class PubSubClient implements Closeable, Serializable {
         seek.setTime(Timestamp.newBuilder().setSeconds(0).setNanos(0).build());
         break;
       case TIMESTAMP:
-        final Instant instant = this.config.seekTimeAsInstant();
+        final Instant seekInstant = this.config.seekTimeAsInstant();
         final Timestamp seekTime =
             Timestamp.newBuilder()
-                .setSeconds(instant.getEpochSecond())
-                .setNanos(instant.getNano())
+                .setSeconds(seekInstant.getEpochSecond())
+                .setNanos(seekInstant.getNano())
                 .build();
         seek.setTime(seekTime);
         break;
