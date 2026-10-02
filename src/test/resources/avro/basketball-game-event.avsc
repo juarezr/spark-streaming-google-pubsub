@@ -1,0 +1,24 @@
+{
+  "type": "record",
+  "name": "BasketballGameEvent",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "gameId", "type": "string"},
+    {"name": "homeTeam", "type": "string"},
+    {"name": "awayTeam", "type": "string"},
+    {"name": "scoringTeam", "type": "string"},
+    {"name": "eventType", "type": "string"},
+    {"name": "points", "type": "int"},
+    {"name": "period", "type": "int"},
+    {"name": "clockMillis", "type": "long"},
+    {"name": "isFastBreak", "type": "boolean"},
+    {"name": "shotDistanceFt", "type": "double"},
+    {"name": "foulCount", "type": "double"},
+    {"name": "playerId", "type": "string"},
+    {"name": "playerName", "type": "string"},
+    {"name": "jersey", "type": "int"},
+    {"name": "lineup", "type": "string"},
+    {"name": "rebounds", "type": "int"},
+    {"name": "assists", "type": "int"}
+  ]
+}

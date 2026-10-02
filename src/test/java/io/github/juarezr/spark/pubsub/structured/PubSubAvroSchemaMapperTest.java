@@ -32,4 +32,17 @@ class PubSubAvroSchemaMapperTest {
     assertThrows(
         IllegalArgumentException.class, () -> PubSubAvroSchemaMapper.toStructType("\"string\""));
   }
+
+  @Test
+  void mapsBasketballGameEventAvro() throws Exception {
+    StructType schema =
+        PubSubAvroSchemaMapper.toStructType(BasketballEventFixtures.avroDefinition());
+    assertTrue(schema.length() >= 10);
+    assertEquals(DataTypes.StringType, schema.apply("gameId").dataType());
+    assertEquals(DataTypes.IntegerType, schema.apply("points").dataType());
+    assertEquals(DataTypes.StringType, schema.apply("eventType").dataType());
+    assertEquals(DataTypes.StringType, schema.apply("playerId").dataType());
+    assertEquals(DataTypes.IntegerType, schema.apply("rebounds").dataType());
+    assertEquals(DataTypes.StringType, schema.apply("lineup").dataType());
+  }
 }
