@@ -11,9 +11,9 @@ import org.apache.spark.sql.connector.read.streaming.Offset;
  * StreamingQueryProgress} / Spark UI. Does not call Pub/Sub admin or Cloud Monitoring.
  */
 final class PubSubSourceMetrics {
-  static final String LAST_PULL_MESSAGE_COUNT = "lastPullMessageCount";
-  static final String LAST_PULL_PAYLOAD_BYTES = "lastPullPayloadBytes";
-  static final String LAST_PULL_MESSAGE_AGE_MS = "lastPullMessageAgeMs";
+  static final String LAST_GATHER_MESSAGE_COUNT = "lastGatherMessageCount";
+  static final String LAST_GATHER_PAYLOAD_BYTES = "lastGatherPayloadBytes";
+  static final String LAST_GATHER_NEWEST_MESSAGE_AGE_MS = "lastGatherNewestMessageAgeMs";
   static final String OUTSTANDING_PAYLOAD_BYTES = "outstandingPayloadBytes";
   static final String LAST_PRODUCED_BATCH_ID = "lastProducedBatchId";
   static final String LAST_CONSUMED_BATCH_ID = "lastConsumedBatchId";
@@ -24,20 +24,22 @@ final class PubSubSourceMetrics {
   private PubSubSourceMetrics() {}
 
   static Map<String, String> snapshot(
-      int lastPullMessageCount,
-      long lastPullPayloadBytes,
-      Long lastPullMessageAgeMs,
+      int lastGatherMessageCount,
+      long lastGatherPayloadBytes,
+      Long lastGatherNewestMessageAgeMs,
       long outstandingPayloadBytes,
       Long lastProducedBatchId,
       Optional<Offset> latestConsumedOffset,
       long pubsubRetryAttempts,
       long pubsubRetryAttemptsTotal) {
     Map<String, String> metrics = new LinkedHashMap<>();
-    metrics.put(LAST_PULL_MESSAGE_COUNT, Integer.toString(lastPullMessageCount));
-    metrics.put(LAST_PULL_PAYLOAD_BYTES, Long.toString(lastPullPayloadBytes));
+    metrics.put(LAST_GATHER_MESSAGE_COUNT, Integer.toString(lastGatherMessageCount));
+    metrics.put(LAST_GATHER_PAYLOAD_BYTES, Long.toString(lastGatherPayloadBytes));
     metrics.put(
-        LAST_PULL_MESSAGE_AGE_MS,
-        lastPullMessageAgeMs == null ? ABSENT_BATCH_ID : Long.toString(lastPullMessageAgeMs));
+        LAST_GATHER_NEWEST_MESSAGE_AGE_MS,
+        lastGatherNewestMessageAgeMs == null
+            ? ABSENT_BATCH_ID
+            : Long.toString(lastGatherNewestMessageAgeMs));
     metrics.put(OUTSTANDING_PAYLOAD_BYTES, Long.toString(outstandingPayloadBytes));
     metrics.put(
         LAST_PRODUCED_BATCH_ID,

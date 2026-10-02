@@ -57,7 +57,7 @@ final class RetryPolicy {
 
   /**
    * Same as {@link #execute(String, RetryableCallable)} but the retry window cannot exceed {@code
-   * budget} (used by Pull so retries cannot outlive remaining gather).
+   * budget} so retries cannot outlive the remaining gather window.
    */
   <T> T execute(String operation, RetryableCallable<T> callable, Duration budget) {
     long budgetMs = this.maxRetryTimeMs;

@@ -56,7 +56,7 @@ class AdmissionLimitsTest {
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .gatherMode(GatherMode.PULL)
+            .gatherMode(GatherMode.IMMEDIATE)
             .batchCount(0)
             .batchSize(0)
             .receiveTime(Duration.ofSeconds(10))
@@ -69,38 +69,38 @@ class AdmissionLimitsTest {
     assertEquals(200L, limits.maxRows());
     assertEquals(50L, limits.minRows());
     assertEquals(Duration.ofMillis(2_000), limits.waitTime());
-    assertFalse(limits.singlePull());
+    assertFalse(limits.singlePoll());
     assertTrue(limits.minRowsMet(50));
     assertFalse(limits.minRowsMet(49));
   }
 
   @Test
-  void pullModeWithoutMinRowsIsASinglePull() {
+  void immediateModeWithoutMinRowsIsASinglePoll() {
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .gatherMode(GatherMode.PULL)
+            .gatherMode(GatherMode.IMMEDIATE)
             .batchSize(0)
             .build();
     AdmissionLimits limits = AdmissionLimits.from(config, ReadLimit.maxRows(10));
 
-    assertTrue(limits.singlePull());
+    assertTrue(limits.singlePoll());
   }
 
   @Test
-  void drainUntilIdleDisablesSinglePull() {
+  void drainUntilIdleDisablesSinglePoll() {
     PubSubConfig config =
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .gatherMode(GatherMode.PULL)
+            .gatherMode(GatherMode.IMMEDIATE)
             .batchSize(0)
             .build();
     AdmissionLimits limits =
         AdmissionLimits.from(config, ReadLimit.maxRows(10)).withDrainUntilIdle();
 
-    assertFalse(limits.singlePull());
+    assertFalse(limits.singlePoll());
     assertTrue(limits.drainUntilIdle());
   }
 }

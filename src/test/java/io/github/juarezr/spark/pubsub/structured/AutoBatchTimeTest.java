@@ -43,7 +43,11 @@ class AutoBatchTimeTest {
   @Test
   void pullModeDoesNotProbeWhenReceiveTimeOmitted() {
     PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .gatherMode(GatherMode.IMMEDIATE)
+            .build();
     AutoBatchTime auto = AutoBatchTime.create(config);
 
     assertEquals(AutoBatchTime.Mode.FIXED, auto.mode());

@@ -47,9 +47,9 @@ final class PubSubMicroBatchStream
   private final PubSubClient client;
   private final AckCoordinator ackCoordinator;
   private final AtomicLong nextBatchId = new AtomicLong(0);
-  private final AtomicInteger lastPullMessageCount = new AtomicInteger(0);
-  private final AtomicLong lastPullPayloadBytes = new AtomicLong(0);
-  private volatile Long lastPullMessageAgeMs;
+  private final AtomicInteger lastGatherMessageCount = new AtomicInteger(0);
+  private final AtomicLong lastGatherPayloadBytes = new AtomicLong(0);
+  private volatile Long lastGatherNewestMessageAgeMs;
   private final AtomicLong lastReportedRetryAttempts = new AtomicLong(0);
   private final int numPartitions;
   private volatile PubSubOffset lastProduced;
@@ -182,7 +182,7 @@ final class PubSubMicroBatchStream
     try {
       if (config.ackMode() == AckMode.AFTER_COMMIT) {
         ackCoordinator.registerBatch(batchKey, pulled);
-      } else if (config.gatherMode() == GatherMode.PULL) {
+      } else if (config.gatherMode() == GatherMode.IMMEDIATE) {
         ackCoordinator.registerBatch(batchKey, pulled);
         ackCoordinator.onPulled(client, batchKey);
       }
@@ -200,16 +200,16 @@ final class PubSubMicroBatchStream
 
   private void updateMetrics(List<PulledMessage> pulled, long batchId) {
     if (pulled == null) {
-      this.lastPullMessageCount.set(0);
-      this.lastPullPayloadBytes.set(0);
-      this.lastPullMessageAgeMs = null;
+      this.lastGatherMessageCount.set(0);
+      this.lastGatherPayloadBytes.set(0);
+      this.lastGatherNewestMessageAgeMs = null;
     } else {
       final int pulledSize = pulled.size();
       final long pulledBytes = PulledMessage.payloadBytes(pulled);
-      this.lastPullMessageCount.set(pulledSize);
-      this.lastPullPayloadBytes.set(pulledBytes);
+      this.lastGatherMessageCount.set(pulledSize);
+      this.lastGatherPayloadBytes.set(pulledBytes);
       long now = System.currentTimeMillis();
-      this.lastPullMessageAgeMs = PubSubSourceMetrics.newestMessageAgeMs(pulled, now);
+      this.lastGatherNewestMessageAgeMs = PubSubSourceMetrics.newestMessageAgeMs(pulled, now);
       LOG.debug(
           "BATCH: micro-batch batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
     }
@@ -225,8 +225,8 @@ final class PubSubMicroBatchStream
     List<PulledMessage> pulled =
         limits.drainUntilIdle()
             ? gatherUntilIdleOrMax(limits)
-            : limits.singlePull()
-                ? gatherMessagesFromSinglePull(limits)
+            : limits.singlePoll()
+                ? gatherMessagesFromSinglePoll(limits)
                 : gatherMessagesUntilDeadline(limits);
     long gatherFinished = System.nanoTime();
 
@@ -234,7 +234,7 @@ final class PubSubMicroBatchStream
     return pulled;
   }
 
-  private List<PulledMessage> gatherMessagesFromSinglePull(AdmissionLimits limits) {
+  private List<PulledMessage> gatherMessagesFromSinglePoll(AdmissionLimits limits) {
 
     List<PulledMessage> messages = new ArrayList<>();
     if (gatherAborted()) {
@@ -292,7 +292,7 @@ final class PubSubMicroBatchStream
         if (limits.reachedMax(messages.size(), payloadBytes)) {
           break;
         }
-        if (config.gatherMode() == GatherMode.PULL && limits.minRowsMet(messages.size())) {
+        if (config.gatherMode() == GatherMode.IMMEDIATE && limits.minRowsMet(messages.size())) {
           break;
         }
       }
@@ -508,9 +508,9 @@ final class PubSubMicroBatchStream
     final long retryThisBatch =
         PubSubSourceMetrics.retryAttemptsThisBatch(retryTotal, reportedTotal);
     return PubSubSourceMetrics.snapshot(
-        lastPullMessageCount.get(),
-        lastPullPayloadBytes.get(),
-        lastPullMessageAgeMs,
+        lastGatherMessageCount.get(),
+        lastGatherPayloadBytes.get(),
+        lastGatherNewestMessageAgeMs,
         client.outstandingBytes(),
         producedBatchId,
         latestConsumedOffset,
@@ -523,12 +523,12 @@ final class PubSubMicroBatchStream
     PubSubOffset endOffset = (PubSubOffset) end;
     List<PulledMessage> messages = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
     if (messages.isEmpty()) {
-      int pulled = lastPullMessageCount.get();
-      if (pulled > 0) {
+      int gathered = lastGatherMessageCount.get();
+      if (gathered > 0) {
         LOG.warn(
-            "BATCH: planInputPartitions batchId={} has 0 messages but lastPullMessageCount={}",
+            "BATCH: planInputPartitions batchId={} has 0 messages but lastGatherMessageCount={}",
             endOffset.batchId(),
-            pulled);
+            gathered);
       }
       return new InputPartition[] {new PubSubInputPartition(messages)};
     }

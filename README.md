@@ -16,8 +16,8 @@ Read a subscription into Structured Streaming with `.format("google-pubsub")`.
 - Structured Streaming source (`google-pubsub`)
 - At-least-once delivery by default (`ackMode=afterCommit`)
 - No subscription rewind on restart unless you set `seek`
-- Streaming-pull subscriber on the driver, queue polling with `batch` or low-latency `gatherMode`,
-  retries, and subscriber-side ack-lease renewal for long-running jobs
+- Streaming-pull subscriber on the driver, queue polling with `gatherMode=batch` or low-latency
+  `gatherMode=immediate`, retries, and subscriber-side ack-lease renewal for long-running jobs
 - Spark **3.5** (Scala 2.12) and Spark **4.0–4.2** (Scala 2.13), including Dataproc **2.3** and **3.0**
 
 Authentication uses **Application Default Credentials (ADC)** unless you set `credentialsFile`.
@@ -91,7 +91,7 @@ Full script: [`examples/python/structured_streaming_example.py`](examples/python
 | `maxRetryTime` | `min(90s, ackDeadline)` | Retry budget for ack and nack RPCs. Omit to clamp. |
 | `ackMode` | `afterCommit` | `afterCommit` or `early` |
 | `ackDeadline` | auto (`3 ×` batch interval, seed 180s) | Lease step; Subscriber renews until Spark commits. Omit to infer. |
-| `gatherMode` | `batch` | `batch` collects until `receiveTime` / caps; `pull` returns a batch as soon as messages arrive |
+| `gatherMode` | `batch` | `batch` collects until `receiveTime` / caps; `immediate` returns a batch as soon as messages arrive (`pull` is a deprecated alias) |
 | `receiveTime` | auto | How long this batch may take from the queue. Omit with `Trigger.ProcessingTime` |
 | `processingTime` | | Spark `Trigger.ProcessingTime` duration (e.g. `60s`). When `receiveTime` is auto, sets the batch interval hint so startup probe gaps are not mistaken for the trigger |
 | `batchSize` | `64m` | Max payload bytes per batch and Subscriber outstanding bytes. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
@@ -197,7 +197,7 @@ An idle cycle does not start an empty micro-batch, so the sink does not write an
 | Connector gatherMode | What the connector does |
 | :------------------- | :---------------------- |
 | `gatherMode=batch` | Collects from the queue until `receiveTime`, `batchSize`, or `batchCount`. |
-| `gatherMode=pull` | Returns a batch as soon as the queue has messages — lowest latency, more files. |
+| `gatherMode=immediate` | Returns a batch as soon as the queue has messages — lowest latency, more files. |
 
 When using `Trigger.AvailableNow` keeps receiving until the batch caps or the queue looks idle
 (three empty 1s polls). Set `batchCount` or `batchSize` so a large backlog is split across batches.
@@ -242,7 +242,7 @@ write** fits inside that interval. This is accomplished in the following steps:
 
 | Goal | Settings |
 | :--- | :------- |
-| Low latency | `gatherMode=pull`, or a short `receiveTime` (more sink files) |
+| Low latency | `gatherMode=immediate`, or a short `receiveTime` (more sink files) |
 | Higher throughput | `gatherMode=batch`, omit `receiveTime` |
 | Fewer files | omit `receiveTime`, keep `numWriters=1`, partition in the application |
 | Recovery drain | `Trigger.AvailableNow`, `seek=snapshot` or `seek=timestamp`, optional `limitTime` |
@@ -292,8 +292,8 @@ flowchart LR
 
 Watch `StreamingQueryProgress` in the Spark UI:
 
-- `lastPullMessageCount`, `lastPullPayloadBytes`
-- `lastPullMessageAgeMs` — age of the newest message in the last batch (`-` when empty)
+- `lastGatherMessageCount`, `lastGatherPayloadBytes`
+- `lastGatherNewestMessageAgeMs` — age of the newest message in the last gather (`-` when empty)
 - `outstandingPayloadBytes`
 - `lastProducedBatchId`, `lastConsumedBatchId`
 - `pubsubRetryAttempts`, `pubsubRetryAttemptsTotal`

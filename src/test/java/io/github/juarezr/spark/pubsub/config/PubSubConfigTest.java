@@ -228,7 +228,7 @@ class PubSubConfigTest {
     Map<String, String> options = new HashMap<>();
     options.put("projectId", "p");
     options.put("subscription", "s");
-    options.put("gatherMode", "pull");
+    options.put("gatherMode", "immediate");
     options.put("receiveTime", "5000ms");
     options.put("batchSize", "2m");
     options.put("batchCount", "3000");
@@ -236,7 +236,7 @@ class PubSubConfigTest {
 
     PubSubConfig config = PubSubConfig.fromOptions(options);
 
-    assertEquals(GatherMode.PULL, config.gatherMode());
+    assertEquals(GatherMode.IMMEDIATE, config.gatherMode());
     assertEquals(Duration.ofSeconds(5), config.receiveTime());
     assertEquals(2L * 1024 * 1024, config.batchSize());
     assertEquals(3000L, config.batchCount());
