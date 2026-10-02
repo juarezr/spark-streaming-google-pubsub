@@ -6,7 +6,7 @@
 
   <groupId>io.github.juarezr</groupId>
   <artifactId>spark-streaming-google-pubsub_${scala.binary.version}</artifactId>
-  <version>0.9.2-SNAPSHOT</version>
+  <version>0.9.3-SNAPSHOT</version>
   <packaging>jar</packaging>
 
   <name>spark-streaming-google-pubsub</name>
@@ -108,6 +108,12 @@
   </dependencies>
 
   <build>
+    <testResources>
+      <testResource>
+        <directory>src/test/resources</directory>
+        <filtering>false</filtering>
+      </testResource>
+    </testResources>
     <resources>
       <resource>
         <directory>src/main/resources</directory>
@@ -248,59 +254,6 @@
               <goal>check</goal>
             </goals>
             <phase>verify</phase>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-antrun-plugin</artifactId>
-        <version>3.1.0</version>
-        <executions>
-          <execution>
-            <id>generate-spark-profile-test-fingerprint</id>
-            <phase>generate-test-sources</phase>
-            <goals>
-              <goal>run</goal>
-            </goals>
-            <configuration>
-              <target>
-                <mkdir dir="${project.build.directory}/generated-test-sources/spark"/>
-                <echo file="${project.build.directory}/generated-test-sources/spark/SparkProfileFingerprint.java"><![CDATA[package io.github.juarezr.spark.pubsub.testsupport;
-
-/** Generated each build so test classes recompile when the active Spark profile changes. */
-public final class SparkProfileFingerprint {
-  private SparkProfileFingerprint() {}
-
-  public static String sparkVersion() {
-    return "${spark.version}";
-  }
-
-  public static String scalaBinaryVersion() {
-    return "${scala.binary.version}";
-  }
-}
-]]></echo>
-              </target>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>build-helper-maven-plugin</artifactId>
-        <version>3.6.0</version>
-        <executions>
-          <execution>
-            <id>add-spark-profile-test-source</id>
-            <phase>generate-test-sources</phase>
-            <goals>
-              <goal>add-test-source</goal>
-            </goals>
-            <configuration>
-              <sources>
-                <source>${project.build.directory}/generated-test-sources/spark</source>
-              </sources>
-            </configuration>
           </execution>
         </executions>
       </plugin>

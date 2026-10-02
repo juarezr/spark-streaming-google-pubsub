@@ -1,6 +1,5 @@
 package io.github.juarezr.spark.pubsub.structured;
 
-import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.cloud.pubsub.v1.SchemaServiceClient;
 import com.google.cloud.pubsub.v1.SchemaServiceSettings;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
@@ -43,10 +42,10 @@ final class PubSubTopicSchema {
   }
 
   private static StructType fetch(PubSubConfig config) throws IOException {
-    PubSubCredentialsProvider credentials =
+    PubSubCredentialsProvider credentialsProvider =
         new PubSubCredentialsProvider(config.credentialsFile().orElse(null));
-    String topicPath = resolveTopicPath(config, credentials);
-    Topic topic = getTopic(config, credentials, topicPath);
+    String topicPath = resolveTopicPath(config, credentialsProvider);
+    Topic topic = getTopic(config, credentialsProvider, topicPath);
     if (!topic.hasSchemaSettings()) {
       throw new IllegalArgumentException(
           "Topic "
@@ -54,12 +53,12 @@ final class PubSubTopicSchema {
               + " has no schema; schemaMode=dynamic/mixed requires a topic schema");
     }
     SchemaSettings settings = topic.getSchemaSettings();
-    Schema schema = getSchema(config, credentials, settings.getSchema());
+    Schema schema = getSchema(config, credentialsProvider, settings.getSchema());
     return fromTopicSchema(settings.getEncoding(), schema);
   }
 
-  private static String resolveTopicPath(PubSubConfig config, PubSubCredentialsProvider credentials)
-      throws IOException {
+  private static String resolveTopicPath(
+      PubSubConfig config, PubSubCredentialsProvider credentialsProvider) throws IOException {
     if (config.topicPath().isPresent()) {
       return config.topicPath().get();
     }
@@ -68,8 +67,7 @@ final class PubSubTopicSchema {
       if (emulator != null) {
         emulator.configureSubscriptionAdmin(builder);
       } else {
-        builder.setCredentialsProvider(
-            FixedCredentialsProvider.create(credentials.getCredentials()));
+        builder.setCredentialsProvider(credentialsProvider.getProvider());
       }
       try (SubscriptionAdminClient admin = SubscriptionAdminClient.create(builder.build())) {
         return admin.getSubscription(config.subscriptionPath()).getTopic();
@@ -78,15 +76,14 @@ final class PubSubTopicSchema {
   }
 
   private static Topic getTopic(
-      PubSubConfig config, PubSubCredentialsProvider credentials, String topicPath)
+      PubSubConfig config, PubSubCredentialsProvider credentialsProvider, String topicPath)
       throws IOException {
     TopicAdminSettings.Builder builder = TopicAdminSettings.newBuilder();
     try (PubSubEmulator emulator = config.emulatorHost().map(PubSubEmulator::new).orElse(null)) {
       if (emulator != null) {
         emulator.configureTopicAdmin(builder);
       } else {
-        builder.setCredentialsProvider(
-            FixedCredentialsProvider.create(credentials.getCredentials()));
+        builder.setCredentialsProvider(credentialsProvider.getProvider());
       }
       try (TopicAdminClient admin = TopicAdminClient.create(builder.build())) {
         return admin.getTopic(topicPath);
@@ -95,15 +92,14 @@ final class PubSubTopicSchema {
   }
 
   private static Schema getSchema(
-      PubSubConfig config, PubSubCredentialsProvider credentials, String schemaName)
+      PubSubConfig config, PubSubCredentialsProvider credentialsProvider, String schemaName)
       throws IOException {
     SchemaServiceSettings.Builder builder = SchemaServiceSettings.newBuilder();
     try (PubSubEmulator emulator = config.emulatorHost().map(PubSubEmulator::new).orElse(null)) {
       if (emulator != null) {
         emulator.configureSchema(builder);
       } else {
-        builder.setCredentialsProvider(
-            FixedCredentialsProvider.create(credentials.getCredentials()));
+        builder.setCredentialsProvider(credentialsProvider.getProvider());
       }
       try (SchemaServiceClient client = SchemaServiceClient.create(builder.build())) {
         return client.getSchema(schemaName);

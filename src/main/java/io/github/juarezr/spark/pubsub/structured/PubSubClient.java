@@ -3,12 +3,13 @@ package io.github.juarezr.spark.pubsub.structured;
 import com.google.api.core.ApiService;
 import com.google.api.gax.batching.FlowControlSettings;
 import com.google.api.gax.batching.FlowController;
-import com.google.api.gax.core.FixedCredentialsProvider;
+import com.google.api.gax.core.CredentialsProvider;
 import com.google.cloud.pubsub.v1.AckReplyConsumer;
 import com.google.cloud.pubsub.v1.MessageReceiver;
 import com.google.cloud.pubsub.v1.Subscriber;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.protobuf.Timestamp;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.SeekRequest;
@@ -38,10 +39,8 @@ final class PubSubClient implements Closeable, Serializable {
   private static final long serialVersionUID = -3861530486L;
   private static final Logger LOG = LoggerFactory.getLogger(PubSubClient.class);
 
-  /** Pub/Sub Acknowledge / ModifyAckDeadline cap. */
-  static final int ACK_CHUNK = 1000;
-
   private final RetryPolicy retryPolicy;
+  private PubSubConnectionErrors connectionErrors;
   private transient PubSubEmulator emulator;
 
   private final PubSubConfig config;
@@ -146,26 +145,19 @@ final class PubSubClient implements Closeable, Serializable {
     this.queue = new LinkedBlockingQueue<>();
     this.consumers = new ConcurrentHashMap<>();
     this.stopped = new AtomicBoolean(false);
+    this.connectionErrors = new PubSubConnectionErrors(this.config.subscriptionPath());
 
     this.emulator = this.config.emulatorHost().map(PubSubEmulator::new).orElse(null);
     try {
-      applySeekIfNeeded();
-      Subscriber.Builder builder =
-          Subscriber.newBuilder(this.config.subscriptionPath(), new PubSubMessageReceiver());
-      builder.setFlowControlSettings(flowControl());
-      org.threeten.bp.Duration ackExtend =
-          org.threeten.bp.Duration.ofSeconds(
-              Math.max(60L, config.effectiveAckDeadline(null).getSeconds()));
-      builder.setMaxAckExtensionPeriod(org.threeten.bp.Duration.ofMinutes(60));
-      builder.setMaxDurationPerAckExtension(ackExtend);
-      if (this.emulator != null) {
-        this.emulator.configureSubscriber(builder);
-      } else {
-        builder.setCredentialsProvider(
-            FixedCredentialsProvider.create(this.credentialsProvider.getCredentials()));
+      CredentialsProvider authProvider = this.credentialsProvider.providerFor(this.config);
+      if (this.emulator == null) {
+        connectionErrors.verifySubscriptionAccessible(authProvider);
       }
-      this.subscriber = builder.build();
-      this.subscriber.startAsync().awaitRunning();
+      applySeekIfNeeded(authProvider);
+
+      startSubscriberAsyncWith(authProvider);
+
+      this.connectionErrors.throwIfFatalConnection();
     } catch (Exception e) {
       this.close();
       if (e instanceof IOException) {
@@ -173,6 +165,29 @@ final class PubSubClient implements Closeable, Serializable {
       }
       throw new IOException("Unable to start Pub/Sub subscriber", e);
     }
+  }
+
+  private void startSubscriberAsyncWith(CredentialsProvider authProvider) {
+
+    Subscriber.Builder builder =
+        Subscriber.newBuilder(this.config.subscriptionPath(), new PubSubMessageReceiver());
+    builder.setFlowControlSettings(flowControl());
+
+    long ackExtendSecs = config.effectiveAckDeadline(null).getSeconds();
+    long ackExtendMax = Math.max(60L, ackExtendSecs);
+    org.threeten.bp.Duration ackExtend = org.threeten.bp.Duration.ofSeconds(ackExtendMax);
+    org.threeten.bp.Duration ackMaxPeriod = org.threeten.bp.Duration.ofMinutes(60);
+    builder.setMaxAckExtensionPeriod(ackMaxPeriod);
+    builder.setMaxDurationPerAckExtension(ackExtend);
+
+    if (this.emulator != null) {
+      this.emulator.configureSubscriber(builder);
+    } else {
+      builder.setCredentialsProvider(authProvider);
+    }
+    this.subscriber = builder.build();
+    this.subscriber.addListener(connectionErrors, MoreExecutors.directExecutor());
+    this.subscriber.startAsync().awaitRunning();
   }
 
   private FlowControlSettings flowControl() {
@@ -190,7 +205,7 @@ final class PubSubClient implements Closeable, Serializable {
     return flow.build();
   }
 
-  private void applySeekIfNeeded() throws IOException {
+  private void applySeekIfNeeded(CredentialsProvider authProvider) throws IOException {
     if (seekApplied || this.config.seekMode() == SeekMode.NONE) {
       return;
     }
@@ -201,8 +216,7 @@ final class PubSubClient implements Closeable, Serializable {
       if (adminEmulator != null) {
         adminEmulator.configureSubscriptionAdmin(builder);
       } else {
-        builder.setCredentialsProvider(
-            FixedCredentialsProvider.create(this.credentialsProvider.getCredentials()));
+        builder.setCredentialsProvider(authProvider);
       }
       try (SubscriptionAdminClient admin = SubscriptionAdminClient.create(builder.build())) {
         LOG.warn(
@@ -247,6 +261,13 @@ final class PubSubClient implements Closeable, Serializable {
         start();
       } catch (IOException e) {
         throw new IllegalStateException("CONNECTION: Failed to start Pub/Sub client", e);
+      }
+    }
+    if (this.connectionErrors != null) {
+      try {
+        this.connectionErrors.throwIfFatalConnection();
+      } catch (IOException e) {
+        throw new IllegalStateException(e.getMessage(), e);
       }
     }
   }
@@ -367,9 +388,6 @@ final class PubSubClient implements Closeable, Serializable {
   void nack(List<String> ackIds) {
     reply(ackIds, false);
   }
-
-  /** Subscriber renews leases; kept for {@link AckLeaseWatchdog}. */
-  void extendAckDeadline(List<String> ackIds, int deadlineSeconds) {}
 
   private void reply(List<String> ackIds, boolean ack) {
     if (ackIds == null || ackIds.isEmpty()) {

@@ -21,12 +21,12 @@ final class AdmissionLimits {
   private final long maxBytes;
   private final long minRows;
   private final Duration waitTime;
-  private final boolean singlePull;
+  private final boolean singlePoll;
   private final boolean drainUntilIdle;
 
   private AdmissionLimits(
-      long maxRows, long maxBytes, long minRows, Duration waitTime, boolean singlePull) {
-    this(maxRows, maxBytes, minRows, waitTime, singlePull, false);
+      long maxRows, long maxBytes, long minRows, Duration waitTime, boolean singlePoll) {
+    this(maxRows, maxBytes, minRows, waitTime, singlePoll, false);
   }
 
   private AdmissionLimits(
@@ -34,13 +34,13 @@ final class AdmissionLimits {
       long maxBytes,
       long minRows,
       Duration waitTime,
-      boolean singlePull,
+      boolean singlePoll,
       boolean drainUntilIdle) {
     this.maxRows = maxRows;
     this.maxBytes = maxBytes;
     this.minRows = minRows;
     this.waitTime = waitTime;
-    this.singlePull = singlePull;
+    this.singlePoll = singlePoll;
     this.drainUntilIdle = drainUntilIdle;
   }
 
@@ -53,8 +53,8 @@ final class AdmissionLimits {
         && (waitTime == null || spark.maxTriggerDelayMs < waitTime.toMillis())) {
       waitTime = Duration.ofMillis(spark.maxTriggerDelayMs);
     }
-    boolean singlePull = config.gatherMode() == GatherMode.PULL && spark.minRows <= 0;
-    return new AdmissionLimits(maxRows, maxBytes, spark.minRows, waitTime, singlePull);
+    boolean singlePoll = config.gatherMode() == GatherMode.IMMEDIATE && spark.minRows <= 0;
+    return new AdmissionLimits(maxRows, maxBytes, spark.minRows, waitTime, singlePoll);
   }
 
   long maxRows() {
@@ -74,7 +74,7 @@ final class AdmissionLimits {
   }
 
   AdmissionLimits withWaitTime(Duration waitTime) {
-    return new AdmissionLimits(maxRows, maxBytes, minRows, waitTime, singlePull, drainUntilIdle);
+    return new AdmissionLimits(maxRows, maxBytes, minRows, waitTime, singlePoll, drainUntilIdle);
   }
 
   /**
@@ -85,8 +85,8 @@ final class AdmissionLimits {
     return new AdmissionLimits(maxRows, maxBytes, minRows, waitTime, false, true);
   }
 
-  boolean singlePull() {
-    return singlePull;
+  boolean singlePoll() {
+    return singlePoll;
   }
 
   boolean drainUntilIdle() {

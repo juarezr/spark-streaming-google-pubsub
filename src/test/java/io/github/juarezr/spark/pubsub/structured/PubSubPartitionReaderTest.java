@@ -5,12 +5,16 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.juarezr.spark.pubsub.config.MetadataMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import io.github.juarezr.spark.pubsub.config.SchemaMode;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.util.ArrayBasedMapData;
+import org.apache.spark.sql.connector.catalog.MetadataColumn;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
@@ -116,6 +120,88 @@ class PubSubPartitionReaderTest {
     assertTrue(reader.next());
     assertEquals("ack-1", reader.get().getUTF8String(1).toString());
     reader.close();
+  }
+
+  @Test
+  void rawWithFullMetadataReadsAttributesMap() throws Exception {
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .schemaMode(SchemaMode.RAW)
+            .metadataMode(MetadataMode.FULL)
+            .build();
+    StructType table = PubSubSchema.tableSchema(config, null);
+    StructType readSchema =
+        appendMetadataFields(table, PubSubSchema.metadataColumns(config, table));
+    PubSubPartitionReader reader = readerFor(readSchema);
+    assertTrue(reader.next());
+    InternalRow row = reader.get();
+    int attrIndex = readSchema.fieldIndex("attributes");
+    ArrayBasedMapData map = (ArrayBasedMapData) row.getMap(attrIndex);
+    assertTrue(map.numElements() >= 1);
+    reader.close();
+  }
+
+  @Test
+  void slimTableIncludesOrderingKey() throws Exception {
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").schemaMode(SchemaMode.SLIM).build();
+    StructType schema = PubSubSchema.tableSchema(config, null);
+    PubSubPartitionReader reader = readerFor(schema);
+    assertTrue(reader.next());
+    InternalRow row = reader.get();
+    assertEquals("order-1", row.getUTF8String(schema.fieldIndex("orderingkey")).toString());
+    reader.close();
+  }
+
+  @Test
+  void mixedSchemaDecodesPayloadAndEnvelope() throws Exception {
+    StructType payload =
+        new StructType(
+            new StructField[] {
+              new StructField("deviceid", DataTypes.StringType, false, Metadata.empty()),
+              new StructField("eventtime", DataTypes.LongType, false, Metadata.empty())
+            });
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .schemaMode(SchemaMode.MIXED)
+            .build();
+    StructType schema = PubSubSchema.tableSchema(config, payload);
+    PubSubPartitionReader reader = readerFor(schema);
+    assertTrue(reader.next());
+    InternalRow row = reader.get();
+    assertEquals("202315780530", row.getUTF8String(0).toString());
+    assertEquals("id-1", row.getUTF8String(schema.fieldIndex("messageid")).toString());
+    reader.close();
+  }
+
+  @Test
+  void publishTimeColumnNameIsCaseInsensitive() throws Exception {
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              new StructField("PublishTime", DataTypes.TimestampType, false, Metadata.empty())
+            });
+    PubSubPartitionReader reader = readerFor(schema);
+    assertTrue(reader.next());
+    assertEquals(1_700_000_000_000L * 1000L, reader.get().getLong(0));
+    reader.close();
+  }
+
+  private static StructType appendMetadataFields(
+      StructType table, MetadataColumn[] metadataColumns) {
+    List<StructField> fields = new ArrayList<>();
+    for (StructField field : table.fields()) {
+      fields.add(field);
+    }
+    for (MetadataColumn column : metadataColumns) {
+      fields.add(
+          new StructField(column.name(), column.dataType(), column.isNullable(), Metadata.empty()));
+    }
+    return new StructType(fields.toArray(new StructField[0]));
   }
 
   private static PubSubPartitionReader readerFor(StructType schema) {

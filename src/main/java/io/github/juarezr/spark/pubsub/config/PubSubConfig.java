@@ -189,11 +189,11 @@ public final class PubSubConfig implements Serializable {
       b.gatherMode(GatherMode.fromString(gatherMode));
     }
     String receiveTime = first(normalized, "receivetime");
-    if (receiveTime != null) {
+    if (receiveTime != null && !isAutoPlaceholder(receiveTime)) {
       b.receiveTime(Into.parseDuration(RECEIVE_TIME, receiveTime));
     }
     String processingTime = first(normalized, "processingtime");
-    if (processingTime != null) {
+    if (processingTime != null && !isAutoPlaceholder(processingTime)) {
       b.processingTime(Into.parseDuration(PROCESSING_TIME, processingTime));
     }
     String batchSize = first(normalized, "batchsize");
@@ -248,6 +248,10 @@ public final class PubSubConfig implements Serializable {
       }
     }
     return null;
+  }
+
+  private static boolean isAutoPlaceholder(String raw) {
+    return raw != null && "auto".equalsIgnoreCase(raw.trim());
   }
 
   public String projectId() {

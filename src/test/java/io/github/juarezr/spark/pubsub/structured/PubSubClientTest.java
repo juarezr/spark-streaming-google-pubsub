@@ -1,14 +1,18 @@
 package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
+import com.google.api.core.ApiService;
 import com.google.cloud.pubsub.v1.AckReplyConsumer;
 import com.google.cloud.pubsub.v1.Subscriber;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.Collections;
@@ -123,6 +127,25 @@ class PubSubClientTest {
     assertEquals(2, messages.size());
     assertEquals("a", messages.get(0).messageId());
     assertEquals("b", messages.get(1).messageId());
+  }
+
+  @Test
+  void pollThrowsWhenFatalConnectionRecorded() throws Exception {
+    PubSubConfig config = minimalConfig();
+    PubSubClient client = newPubSubClientReadyForPoll();
+    setField(client, "queue", new LinkedBlockingQueue<PubSubClient.HeldMessage>());
+
+    PubSubConnectionErrors connectionErrors = new PubSubConnectionErrors(config.subscriptionPath());
+    setField(client, "connectionErrors", connectionErrors);
+
+    StatusRuntimeException failure =
+        new StatusRuntimeException(Status.NOT_FOUND.withDescription("subscription"));
+    connectionErrors.failed(ApiService.State.FAILED, failure);
+
+    IllegalStateException ex =
+        assertThrows(IllegalStateException.class, () -> client.poll(Duration.ofMillis(10)));
+
+    assertTrue(ex.getMessage().contains("CONNECTION"));
   }
 
   @Test

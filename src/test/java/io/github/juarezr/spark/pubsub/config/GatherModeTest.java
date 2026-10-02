@@ -10,11 +10,11 @@ import org.junit.jupiter.api.Test;
 class GatherModeTest {
 
   @Test
-  void fromStringAcceptsBatchAndPullCaseInsensitive() {
+  void fromStringAcceptsBatchAndImmediateCaseInsensitive() {
     assertEquals(GatherMode.BATCH, GatherMode.fromString("batch"));
     assertEquals(GatherMode.BATCH, GatherMode.fromString("BATCH"));
-    assertEquals(GatherMode.PULL, GatherMode.fromString("pull"));
-    assertEquals(GatherMode.PULL, GatherMode.fromString("  Pull  "));
+    assertEquals(GatherMode.IMMEDIATE, GatherMode.fromString("immediate"));
+    assertEquals(GatherMode.IMMEDIATE, GatherMode.fromString("  Immediate  "));
   }
 
   @Test

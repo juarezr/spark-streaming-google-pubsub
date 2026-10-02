@@ -17,9 +17,9 @@ class PubSubSourceMetricsTest {
   void emptyPullBeforeAnyOffset() {
     Map<String, String> metrics =
         PubSubSourceMetrics.snapshot(0, 0L, null, 0L, null, Optional.empty(), 0L, 0L);
-    assertEquals("0", metrics.get(PubSubSourceMetrics.LAST_PULL_MESSAGE_COUNT));
-    assertEquals("0", metrics.get(PubSubSourceMetrics.LAST_PULL_PAYLOAD_BYTES));
-    assertEquals("-", metrics.get(PubSubSourceMetrics.LAST_PULL_MESSAGE_AGE_MS));
+    assertEquals("0", metrics.get(PubSubSourceMetrics.LAST_GATHER_MESSAGE_COUNT));
+    assertEquals("0", metrics.get(PubSubSourceMetrics.LAST_GATHER_PAYLOAD_BYTES));
+    assertEquals("-", metrics.get(PubSubSourceMetrics.LAST_GATHER_NEWEST_MESSAGE_AGE_MS));
     assertEquals("0", metrics.get(PubSubSourceMetrics.OUTSTANDING_PAYLOAD_BYTES));
     assertEquals("-1", metrics.get(PubSubSourceMetrics.LAST_PRODUCED_BATCH_ID));
     assertEquals("-", metrics.get(PubSubSourceMetrics.LAST_CONSUMED_BATCH_ID));
@@ -32,9 +32,9 @@ class PubSubSourceMetricsTest {
     PubSubOffset consumed = new PubSubOffset(7L);
     Map<String, String> metrics =
         PubSubSourceMetrics.snapshot(1, 3L, 250L, 3L, 7L, Optional.of(consumed), 1L, 4L);
-    assertEquals("1", metrics.get(PubSubSourceMetrics.LAST_PULL_MESSAGE_COUNT));
-    assertEquals("3", metrics.get(PubSubSourceMetrics.LAST_PULL_PAYLOAD_BYTES));
-    assertEquals("250", metrics.get(PubSubSourceMetrics.LAST_PULL_MESSAGE_AGE_MS));
+    assertEquals("1", metrics.get(PubSubSourceMetrics.LAST_GATHER_MESSAGE_COUNT));
+    assertEquals("3", metrics.get(PubSubSourceMetrics.LAST_GATHER_PAYLOAD_BYTES));
+    assertEquals("250", metrics.get(PubSubSourceMetrics.LAST_GATHER_NEWEST_MESSAGE_AGE_MS));
     assertEquals("3", metrics.get(PubSubSourceMetrics.OUTSTANDING_PAYLOAD_BYTES));
     assertEquals("7", metrics.get(PubSubSourceMetrics.LAST_PRODUCED_BATCH_ID));
     assertEquals("7", metrics.get(PubSubSourceMetrics.LAST_CONSUMED_BATCH_ID));

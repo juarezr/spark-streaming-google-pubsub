@@ -26,9 +26,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Pull-based micro-batch stream. Progress is tracked with synthetic offsets; the Pub/Sub
- * subscription cursor remains the durable source of truth across process restarts (no rewind unless
- * configured).
+ * Spark micro-batch source that polls a warm streaming-pull {@link PubSubClient} queue (not unary
+ * Pub/Sub Pull RPCs). Progress is tracked with synthetic offsets; the subscription cursor remains
+ * the durable source of truth across process restarts (no rewind unless configured).
  */
 final class PubSubMicroBatchStream
     implements MicroBatchStream, ReportsSourceMetrics, SupportsTriggerAvailableNow {
@@ -46,11 +46,10 @@ final class PubSubMicroBatchStream
   private final StructType readSchema;
   private final PubSubClient client;
   private final AckCoordinator ackCoordinator;
-  private final AckLeaseWatchdog leaseWatchdog = new AckLeaseWatchdog();
   private final AtomicLong nextBatchId = new AtomicLong(0);
-  private final AtomicInteger lastPullMessageCount = new AtomicInteger(0);
-  private final AtomicLong lastPullPayloadBytes = new AtomicLong(0);
-  private volatile Long lastPullMessageAgeMs;
+  private final AtomicInteger lastGatherMessageCount = new AtomicInteger(0);
+  private final AtomicLong lastGatherPayloadBytes = new AtomicLong(0);
+  private volatile Long lastGatherNewestMessageAgeMs;
   private final AtomicLong lastReportedRetryAttempts = new AtomicLong(0);
   private final int numPartitions;
   private volatile PubSubOffset lastProduced;
@@ -143,8 +142,8 @@ final class PubSubMicroBatchStream
   /**
    * Spark 3.5 commits batch N-1 only when constructing batch N. Returning the same {@code
    * lastProduced} after Spark has already accepted it as {@code startOffset} makes {@code
-   * constructNextBatch} see no new data, so {@link #commit} never runs and the query idles while
-   * the watchdog renews the first batch.
+   * constructNextBatch} see no new data, so {@link #commit} never runs and the query idles with the
+   * first batch still uncommitted.
    */
   private Offset latestOffset(Offset startOffset, AdmissionLimits limits, boolean nullIfEmpty) {
 
@@ -183,7 +182,7 @@ final class PubSubMicroBatchStream
     try {
       if (config.ackMode() == AckMode.AFTER_COMMIT) {
         ackCoordinator.registerBatch(batchKey, pulled);
-      } else if (config.gatherMode() == GatherMode.PULL) {
+      } else if (config.gatherMode() == GatherMode.IMMEDIATE) {
         ackCoordinator.registerBatch(batchKey, pulled);
         ackCoordinator.onPulled(client, batchKey);
       }
@@ -201,16 +200,16 @@ final class PubSubMicroBatchStream
 
   private void updateMetrics(List<PulledMessage> pulled, long batchId) {
     if (pulled == null) {
-      this.lastPullMessageCount.set(0);
-      this.lastPullPayloadBytes.set(0);
-      this.lastPullMessageAgeMs = null;
+      this.lastGatherMessageCount.set(0);
+      this.lastGatherPayloadBytes.set(0);
+      this.lastGatherNewestMessageAgeMs = null;
     } else {
       final int pulledSize = pulled.size();
       final long pulledBytes = PulledMessage.payloadBytes(pulled);
-      this.lastPullMessageCount.set(pulledSize);
-      this.lastPullPayloadBytes.set(pulledBytes);
+      this.lastGatherMessageCount.set(pulledSize);
+      this.lastGatherPayloadBytes.set(pulledBytes);
       long now = System.currentTimeMillis();
-      this.lastPullMessageAgeMs = PubSubSourceMetrics.newestMessageAgeMs(pulled, now);
+      this.lastGatherNewestMessageAgeMs = PubSubSourceMetrics.newestMessageAgeMs(pulled, now);
       LOG.debug(
           "BATCH: micro-batch batchId={} messages={} bytes={}", batchId, pulledSize, pulledBytes);
     }
@@ -226,8 +225,8 @@ final class PubSubMicroBatchStream
     List<PulledMessage> pulled =
         limits.drainUntilIdle()
             ? gatherUntilIdleOrMax(limits)
-            : limits.singlePull()
-                ? gatherMessagesFromSinglePull(limits)
+            : limits.singlePoll()
+                ? gatherMessagesFromSinglePoll(limits)
                 : gatherMessagesUntilDeadline(limits);
     long gatherFinished = System.nanoTime();
 
@@ -235,7 +234,7 @@ final class PubSubMicroBatchStream
     return pulled;
   }
 
-  private List<PulledMessage> gatherMessagesFromSinglePull(AdmissionLimits limits) {
+  private List<PulledMessage> gatherMessagesFromSinglePoll(AdmissionLimits limits) {
 
     List<PulledMessage> messages = new ArrayList<>();
     if (gatherAborted()) {
@@ -259,7 +258,7 @@ final class PubSubMicroBatchStream
     try {
       while (System.nanoTime() < deadlineNanos) {
         if (gatherAborted()) {
-          return stopLeaseNackAndRelease(messages, null);
+          return abortGatherNackAndRelease(messages, null);
         }
         if (limits.reachedMax(messages.size(), payloadBytes)
             || limits.remainingRows(messages.size()) <= 0) {
@@ -268,7 +267,7 @@ final class PubSubMicroBatchStream
         Duration slice = remainingWait(deadlineNanos);
         List<PulledMessage> pulled = poll(limits, messages.size(), slice);
         if (gatherAborted()) {
-          return stopLeaseNackAndRelease(messages, pulled);
+          return abortGatherNackAndRelease(messages, pulled);
         }
         if (!pulled.isEmpty()) {
           RetainResult retained = retainPolled(messages, pulled, limits, payloadBytes);
@@ -279,7 +278,7 @@ final class PubSubMicroBatchStream
           List<PulledMessage> pulled2 =
               poll(limits, messages.size(), min(RECEIVE_IDLE, remainingWait(deadlineNanos)));
           if (gatherAborted()) {
-            return stopLeaseNackAndRelease(messages, pulled2);
+            return abortGatherNackAndRelease(messages, pulled2);
           }
           if (pulled2.isEmpty()) {
             break;
@@ -293,12 +292,12 @@ final class PubSubMicroBatchStream
         if (limits.reachedMax(messages.size(), payloadBytes)) {
           break;
         }
-        if (config.gatherMode() == GatherMode.PULL && limits.minRowsMet(messages.size())) {
+        if (config.gatherMode() == GatherMode.IMMEDIATE && limits.minRowsMet(messages.size())) {
           break;
         }
       }
     } catch (RuntimeException e) {
-      stopLeaseNackAndRelease(messages, null);
+      abortGatherNackAndRelease(messages, null);
       throw e;
     }
     return messages;
@@ -370,7 +369,7 @@ final class PubSubMicroBatchStream
     try {
       while (true) {
         if (gatherAborted()) {
-          return stopLeaseNackAndRelease(messages, null);
+          return abortGatherNackAndRelease(messages, null);
         }
         if (limits.reachedMax(messages.size(), payloadBytes)
             || limits.remainingRows(messages.size()) <= 0) {
@@ -378,7 +377,7 @@ final class PubSubMicroBatchStream
         }
         List<PulledMessage> pulled = poll(limits, messages.size(), RECEIVE_IDLE);
         if (gatherAborted()) {
-          return stopLeaseNackAndRelease(messages, pulled);
+          return abortGatherNackAndRelease(messages, pulled);
         }
         if (pulled.isEmpty()) {
           emptyStreak++;
@@ -414,7 +413,7 @@ final class PubSubMicroBatchStream
         messages = retained.messages;
       }
     } catch (RuntimeException e) {
-      stopLeaseNackAndRelease(messages, null);
+      abortGatherNackAndRelease(messages, null);
       throw e;
     }
     return messages;
@@ -466,13 +465,12 @@ final class PubSubMicroBatchStream
     return cancelled || Thread.currentThread().isInterrupted();
   }
 
-  private List<PulledMessage> stopLeaseNackAndRelease(
+  private List<PulledMessage> abortGatherNackAndRelease(
       List<PulledMessage> messages, List<PulledMessage> pulled) {
 
     if (pulled != null) {
       messages.addAll(pulled);
     }
-    leaseWatchdog.stop();
     if (config.ackMode() == AckMode.AFTER_COMMIT && !messages.isEmpty()) {
       try {
         client.nack(PulledMessage.ackIds(messages));
@@ -510,9 +508,9 @@ final class PubSubMicroBatchStream
     final long retryThisBatch =
         PubSubSourceMetrics.retryAttemptsThisBatch(retryTotal, reportedTotal);
     return PubSubSourceMetrics.snapshot(
-        lastPullMessageCount.get(),
-        lastPullPayloadBytes.get(),
-        lastPullMessageAgeMs,
+        lastGatherMessageCount.get(),
+        lastGatherPayloadBytes.get(),
+        lastGatherNewestMessageAgeMs,
         client.outstandingBytes(),
         producedBatchId,
         latestConsumedOffset,
@@ -525,12 +523,12 @@ final class PubSubMicroBatchStream
     PubSubOffset endOffset = (PubSubOffset) end;
     List<PulledMessage> messages = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
     if (messages.isEmpty()) {
-      int pulled = lastPullMessageCount.get();
-      if (pulled > 0) {
+      int gathered = lastGatherMessageCount.get();
+      if (gathered > 0) {
         LOG.warn(
-            "BATCH: planInputPartitions batchId={} has 0 messages but lastPullMessageCount={}",
+            "BATCH: planInputPartitions batchId={} has 0 messages but lastGatherMessageCount={}",
             endOffset.batchId(),
-            pulled);
+            gathered);
       }
       return new InputPartition[] {new PubSubInputPartition(messages)};
     }
@@ -571,7 +569,6 @@ final class PubSubMicroBatchStream
   public void commit(Offset end) {
     PubSubOffset endOffset = (PubSubOffset) end;
     String batchKey = Long.toString(endOffset.batchId());
-    leaseWatchdog.stop();
     if (config.ackMode() == AckMode.AFTER_COMMIT) {
       List<PulledMessage> messages = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
       List<String> ackIds = PulledMessage.ackIds(messages);
@@ -617,7 +614,6 @@ final class PubSubMicroBatchStream
   public void stop() {
     cancelled = true;
     try {
-      leaseWatchdog.stop();
       int uncommitted = 0;
       if (lastProduced != null && config.ackMode() == AckMode.AFTER_COMMIT) {
         String batchKey = Long.toString(lastProduced.batchId());

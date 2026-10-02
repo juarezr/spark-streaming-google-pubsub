@@ -12,8 +12,25 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class PubSubConfigTest {
+
+  @Test
+  void fromOptionsIgnoresAutoPlaceholderForProcessingTime() {
+    Map<String, String> options = new HashMap<>();
+    options.put("projectId", "p");
+    options.put("subscription", "s");
+    options.put("processingTime", "auto");
+    options.put("receiveTime", "AUTO");
+
+    PubSubConfig config = PubSubConfig.fromOptions(options);
+
+    assertEquals(null, config.processingTime());
+    assertEquals(null, config.receiveTime());
+  }
 
   @Test
   void fromOptionsParsesProcessingTime() {
@@ -46,6 +63,47 @@ class PubSubConfigTest {
     assertEquals(SchemaMode.BASIC, config.schemaMode());
     assertEquals(MetadataMode.NONE, config.metadataMode());
     assertEquals("projects/my-project/subscriptions/my-sub", config.subscriptionPath());
+  }
+
+  @ParameterizedTest
+  @EnumSource(SchemaMode.class)
+  void fromOptionsParsesEverySchemaMode(SchemaMode mode) {
+    Map<String, String> options = baseOptions();
+    options.put("schemaMode", mode.name().toLowerCase());
+    assertEquals(mode, PubSubConfig.fromOptions(options).schemaMode());
+  }
+
+  @ParameterizedTest
+  @EnumSource(MetadataMode.class)
+  void fromOptionsParsesEveryMetadataMode(MetadataMode mode) {
+    Map<String, String> options = baseOptions();
+    options.put("metadataMode", mode.name().toLowerCase());
+    assertEquals(mode, PubSubConfig.fromOptions(options).metadataMode());
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"MiXeD", "SLIM", "raw", "DYNAMIC"})
+  void fromOptionsSchemaModeIsCaseInsensitive(String schemaMode) {
+    Map<String, String> options = baseOptions();
+    options.put("schemaMode", schemaMode);
+    assertDoesNotThrow(() -> PubSubConfig.fromOptions(options));
+  }
+
+  @Test
+  void fromOptionsBlankSchemaAndMetadataModesUseDefaults() {
+    Map<String, String> options = baseOptions();
+    options.put("schemaMode", "  ");
+    options.put("metadataMode", "");
+    PubSubConfig config = PubSubConfig.fromOptions(options);
+    assertEquals(SchemaMode.BASIC, config.schemaMode());
+    assertEquals(MetadataMode.NONE, config.metadataMode());
+  }
+
+  private static Map<String, String> baseOptions() {
+    Map<String, String> options = new HashMap<>();
+    options.put("projectId", "p");
+    options.put("subscription", "s");
+    return options;
   }
 
   @Test
@@ -170,7 +228,7 @@ class PubSubConfigTest {
     Map<String, String> options = new HashMap<>();
     options.put("projectId", "p");
     options.put("subscription", "s");
-    options.put("gatherMode", "pull");
+    options.put("gatherMode", "immediate");
     options.put("receiveTime", "5000ms");
     options.put("batchSize", "2m");
     options.put("batchCount", "3000");
@@ -178,7 +236,7 @@ class PubSubConfigTest {
 
     PubSubConfig config = PubSubConfig.fromOptions(options);
 
-    assertEquals(GatherMode.PULL, config.gatherMode());
+    assertEquals(GatherMode.IMMEDIATE, config.gatherMode());
     assertEquals(Duration.ofSeconds(5), config.receiveTime());
     assertEquals(2L * 1024 * 1024, config.batchSize());
     assertEquals(3000L, config.batchCount());

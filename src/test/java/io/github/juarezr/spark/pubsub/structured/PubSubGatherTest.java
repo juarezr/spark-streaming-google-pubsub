@@ -28,12 +28,21 @@ import org.junit.jupiter.api.Test;
 
 class PubSubGatherTest {
 
+  private PubSubConfig newGatherModeImmediateConfig() {
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .gatherMode(GatherMode.IMMEDIATE)
+            .build();
+    return config;
+  }
+
   @Test
   void emptyPullKeepsTheCurrentOffset() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class))).thenReturn(Collections.emptyList());
-    PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubConfig config = newGatherModeImmediateConfig();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     Offset initial = stream.initialOffset();
@@ -41,7 +50,10 @@ class PubSubGatherTest {
 
     assertEquals(initial, latest);
     assertEquals(
-        "-", stream.metrics(Optional.empty()).get(PubSubSourceMetrics.LAST_PULL_MESSAGE_AGE_MS));
+        "-",
+        stream
+            .metrics(Optional.empty())
+            .get(PubSubSourceMetrics.LAST_GATHER_NEWEST_MESSAGE_AGE_MS));
     assertFalse(stream.firstBatchLogged());
     assertNull(stream.lastGatheredWindow());
     verify(client, times(1)).poll(any(Duration.class));
@@ -55,8 +67,7 @@ class PubSubGatherTest {
     PulledMessage newer =
         new PulledMessage("new", new byte[] {1}, Collections.emptyMap(), 4_000L, "", "ack-new");
     when(client.poll(any(Duration.class))).thenReturn(List.of(older, newer));
-    PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubConfig config = newGatherModeImmediateConfig();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     stream.latestOffset();
@@ -81,8 +92,7 @@ class PubSubGatherTest {
     PulledMessage newer =
         new PulledMessage("new", new byte[] {1}, Collections.emptyMap(), 4_000L, "", "ack-new");
     when(client.poll(any(Duration.class))).thenReturn(List.of(older, newer));
-    PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubConfig config = newGatherModeImmediateConfig();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     long before = System.currentTimeMillis();
@@ -90,7 +100,9 @@ class PubSubGatherTest {
     long after = System.currentTimeMillis();
     long age =
         Long.parseLong(
-            stream.metrics(Optional.empty()).get(PubSubSourceMetrics.LAST_PULL_MESSAGE_AGE_MS));
+            stream
+                .metrics(Optional.empty())
+                .get(PubSubSourceMetrics.LAST_GATHER_NEWEST_MESSAGE_AGE_MS));
 
     assertTrue(age >= before - 4_000L);
     assertTrue(age <= after - 4_000L);
@@ -125,8 +137,7 @@ class PubSubGatherTest {
   void microBatchWithSameStartStaysIdempotent() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class))).thenReturn(messages(0, 2));
-    PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubConfig config = newGatherModeImmediateConfig();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
@@ -141,8 +152,7 @@ class PubSubGatherTest {
   void microBatchGathersNextWhenStartConsumedPrevious() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class))).thenReturn(messages(0, 2)).thenReturn(messages(2, 3));
-    PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubConfig config = newGatherModeImmediateConfig();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
@@ -164,8 +174,7 @@ class PubSubGatherTest {
     when(client.poll(any(Duration.class)))
         .thenReturn(messages(0, 2))
         .thenReturn(Collections.emptyList());
-    PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubConfig config = newGatherModeImmediateConfig();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     Offset first = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
@@ -199,8 +208,7 @@ class PubSubGatherTest {
     PubSubClient client = mock(PubSubClient.class);
     List<PulledMessage> first = messages(0, 2);
     when(client.poll(any(Duration.class))).thenReturn(first).thenReturn(Collections.emptyList());
-    PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubConfig config = newGatherModeImmediateConfig();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     Offset firstOffset = stream.latestOffset();
@@ -215,8 +223,7 @@ class PubSubGatherTest {
   void commitAcknowledgesDriverHeldMessages() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class))).thenReturn(messages(0, 2));
-    PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubConfig config = newGatherModeImmediateConfig();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     Offset latest = stream.latestOffset();
@@ -230,8 +237,7 @@ class PubSubGatherTest {
   void stopNacksUncommittedAfterCommitBatch() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class))).thenReturn(messages(0, 2));
-    PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubConfig config = newGatherModeImmediateConfig();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     stream.latestOffset();
@@ -245,8 +251,7 @@ class PubSubGatherTest {
   void admissionControlEmptyPullReturnsNull() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class))).thenReturn(Collections.emptyList());
-    PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubConfig config = newGatherModeImmediateConfig();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     Offset latest = stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable());
@@ -283,8 +288,7 @@ class PubSubGatherTest {
   void pullModeRequestsOnlyRemainingRows() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class))).thenReturn(messages(0, 10));
-    PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+    PubSubConfig config = newGatherModeImmediateConfig();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     stream.latestOffset(stream.initialOffset(), ReadLimit.maxRows(10));
@@ -300,7 +304,7 @@ class PubSubGatherTest {
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .gatherMode(GatherMode.PULL)
+            .gatherMode(GatherMode.IMMEDIATE)
             .receiveTime(Duration.ofMillis(80))
             .build();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);

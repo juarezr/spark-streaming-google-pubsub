@@ -24,9 +24,10 @@ import org.apache.spark.sql.connector.read.streaming.ReadLimit;
 import org.junit.jupiter.api.Test;
 
 /**
- * Simulates {@link GatherMode#PULL} gather behavior on the driver (mocked {@link PubSubClient}).
+ * Simulates {@link GatherMode#IMMEDIATE} gather behavior on the driver (mocked {@link
+ * PubSubClient}).
  */
-class PubSubGatherPullModeTest {
+class PubSubGatherImmediateModeTest {
 
   @Test
   void singlePollReturnsAvailableMessagesWithoutFillingBatchCount() {
@@ -36,7 +37,7 @@ class PubSubGatherPullModeTest {
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .gatherMode(GatherMode.PULL)
+            .gatherMode(GatherMode.IMMEDIATE)
             .batchCount(3000)
             .receiveTime(Duration.ofSeconds(10))
             .build();
@@ -57,7 +58,7 @@ class PubSubGatherPullModeTest {
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .gatherMode(GatherMode.PULL)
+            .gatherMode(GatherMode.IMMEDIATE)
             .receiveTime(Duration.ofSeconds(10))
             .build();
     PubSubMicroBatchStream pullStream = new PubSubMicroBatchStream(pull, 1, client, false);
@@ -85,7 +86,11 @@ class PubSubGatherPullModeTest {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class))).thenReturn(messages(0, 25));
     PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .gatherMode(GatherMode.IMMEDIATE)
+            .build();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     stream.latestOffset(stream.initialOffset(), ReadLimit.maxRows(10));
@@ -106,7 +111,7 @@ class PubSubGatherPullModeTest {
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .gatherMode(GatherMode.PULL)
+            .gatherMode(GatherMode.IMMEDIATE)
             .receiveTime(Duration.ofSeconds(10))
             .build();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
@@ -128,7 +133,7 @@ class PubSubGatherPullModeTest {
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .gatherMode(GatherMode.PULL)
+            .gatherMode(GatherMode.IMMEDIATE)
             .ackMode(AckMode.EARLY)
             .build();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
@@ -148,7 +153,7 @@ class PubSubGatherPullModeTest {
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .gatherMode(GatherMode.PULL)
+            .gatherMode(GatherMode.IMMEDIATE)
             .ackMode(AckMode.AFTER_COMMIT)
             .build();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
@@ -168,7 +173,7 @@ class PubSubGatherPullModeTest {
         PubSubConfig.builder()
             .projectId("p")
             .subscription("s")
-            .gatherMode(GatherMode.PULL)
+            .gatherMode(GatherMode.IMMEDIATE)
             .batchCount(100)
             .build();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
@@ -183,7 +188,11 @@ class PubSubGatherPullModeTest {
     PubSubClient client = mock(PubSubClient.class);
     when(client.poll(any(Duration.class))).thenReturn(Collections.emptyList());
     PubSubConfig config =
-        PubSubConfig.builder().projectId("p").subscription("s").gatherMode(GatherMode.PULL).build();
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .gatherMode(GatherMode.IMMEDIATE)
+            .build();
     PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
 
     assertNull(stream.latestOffset(stream.initialOffset(), ReadLimit.allAvailable()));

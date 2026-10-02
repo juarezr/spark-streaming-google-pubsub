@@ -26,6 +26,23 @@ class PubSubTableProviderTest {
   }
 
   @Test
+  void inferSchemaRespectsRawAndSlimModes() {
+    PubSubTableProvider provider = new PubSubTableProvider();
+    StructType raw =
+        provider.inferSchema(
+            new CaseInsensitiveStringMap(
+                Map.of("projectId", "p", "subscription", "s", "schemaMode", "raw")));
+    assertArrayEquals(new String[] {"body"}, raw.fieldNames());
+
+    StructType slim =
+        provider.inferSchema(
+            new CaseInsensitiveStringMap(
+                Map.of("projectId", "p", "subscription", "s", "schemaMode", "slim")));
+    assertArrayEquals(
+        new String[] {"body", "messageid", "publishtime", "orderingkey"}, slim.fieldNames());
+  }
+
+  @Test
   void getTableKeepsUserSchema() {
     PubSubTableProvider provider = new PubSubTableProvider();
     StructType user =
