@@ -2,9 +2,11 @@ package io.github.juarezr.spark.pubsub.structured;
 
 import com.google.api.gax.core.CredentialsProvider;
 import com.google.api.gax.core.FixedCredentialsProvider;
+import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.auth.Credentials;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
+import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.Serializable;
@@ -42,5 +44,16 @@ final class PubSubCredentialsProvider implements Serializable {
   CredentialsProvider getProvider() {
     Credentials credentials = getCredentials();
     return FixedCredentialsProvider.create(credentials);
+  }
+
+  /**
+   * Emulator clients use plaintext gRPC and do not need ADC; avoid loading credentials when {@code
+   * PUBSUB_EMULATOR_HOST} is set (CI and local emulator tests).
+   */
+  CredentialsProvider providerFor(PubSubConfig config) {
+    if (config.emulatorHost().isPresent()) {
+      return NoCredentialsProvider.create();
+    }
+    return getProvider();
   }
 }

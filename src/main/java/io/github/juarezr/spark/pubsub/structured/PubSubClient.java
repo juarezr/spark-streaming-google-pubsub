@@ -149,8 +149,8 @@ final class PubSubClient implements Closeable, Serializable {
 
     this.emulator = this.config.emulatorHost().map(PubSubEmulator::new).orElse(null);
     try {
-      CredentialsProvider authProvider = this.credentialsProvider.getProvider();
-      if (!this.config.emulatorHost().isPresent()) {
+      CredentialsProvider authProvider = this.credentialsProvider.providerFor(this.config);
+      if (this.emulator == null) {
         connectionErrors.verifySubscriptionAccessible(authProvider);
       }
       applySeekIfNeeded(authProvider);
