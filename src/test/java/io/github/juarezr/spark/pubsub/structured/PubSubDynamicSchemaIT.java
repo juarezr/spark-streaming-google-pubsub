@@ -12,7 +12,6 @@ import io.github.juarezr.spark.pubsub.config.AckMode;
 import io.github.juarezr.spark.pubsub.config.MetadataMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import io.github.juarezr.spark.pubsub.config.SchemaMode;
-import io.github.juarezr.spark.pubsub.testsupport.SparkProfileFingerprint;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
@@ -35,10 +34,6 @@ import org.junit.jupiter.api.io.TempDir;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PubSubDynamicSchemaIT {
-
-  static {
-    SparkProfileFingerprint.sparkVersion();
-  }
 
   private static final String PROJECT = "test-project";
   private static final String SCHEMA_ID = "basketball-event-schema-v3";
