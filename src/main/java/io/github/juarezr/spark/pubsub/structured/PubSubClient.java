@@ -39,9 +39,6 @@ final class PubSubClient implements Closeable, Serializable {
   private static final long serialVersionUID = -3861530486L;
   private static final Logger LOG = LoggerFactory.getLogger(PubSubClient.class);
 
-  /** Pub/Sub Acknowledge / ModifyAckDeadline cap. */
-  static final int ACK_CHUNK = 1000;
-
   private final RetryPolicy retryPolicy;
   private PubSubConnectionErrors connectionErrors;
   private transient PubSubEmulator emulator;
@@ -391,9 +388,6 @@ final class PubSubClient implements Closeable, Serializable {
   void nack(List<String> ackIds) {
     reply(ackIds, false);
   }
-
-  /** Subscriber renews leases; kept for {@link AckLeaseWatchdog}. */
-  void extendAckDeadline(List<String> ackIds, int deadlineSeconds) {}
 
   private void reply(List<String> ackIds, boolean ack) {
     if (ackIds == null || ackIds.isEmpty()) {

@@ -2,7 +2,7 @@ package io.github.juarezr.spark.pubsub.config;
 
 import java.util.Locale;
 
-/** Controls how Pub/Sub Pull responses are grouped into a Spark micro-batch. */
+/** Controls how messages dequeued from the streaming-pull buffer are grouped into a micro-batch. */
 public enum GatherMode {
   BATCH,
   PULL;
