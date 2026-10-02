@@ -16,7 +16,8 @@ Read a subscription into Structured Streaming with `.format("google-pubsub")`.
 - Structured Streaming source (`google-pubsub`)
 - At-least-once delivery by default (`ackMode=afterCommit`)
 - No subscription rewind on restart unless you set `seek`
-- Multi-pull gathering, retries, and ack-lease renewal for long-running jobs
+- Streaming-pull subscriber on the driver, queue polling with `batch` or low-latency `gatherMode`,
+  retries, and subscriber-side ack-lease renewal for long-running jobs
 - Spark **3.5** (Scala 2.12) and Spark **4.0–4.2** (Scala 2.13), including Dataproc **2.3** and **3.0**
 
 Authentication uses **Application Default Credentials (ADC)** unless you set `credentialsFile`.
@@ -208,7 +209,7 @@ When using `Trigger.AvailableNow` keeps receiving until the batch caps or the qu
 
 - `Trigger.Once()` (required — auto tuning does not run the same way)
 - You want lower latency and more, smaller output files
-- You want a **shorter** pull window than the Spark batch interval so messages buffer in Pub/Sub while Spark is idle
+- You want a **shorter** `receiveTime` than the Spark batch interval so messages buffer in Pub/Sub while Spark is idle
 - Do **not** set `receiveTime` equal to the full batch interval — Spark still needs time to run the query and commit the sink
 
 **When to leave `receiveTime` unset**
@@ -217,13 +218,14 @@ When using `Trigger.AvailableNow` keeps receiving until the batch caps or the qu
 
 ### Auto tuning
 
-The connector learns the Spark batch interval, then sets each pull window so that **gather + write** fits inside that interval. This is acomplished in the following steps:
+The connector learns the Spark batch interval, then sets each `receiveTime` window so that **gather +
+write** fits inside that interval. This is accomplished in the following steps:
 
 1. **Startup** — When the `receiveTime` is omitted:
     1. One or more empty micro-batches measure idle time between Spark triggers (`batchInterval`)
     2. Gaps under 30s are ignored unless you pass `processingTime` as a hint.
 2. **Steady state** — In each micro-batch:
-    1. Pull from the queue for up to `receiveTime`, or until `batchSize` / `batchCount` caps/parameters.
+    1. Poll the streaming-pull queue for up to `receiveTime`, or until `batchSize` / `batchCount` caps.
     2. Then Spark writes and commits the micro-batch.
     3. After commit the connector acks the messages in the subscription.
 3. **Tuning** — Before the next micro-batch:
@@ -253,9 +255,9 @@ The parameter `numWriters` only splits the already-received batch into Spark tas
 It does not start more receive loops.
 
 Notice that the subscription `Oldest Unacked` metric **will not go to zero** while the topic keeps publishing
-and the pipeline holds in-flight batches (pulled, processing, or within Pub/Sub flow-control windows).
+and the pipeline holds in-flight batches (received, processing, or within Pub/Sub flow-control windows).
 Zero unacked messages is the wrong success criterion; **stable or slowly declining** backlog with
-bounded oldest age is the right one. The workload should trend towards a stable plateau under sustained pull/processing.
+bounded oldest age is the right one. The workload should trend towards a stable plateau under sustained ingest/processing.
 
 Check this example of a workload with micro-batch scheduled at each 60 secs and `batchSize` at 64MiB:
 
@@ -280,7 +282,7 @@ flowchart LR
 ## Reliability
 
 - **`ackMode=afterCommit` (default):** ack after Spark commits. A failure before commit redelivers
-  (at-least-once). Leases are renewed until commit.
+  (at-least-once). The streaming-pull subscriber renews ack leases until commit.
 - **`ackMode=early`:** ack soon after receive. Faster release, higher loss risk on crash.
 - An uncommitted batch that is replaced or stopped is nacked so Pub/Sub can redeliver quickly.
 - Ack and nack RPCs retry for up to `maxRetryTime`.
