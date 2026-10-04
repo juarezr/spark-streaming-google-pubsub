@@ -31,16 +31,24 @@ public final class Into {
       return alternative;
     }
     final long ms = duration.toMillis();
-    return elapsed(ms);
+    return elapsedMs(ms);
   }
 
-  public static String elapsed(long ms) {
-    if (ms % 60000L == 0L) {
-      return (ms / 60000L) + "min";
-    } else if (ms % 1000L == 0L) {
-      return (ms / 1000L) + "s";
+  /** Formats a duration given in nanoseconds (not milliseconds). */
+  public static String elapsed(long nanos) {
+    return elapsed(Duration.ofNanos(nanos));
+  }
+
+  private static String elapsedMs(long millis) {
+    if (millis % 60000L == 0L) {
+      if (millis > 600000L) {
+        return (millis / 60000L) + "min";
+      }
+      return String.format("%d:%02d", millis / 60000L, (millis % 60000L) / 1000L);
+    } else if (millis % 1000L == 0L) {
+      return (millis / 1000L) + "s";
     }
-    return ms + "ms";
+    return millis + "ms";
   }
 
   public static String abrevBytes(long size) {
