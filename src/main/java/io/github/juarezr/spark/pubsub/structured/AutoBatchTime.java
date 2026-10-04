@@ -48,7 +48,7 @@ final class AutoBatchTime {
   static final long PROBE_NOISE_NANOS = TimeUnit.SECONDS.toNanos(1);
   static final long SEED_MIN_NANOS = TimeUnit.SECONDS.toNanos(10);
 
-  /** Minimum inter-probe gap before accepting inferred Spark batch interval (without hint). */
+  /** Legacy floor for idle-raise and sanity; not used as probe finish gate (Option C). */
   static final long PROBE_INTERVAL_MIN_NANOS = TimeUnit.SECONDS.toNanos(30);
 
   static final int PROBE_GAP_SAMPLES = 3;
@@ -57,6 +57,9 @@ final class AutoBatchTime {
   static final double IDLE_RAISE_ALIGN_HIGH = 1.15;
   static final double HINT_INTERVAL_FLOOR_RATIO = 0.8;
   static final double CYCLE_INTERVAL_MISMATCH_RATIO = 1.2;
+  static final double POST_FIRST_BATCH_CYCLE_RATIO = 1.25;
+  static final double PROBE_GAP_STABLE_RATIO = 0.10;
+  static final double PROBE_FULL_PERIOD_RATIO = 1.5;
   static final int STARTUP_LOG_BATCHES = 10;
   static final int ZERO_TRIGGER_NOISE_CYCLES = 3;
   static final int MIN_TUNE_ADJUSTS = 5;
@@ -118,6 +121,7 @@ final class AutoBatchTime {
   private final long[] recentWriteNanos = new long[WRITE_SMOOTH_SAMPLES];
   private int recentWriteCount;
   private boolean excludeNextWriteSample;
+  private boolean postFirstHeavyBatchChecked;
 
   static AutoBatchTime create(PubSubConfig config) {
     return create(config, System::nanoTime);
@@ -214,9 +218,9 @@ final class AutoBatchTime {
       probeAttempts = 1;
       LOG.warn(
           "AUTO: receiveTime is unset; inferring Spark batch interval from idle gaps (empty"
-              + " micro-batch, no receive) until gap is at least {} (or processingTime hint)."
-              + " Sub-second gaps assume Trigger.ProcessingTime(0). probeAttempt=1",
-          Into.elapsed(PROBE_INTERVAL_MIN_NANOS));
+              + " micro-batch, no receive) until gaps are consistent (≥10% samples)"
+              + " or processingTime hint. Sub-second gaps assume Trigger.ProcessingTime(0)."
+              + " probeAttempt=1");
       return true;
     }
     probeAttempts++;
@@ -252,17 +256,25 @@ final class AutoBatchTime {
       finishProbeWithInterval(processingTimeHint, "processingTime hint");
       return false;
     }
-    long candidate = maxProbeGapNanos();
-    if (candidate < PROBE_INTERVAL_MIN_NANOS) {
-      LOG.warn(
-          "AUTO: probeAttempt={} gap {} below trigger-scale min {}; keep probing (max sample {})",
+    if (probeGapCount < 2) {
+      LOG.info(
+          "AUTO: probeAttempt={} gap {} recorded ({} sample(s)); need ≥2 for Option C",
           probeAttempts,
           Into.elapsed(gapFromStart),
-          Into.elapsed(PROBE_INTERVAL_MIN_NANOS),
-          Into.elapsed(candidate));
+          probeGapCount);
       return true;
     }
-    finishProbeWithInterval(Duration.ofNanos(candidate), "probe max gap");
+    long max = maxProbeGapNanos();
+    long second = secondLargestProbeGapNanos();
+    if (!probeGapConsistent(max, second)) {
+      LOG.warn(
+          "AUTO: probeAttempt={} max sample {} second {}; keep probing (Option C)",
+          probeAttempts,
+          Into.elapsed(max),
+          Into.elapsed(second));
+      return true;
+    }
+    finishProbeWithInterval(Duration.ofNanos(max), "probe max gap (C)");
     return false;
   }
 
@@ -294,6 +306,32 @@ final class AutoBatchTime {
       max = Math.max(max, probeGapNanos[i]);
     }
     return max;
+  }
+
+  private long secondLargestProbeGapNanos() {
+    long max = 0L;
+    long second = 0L;
+    for (int i = 0; i < probeGapCount; i++) {
+      long g = probeGapNanos[i];
+      if (g >= max) {
+        second = max;
+        max = g;
+      } else if (g > second) {
+        second = g;
+      }
+    }
+    return second;
+  }
+
+  static boolean probeGapConsistent(long max, long second) {
+    if (max <= 0L || second <= 0L) {
+      return false;
+    }
+    long delta = Math.abs(max - second);
+    if (delta <= (long) (max * PROBE_GAP_STABLE_RATIO)) {
+      return true;
+    }
+    return max >= (long) (second * PROBE_FULL_PERIOD_RATIO);
   }
 
   Duration receiveWindow(Duration admissionWait) {
@@ -339,6 +377,28 @@ final class AutoBatchTime {
     }
     pendingWrite = false;
     recomputeReceiveFromWrite(now);
+    maybeCorrectIntervalAfterFirstHeavyBatch(now);
+  }
+
+  private void maybeCorrectIntervalAfterFirstHeavyBatch(long now) {
+    if (postFirstHeavyBatchChecked || lastGatherCount <= 0 || batchInterval == null) {
+      return;
+    }
+    postFirstHeavyBatchChecked = true;
+    long intervalNanos = batchInterval.toNanos();
+    if (intervalNanos >= TimeUnit.SECONDS.toNanos(45)) {
+      return;
+    }
+    long wallMicroBatch =
+        lastMicroBatchStartNanos > 0L ? now - lastMicroBatchStartNanos : lastCycleNanos;
+    if (wallMicroBatch <= (long) (intervalNanos * POST_FIRST_BATCH_CYCLE_RATIO)) {
+      return;
+    }
+    LOG.warn(
+        "AUTO: post-first-batch wallMicroBatch={} exceeds interval {}; re-entering PROBE (D)",
+        Into.elapsed(wallMicroBatch),
+        Into.elapsed(batchInterval));
+    resetIntervalInference();
   }
 
   /**
