@@ -36,7 +36,8 @@ import org.slf4j.LoggerFactory;
  *   note right of Auto
  *     margin = max(1s, 1.6% interval)
  *     writeBudget seed = 10% interval (no samples)
- *     else max(onCommit write, busyWrite) + margin
+ *     else max(onCommit write, busyWrite peak) + margin
+ *     busyWrite peak holds until Spark wall <= interval
  *     rate limit receive step per batch
  *     sanity reset if write estimate biased
  *     INFO log 20 batches after stable, then silence
@@ -55,7 +56,7 @@ final class AutoBatchTime {
   static final long PROBE_NOISE_NANOS = TimeUnit.SECONDS.toNanos(1);
   static final long SEED_MIN_NANOS = TimeUnit.SECONDS.toNanos(10);
 
-  /** Legacy floor for idle-raise and sanity; not used as probe finish gate (Option C). */
+  /** Legacy floor for idle-raise and sanity; not used as idle-gap probe finish gate. */
   static final long PROBE_INTERVAL_MIN_NANOS = TimeUnit.SECONDS.toNanos(30);
 
   static final int PROBE_GAP_SAMPLES = 3;
@@ -132,6 +133,7 @@ final class AutoBatchTime {
   private int recentWriteCount;
   private boolean excludeNextWriteSample;
   private boolean postFirstHeavyBatchChecked;
+  private long peakBusyWriteNanos;
 
   static AutoBatchTime create(PubSubConfig config) {
     return create(config, System::nanoTime);
@@ -454,8 +456,8 @@ final class AutoBatchTime {
 
   /**
    * Spark {@code ProcessingTimeExecutor} wall includes sink work after {@code onCommit}. Sample
-   * that on the next {@code shouldProbe} when the previous batch ran past the trigger (no idle
-   * sleep).
+   * that on the next {@code shouldProbe} when the previous batch ran past the trigger (Spark
+   * falling-behind: {@code wall > interval}). Keep the peak until a later wall is on time.
    */
   private void maybeRecordBusyWriteFromWall(long now) {
     if (pendingWrite
@@ -468,8 +470,11 @@ final class AutoBatchTime {
     }
     long wall = now - lastMicroBatchStartNanos;
     long intervalNanos = batchInterval.toNanos();
-    long margin = receiveWriteMarginNanos(intervalNanos);
-    if (wall <= intervalNanos + margin) {
+    if (wall <= intervalNanos) {
+      if (peakBusyWriteNanos > 0L) {
+        peakBusyWriteNanos = 0L;
+        recomputeReceiveFromWrite(now);
+      }
       return;
     }
     long busyWrite = Math.max(lastWriteNanos, wall - lastGatherNanos);
@@ -477,6 +482,7 @@ final class AutoBatchTime {
       return;
     }
     recordWriteSample(busyWrite);
+    peakBusyWriteNanos = Math.max(peakBusyWriteNanos, busyWrite);
     lastWriteNanos = Math.max(lastWriteNanos, busyWrite);
     lastCycleNanos = lastGatherNanos + lastWriteNanos;
     recordCycleSample(lastCycleNanos);
@@ -817,9 +823,11 @@ final class AutoBatchTime {
 
   private long computeEstimatedWrite(long intervalNanos) {
     long smoothed = smoothedWriteNanos();
-    if (recentWriteCount > 0 && smoothed > 0L) {
+    long peak = peakBusyWriteNanos;
+    if ((recentWriteCount > 0 && smoothed > 0L) || peak > 0L) {
       long margin = receiveWriteMarginNanos(intervalNanos);
-      return Math.max(RECEIVE_WRITE_MARGIN_MIN_NANOS, smoothed + margin);
+      long write = Math.max(smoothed, peak);
+      return Math.max(RECEIVE_WRITE_MARGIN_MIN_NANOS, write + margin);
     }
     return receiveWriteReserveNanos(intervalNanos);
   }
@@ -910,6 +918,7 @@ final class AutoBatchTime {
   private void resetWriteSamples() {
     recentWriteCount = 0;
     Arrays.fill(recentWriteNanos, 0L);
+    peakBusyWriteNanos = 0L;
   }
 
   private static long receiveDeltaNanos(Duration a, Duration b) {

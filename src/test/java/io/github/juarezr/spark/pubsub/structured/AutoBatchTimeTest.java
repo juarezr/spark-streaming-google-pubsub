@@ -276,6 +276,65 @@ class AutoBatchTimeTest {
   }
 
   @Test
+  void wallJustOverIntervalRaisesWriteBudgetWithoutWaitingForMargin() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+    finishProbeWithTwoGaps(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+
+    now.addAndGet(Duration.ofMillis(53_900).toNanos());
+    auto.onGatherFinished(Duration.ofMillis(53_900).toNanos(), 22_000);
+    now.addAndGet(Duration.ofMillis(500).toNanos());
+    auto.onCommit();
+
+    long margin = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(60).toNanos());
+    long onCommitBudget = Duration.ofMillis(500).toNanos() + margin;
+    assertEquals(onCommitBudget, auto.estimatedWriteNanos());
+
+    now.addAndGet(Duration.ofMillis(5_900).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    long wall = Duration.ofMillis(60_300).toNanos();
+    assertTrue(wall < Duration.ofSeconds(60).toNanos() + margin);
+    long busyWrite = wall - Duration.ofMillis(53_900).toNanos();
+    assertEquals(busyWrite + margin, auto.estimatedWriteNanos());
+  }
+
+  @Test
+  void peakBusyWriteHoldsAcrossSmallOnCommitUntilWallIsOnTime() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+    finishProbeWithTwoGaps(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+
+    now.addAndGet(Duration.ofSeconds(50).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), 10_000);
+    now.addAndGet(Duration.ofSeconds(1).toNanos());
+    auto.onCommit();
+
+    now.addAndGet(Duration.ofSeconds(12).toNanos());
+    long batchStart = now.get();
+    assertFalse(auto.shouldProbe());
+
+    long margin = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(60).toNanos());
+    long busyWrite = Duration.ofSeconds(13).toNanos();
+    long peakBudget = busyWrite + margin;
+    assertEquals(peakBudget, auto.estimatedWriteNanos());
+
+    for (int i = 0; i < AutoBatchTime.WRITE_SMOOTH_SAMPLES; i++) {
+      auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), 1);
+      now.addAndGet(Duration.ofMillis(500).toNanos());
+      auto.onCommit();
+      assertEquals(peakBudget, auto.estimatedWriteNanos());
+    }
+
+    now.set(batchStart + Duration.ofSeconds(50).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertTrue(auto.estimatedWriteNanos() < peakBudget);
+    assertEquals(Duration.ofMillis(500).toNanos() + margin, auto.estimatedWriteNanos());
+  }
+
+  @Test
   void idleLeftoverDoesNotReseedWriteBudgetWhenWritesExist() {
     AtomicLong now = new AtomicLong(0);
     AutoBatchTime auto = new AutoBatchTime(null, now::get, Duration.ofSeconds(60));
