@@ -30,10 +30,13 @@ import org.slf4j.LoggerFactory;
  * == AUTO ==
  * loop each micro-batch
  *   Auto -> Auto : one idle raise of batchInterval if Spark slept
- *   Auto -> Auto : onCommit: write sample\nreceive = interval − writeBudget − margin
+ *   Auto -> Auto : onCommit: write sample
+ *   Auto -> Auto : next shouldProbe: if wall>interval\nbusyWrite = wall − gather
+ *   Auto -> Auto : receive = interval − writeBudget − margin
  *   note right of Auto
  *     margin = max(1s, 1.6% interval)
- *     writeBudget seed = 10% interval (no samples); else smoothed write + margin
+ *     writeBudget seed = 10% interval (no samples)
+ *     else max(onCommit write, busyWrite) + margin
  *     rate limit receive step per batch
  *     sanity reset if write estimate biased
  *     INFO log 20 batches after stable
@@ -46,7 +49,7 @@ final class AutoBatchTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoBatchTime.class);
 
   private static String auto(int phase, String name, int step, int of) {
-    return "AUTO:" + phase + ":" + name + " step " + step + "/" + of + ": ";
+    return "AUTO: " + phase + ":" + name + " step " + step + "/" + of + ": ";
   }
 
   static final long PROBE_NOISE_NANOS = TimeUnit.SECONDS.toNanos(1);
@@ -209,6 +212,7 @@ final class AutoBatchTime {
   boolean shouldProbe() {
     long now = nanoTime.getAsLong();
     if (mode == Mode.AUTO) {
+      maybeRecordBusyWriteFromWall(now);
       maybeIdleRaiseBatchInterval(now);
       autoCycles++;
       lastMicroBatchStartNanos = now;
@@ -438,6 +442,43 @@ final class AutoBatchTime {
     return inferred;
   }
 
+  /**
+   * Spark {@code ProcessingTimeExecutor} wall includes sink work after {@code onCommit}. Sample
+   * that on the next {@code shouldProbe} when the previous batch ran past the trigger (no idle
+   * sleep).
+   */
+  private void maybeRecordBusyWriteFromWall(long now) {
+    if (pendingWrite
+        || excludeNextWriteSample
+        || lastMicroBatchStartNanos <= 0L
+        || lastGatherCount <= 0
+        || lastGatherNanos <= 0L
+        || batchInterval == null) {
+      return;
+    }
+    long wall = now - lastMicroBatchStartNanos;
+    long intervalNanos = batchInterval.toNanos();
+    long margin = receiveWriteMarginNanos(intervalNanos);
+    if (wall <= intervalNanos + margin) {
+      return;
+    }
+    long busyWrite = Math.max(lastWriteNanos, wall - lastGatherNanos);
+    if (busyWrite <= 0L) {
+      return;
+    }
+    recordWriteSample(busyWrite);
+    lastWriteNanos = Math.max(lastWriteNanos, busyWrite);
+    lastCycleNanos = lastGatherNanos + lastWriteNanos;
+    recordCycleSample(lastCycleNanos);
+    LOG.info(
+        auto(3, "writeBudget measure", 1, 1)
+            + "busyWrite={} wall={} gather={} (start-to-start minus gather)",
+        Into.elapsed(busyWrite),
+        Into.elapsed(wall),
+        Into.elapsed(lastGatherNanos));
+    recomputeReceiveFromWrite(now);
+  }
+
   private void maybeIdleRaiseBatchInterval(long now) {
     if (batchIntervalFrozen || lastOffsetStartNanos == 0L || batchInterval == null) {
       return;
@@ -465,7 +506,6 @@ final class AutoBatchTime {
     stableStreak = 0;
     stabilizedForLogging = false;
     postStableLogRemaining = 0;
-    resetWriteSamples();
     recomputeReceiveFromWrite(now);
     LOG.info(
         auto(5, "idle leftover", 1, 1)

@@ -243,6 +243,69 @@ class AutoBatchTimeTest {
   }
 
   @Test
+  void nextShouldProbeAfterLateWallRaisesWriteBudgetFromGatherToStart() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+    finishProbeWithTwoGaps(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+
+    now.addAndGet(Duration.ofSeconds(57).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(57).toNanos(), 123_000);
+    now.addAndGet(Duration.ofMillis(613).toNanos());
+    auto.onCommit();
+
+    long margin = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(60).toNanos());
+    long onCommitBudget = Duration.ofMillis(613).toNanos() + margin;
+    assertEquals(onCommitBudget, auto.estimatedWriteNanos());
+    Duration receiveAfterCommit = auto.currentReceive();
+
+    now.addAndGet(Duration.ofSeconds(8).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    long busyWrite = Duration.ofSeconds(8).toNanos() + Duration.ofMillis(613).toNanos();
+    long expected = busyWrite + margin;
+    assertEquals(expected, auto.estimatedWriteNanos());
+    long targetAfterWall =
+        AutoBatchTime.receiveFromWriteEstimate(Duration.ofSeconds(60), expected).toNanos();
+    long targetAfterCommit =
+        AutoBatchTime.receiveFromWriteEstimate(Duration.ofSeconds(60), onCommitBudget).toNanos();
+    assertTrue(targetAfterWall < targetAfterCommit);
+    assertEquals(
+        AutoBatchTime.MAX_RECEIVE_STEP_NANOS,
+        Math.abs(auto.currentReceive().toNanos() - receiveAfterCommit.toNanos()));
+  }
+
+  @Test
+  void idleLeftoverDoesNotReseedWriteBudgetWhenWritesExist() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get, Duration.ofSeconds(60));
+
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.batchInterval());
+    assertFalse(auto.shouldProbe());
+
+    auto.onGatherFinished(Duration.ofSeconds(30).toNanos(), 10_000);
+    now.addAndGet(Duration.ofSeconds(1).toNanos());
+    auto.onCommit();
+    long margin = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(60).toNanos());
+    long measuredBudget = Duration.ofSeconds(1).toNanos() + margin;
+    assertEquals(measuredBudget, auto.estimatedWriteNanos());
+
+    now.addAndGet(Duration.ofSeconds(29).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(1).toNanos(), 0);
+    now.addAndGet(Duration.ofSeconds(61).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    long seed = AutoBatchTime.receiveWriteReserveNanos(auto.batchInterval().toNanos());
+    assertTrue(
+        auto.estimatedWriteNanos() < seed,
+        "writeBudget=" + auto.estimatedWriteNanos() + " seed=" + seed);
+    assertTrue(auto.estimatedWriteNanos() >= Duration.ofSeconds(1).toNanos());
+  }
+
+  @Test
   void clampReceiveUsesWriteReserveWhenMeasuredWriteIsTiny() {
     long writeEstReserve = AutoBatchTime.receiveWriteReserveNanos(Duration.ofSeconds(60).toNanos());
     Duration target =
