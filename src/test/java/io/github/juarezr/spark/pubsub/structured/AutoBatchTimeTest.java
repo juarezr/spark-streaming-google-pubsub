@@ -212,11 +212,34 @@ class AutoBatchTimeTest {
         Duration.ofSeconds(1).toNanos(),
         AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(60).toNanos()));
     assertEquals(
-        Duration.ofSeconds(5).toNanos(),
+        Duration.ofSeconds(6).toNanos(),
         AutoBatchTime.receiveWriteReserveNanos(Duration.ofSeconds(60).toNanos()));
     assertEquals(
         Duration.ofSeconds(1).toNanos(),
         AutoBatchTime.receiveWriteReserveNanos(Duration.ofSeconds(10).toNanos()));
+    long longMargin = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(120).toNanos());
+    assertEquals((long) (Duration.ofSeconds(120).toNanos() * 0.016), longMargin);
+  }
+
+  @Test
+  void firstCommitMeasuredWriteSetsWriteBudgetWithoutReserveFloor() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+    finishProbeWithTwoGaps(auto, now, 60);
+
+    long seed = AutoBatchTime.receiveWriteReserveNanos(Duration.ofSeconds(60).toNanos());
+    assertEquals(Duration.ofSeconds(6).toNanos(), seed);
+    assertEquals(seed, auto.estimatedWriteNanos());
+
+    auto.onGatherFinished(Duration.ofMillis(1828).toNanos(), 149_000);
+    now.addAndGet(Duration.ofMillis(681).toNanos());
+    auto.onCommit();
+
+    long margin = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(60).toNanos());
+    long expected = Duration.ofMillis(681).toNanos() + margin;
+    assertEquals(expected, auto.estimatedWriteNanos());
+    assertTrue(auto.estimatedWriteNanos() < Duration.ofSeconds(5).toNanos());
+    assertEquals(Duration.ofSeconds(32), auto.currentReceive());
   }
 
   @Test
@@ -224,10 +247,10 @@ class AutoBatchTimeTest {
     long writeEstReserve = AutoBatchTime.receiveWriteReserveNanos(Duration.ofSeconds(60).toNanos());
     Duration target =
         AutoBatchTime.receiveFromWriteEstimate(Duration.ofSeconds(60), writeEstReserve);
-    assertEquals(Duration.ofSeconds(54), target);
+    assertEquals(Duration.ofSeconds(53), target);
     Duration clamped =
         AutoBatchTime.clampReceive(Duration.ofSeconds(58), Duration.ofSeconds(60), writeEstReserve);
-    assertEquals(Duration.ofSeconds(54), clamped);
+    assertEquals(Duration.ofSeconds(53), clamped);
   }
 
   @Test

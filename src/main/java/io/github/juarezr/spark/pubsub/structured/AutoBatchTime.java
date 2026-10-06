@@ -30,10 +30,10 @@ import org.slf4j.LoggerFactory;
  * == AUTO ==
  * loop each micro-batch
  *   Auto -> Auto : one idle raise of batchInterval if Spark slept
- *   Auto -> Auto : onCommit: write sample\nreceive = interval − max(write, reserve) − margin
+ *   Auto -> Auto : onCommit: write sample\nreceive = interval − writeBudget − margin
  *   note right of Auto
- *     margin = max(1s, 1/60 interval)
- *     write reserve = max(1s, 5/60 interval) until stable; then max(smoothed write + margin, 1s)
+ *     margin = max(1s, 1.6% interval)
+ *     writeBudget seed = 10% interval (no samples); else smoothed write + margin
  *     rate limit receive step per batch
  *     sanity reset if write estimate biased
  *     INFO log 20 batches after stable
@@ -74,8 +74,11 @@ final class AutoBatchTime {
   static final int SANITY_STREAK_THRESHOLD = 3;
   static final long MAX_RECEIVE_STEP_NANOS = TimeUnit.SECONDS.toNanos(2);
   static final long RECEIVE_FLOOR_NANOS = TimeUnit.SECONDS.toNanos(1);
-  static final double RECEIVE_WRITE_MARGIN_PERCENT = 1.0 / 60.0;
-  static final double RECEIVE_WRITE_RESERVE_PERCENT = 5.0 / 60.0;
+  static final double RECEIVE_WRITE_MARGIN_PERCENT = 0.016;
+
+  /** Seed writeBudget when no write samples exist (10% of batchInterval). */
+  static final double RECEIVE_WRITE_RESERVE_PERCENT = 0.10;
+
   static final long RECEIVE_WRITE_MARGIN_MIN_NANOS = TimeUnit.SECONDS.toNanos(1);
   static final Duration ZERO_TRIGGER_RECEIVE = Duration.ofSeconds(1);
   static final Duration ACK_DEADLINE_SEED = Duration.ofSeconds(180);
@@ -581,6 +584,24 @@ final class AutoBatchTime {
 
     long cycle = lastCycleNanos > 0 ? lastCycleNanos : lastGatherNanos + calcWriteTime(now);
     boolean behind = cycle > intervalNanos + margin;
+    String prefix;
+    if (stabilizedForLogging) {
+      prefix = auto(7, "stable", 1, 1);
+    } else if (recentWriteCount <= 0) {
+      prefix = auto(2, "writeBudget seed", 1, 1);
+    } else if (receiveDeltaNanos(priorReceive == null ? target : priorReceive, currentReceive)
+        > STABLE_RECEIVE_DELTA_NANOS) {
+      prefix = auto(4, "receiveTime climb", 1, 1);
+    } else {
+      prefix = auto(3, "writeBudget measure", 1, 1);
+    }
+    if (recentWriteCount > 0 && !stabilizedForLogging && prefix.startsWith("AUTO: 4:")) {
+      LOG.info(
+          auto(3, "writeBudget measure", 1, 1)
+              + "writeBudget={} write={} (smoothed write + 1.6% interval margin)",
+          Into.elapsed(writeBudget),
+          Into.elapsed(lastWriteNanos));
+    }
     if (!stabilizedForLogging || postStableLogRemaining > 0 || autoCycles <= STARTUP_LOG_BATCHES) {
       LOG.info(
           prefix
@@ -731,14 +752,12 @@ final class AutoBatchTime {
   }
 
   private long computeEstimatedWrite(long intervalNanos) {
-    long reserve = receiveWriteReserveNanos(intervalNanos);
     long smoothed = smoothedWriteNanos();
-    if (stabilizedForLogging && recentWriteCount >= WRITE_SMOOTH_SAMPLES && smoothed > 0L) {
+    if (recentWriteCount > 0 && smoothed > 0L) {
       long margin = receiveWriteMarginNanos(intervalNanos);
-      long adaptive = smoothed + margin;
-      return Math.max(RECEIVE_WRITE_MARGIN_MIN_NANOS, adaptive);
+      return Math.max(RECEIVE_WRITE_MARGIN_MIN_NANOS, smoothed + margin);
     }
-    return Math.max(reserve, smoothed);
+    return receiveWriteReserveNanos(intervalNanos);
   }
 
   private void enterZeroTrigger() {
