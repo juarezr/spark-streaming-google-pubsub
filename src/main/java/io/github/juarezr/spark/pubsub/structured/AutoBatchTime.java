@@ -37,7 +37,7 @@ import org.slf4j.LoggerFactory;
  *     margin = max(1s, 1.6% interval)
  *     writeBudget seed = 10% interval (no samples)
  *     else max(onCommit write, busyWrite peak) + margin
- *     busyWrite peak holds until Spark wall <= interval
+ *     busyWrite peak holds until 5 consecutive walls <= interval
  *     rate limit receive step per batch
  *     sanity reset if write estimate biased
  *     INFO log 20 batches after stable, then silence
@@ -134,6 +134,7 @@ final class AutoBatchTime {
   private boolean excludeNextWriteSample;
   private boolean postFirstHeavyBatchChecked;
   private long peakBusyWriteNanos;
+  private int onTimeWallStreak;
 
   static AutoBatchTime create(PubSubConfig config) {
     return create(config, System::nanoTime);
@@ -457,7 +458,8 @@ final class AutoBatchTime {
   /**
    * Spark {@code ProcessingTimeExecutor} wall includes sink work after {@code onCommit}. Sample
    * that on the next {@code shouldProbe} when the previous batch ran past the trigger (Spark
-   * falling-behind: {@code wall > interval}). Keep the peak until a later wall is on time.
+   * falling-behind: {@code wall > interval}). Keep the peak until {@link #STABLE_RECEIVE_CYCLES}
+   * consecutive walls are on time.
    */
   private void maybeRecordBusyWriteFromWall(long now) {
     if (pendingWrite
@@ -472,11 +474,16 @@ final class AutoBatchTime {
     long intervalNanos = batchInterval.toNanos();
     if (wall <= intervalNanos) {
       if (peakBusyWriteNanos > 0L) {
-        peakBusyWriteNanos = 0L;
-        recomputeReceiveFromWrite(now);
+        onTimeWallStreak++;
+        if (onTimeWallStreak >= STABLE_RECEIVE_CYCLES) {
+          peakBusyWriteNanos = 0L;
+          onTimeWallStreak = 0;
+          recomputeReceiveFromWrite(now);
+        }
       }
       return;
     }
+    onTimeWallStreak = 0;
     long busyWrite = Math.max(lastWriteNanos, wall - lastGatherNanos);
     if (busyWrite <= 0L) {
       return;
@@ -919,6 +926,7 @@ final class AutoBatchTime {
     recentWriteCount = 0;
     Arrays.fill(recentWriteNanos, 0L);
     peakBusyWriteNanos = 0L;
+    onTimeWallStreak = 0;
   }
 
   private static long receiveDeltaNanos(Duration a, Duration b) {

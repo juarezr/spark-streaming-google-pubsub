@@ -330,6 +330,47 @@ class AutoBatchTimeTest {
 
     now.set(batchStart + Duration.ofSeconds(50).toNanos());
     assertFalse(auto.shouldProbe());
+    assertEquals(peakBudget, auto.estimatedWriteNanos());
+  }
+
+  @Test
+  void peakBusyWriteClearsAfterFiveConsecutiveOnTimeWalls() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+    finishProbeWithTwoGaps(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+
+    now.addAndGet(Duration.ofSeconds(50).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), 10_000);
+    now.addAndGet(Duration.ofSeconds(1).toNanos());
+    auto.onCommit();
+
+    now.addAndGet(Duration.ofSeconds(12).toNanos());
+    assertFalse(auto.shouldProbe());
+
+    long margin = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(60).toNanos());
+    long busyWrite = Duration.ofSeconds(13).toNanos();
+    long peakBudget = busyWrite + margin;
+    assertEquals(peakBudget, auto.estimatedWriteNanos());
+
+    for (int i = 0; i < AutoBatchTime.WRITE_SMOOTH_SAMPLES; i++) {
+      auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), 1);
+      now.addAndGet(Duration.ofMillis(500).toNanos());
+      auto.onCommit();
+      assertEquals(peakBudget, auto.estimatedWriteNanos());
+    }
+
+    for (int i = 0; i < 4; i++) {
+      now.addAndGet(Duration.ofSeconds(50).toNanos());
+      assertFalse(auto.shouldProbe());
+      assertEquals(peakBudget, auto.estimatedWriteNanos(), "on-time wall " + (i + 1));
+      auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), 1);
+      now.addAndGet(Duration.ofMillis(500).toNanos());
+      auto.onCommit();
+    }
+
+    now.addAndGet(Duration.ofSeconds(50).toNanos());
+    assertFalse(auto.shouldProbe());
     assertTrue(auto.estimatedWriteNanos() < peakBudget);
     assertEquals(Duration.ofMillis(500).toNanos() + margin, auto.estimatedWriteNanos());
   }
