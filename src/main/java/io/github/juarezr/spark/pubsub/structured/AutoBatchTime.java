@@ -39,7 +39,7 @@ import org.slf4j.LoggerFactory;
  *     else max(onCommit write, busyWrite) + margin
  *     rate limit receive step per batch
  *     sanity reset if write estimate biased
- *     INFO log 20 batches after stable
+ *     INFO log 20 batches after stable, then silence
  *   end note
  * end
  * @enduml
@@ -204,6 +204,16 @@ final class AutoBatchTime {
 
   long estimatedWriteNanos() {
     return estimatedWriteNanos;
+  }
+
+  boolean shouldLogAutoInfo() {
+    return !stabilizedForLogging || postStableLogRemaining > 0 || autoCycles <= STARTUP_LOG_BATCHES;
+  }
+
+  private void autoInfo(String format, Object... args) {
+    if (shouldLogAutoInfo()) {
+      LOG.info(format, args);
+    }
   }
 
   /**
@@ -470,7 +480,7 @@ final class AutoBatchTime {
     lastWriteNanos = Math.max(lastWriteNanos, busyWrite);
     lastCycleNanos = lastGatherNanos + lastWriteNanos;
     recordCycleSample(lastCycleNanos);
-    LOG.info(
+    autoInfo(
         auto(3, "writeBudget measure", 1, 1)
             + "busyWrite={} wall={} gather={} (start-to-start minus gather)",
         Into.elapsed(busyWrite),
@@ -609,18 +619,7 @@ final class AutoBatchTime {
     currentReceive = target;
     adjustCount++;
 
-    if (!stabilizedForLogging
-        && adjustCount >= MIN_TUNE_ADJUSTS
-        && stableStreak >= STABLE_RECEIVE_CYCLES) {
-      stabilizedForLogging = true;
-      postStableLogRemaining = POST_STABLE_LOG_BATCHES;
-      LOG.info(
-          auto(7, "stable", 1, 1)
-              + "write-first estimates stable after {} adjust(s); post-stable logging for {}"
-              + " batch(es)",
-          adjustCount,
-          postStableLogRemaining);
-    }
+    maybeEnterLoggingStable();
 
     long cycle = lastCycleNanos > 0 ? lastCycleNanos : lastGatherNanos + calcWriteTime(now);
     boolean behind = cycle > intervalNanos + margin;
@@ -636,28 +635,26 @@ final class AutoBatchTime {
       prefix = auto(3, "writeBudget measure", 1, 1);
     }
     if (recentWriteCount > 0 && !stabilizedForLogging && prefix.startsWith("AUTO: 4:")) {
-      LOG.info(
+      autoInfo(
           auto(3, "writeBudget measure", 1, 1)
               + "writeBudget={} write={} (smoothed write + 1.6% interval margin)",
           Into.elapsed(writeBudget),
           Into.elapsed(lastWriteNanos));
     }
-    if (!stabilizedForLogging || postStableLogRemaining > 0 || autoCycles <= STARTUP_LOG_BATCHES) {
-      LOG.info(
-          prefix
-              + "gather={} write={} writeBudget={} receive {} -> {} cycle={} behind={}"
-              + " count={} interval={} processingTimeHint={}",
-          Into.elapsed(lastGatherNanos),
-          Into.elapsed(lastWriteNanos),
-          Into.elapsed(writeBudget),
-          Into.elapsed(priorReceive),
-          Into.elapsed(currentReceive),
-          Into.elapsed(cycle),
-          behind,
-          Into.abrevCount(lastGatherCount),
-          Into.elapsed(batchInterval),
-          Into.elapsed(processingTimeHint, "auto"));
-    }
+    autoInfo(
+        prefix
+            + "gather={} write={} writeBudget={} receive {} -> {} cycle={} behind={}"
+            + " count={} interval={} processingTimeHint={}",
+        Into.elapsed(lastGatherNanos),
+        Into.elapsed(lastWriteNanos),
+        Into.elapsed(writeBudget),
+        Into.elapsed(priorReceive),
+        Into.elapsed(currentReceive),
+        Into.elapsed(cycle),
+        behind,
+        Into.abrevCount(lastGatherCount),
+        Into.elapsed(batchInterval),
+        Into.elapsed(processingTimeHint, "auto"));
     if (postStableLogRemaining > 0) {
       postStableLogRemaining--;
       if (postStableLogRemaining == 0) {
@@ -667,6 +664,33 @@ final class AutoBatchTime {
             Into.elapsed(currentReceive));
       }
     }
+  }
+
+  private void maybeEnterLoggingStable() {
+    if (stabilizedForLogging) {
+      return;
+    }
+    boolean quiet = adjustCount >= MIN_TUNE_ADJUSTS && stableStreak >= STABLE_RECEIVE_CYCLES;
+    boolean enoughCycles = autoCycles >= STARTUP_LOG_BATCHES + POST_STABLE_LOG_BATCHES;
+    if (!quiet && !enoughCycles) {
+      return;
+    }
+    stabilizedForLogging = true;
+    if (quiet) {
+      postStableLogRemaining = POST_STABLE_LOG_BATCHES;
+      LOG.info(
+          auto(7, "stable", 1, 1)
+              + "write-first estimates stable after {} adjust(s); post-stable logging for {}"
+              + " batch(es)",
+          adjustCount,
+          postStableLogRemaining);
+      return;
+    }
+    postStableLogRemaining = 0;
+    LOG.info(
+        auto(7, "stable", 1, 1) + "post-stable logging complete; writeBudget={} receive={}",
+        Into.elapsed(estimatedWriteNanos),
+        Into.elapsed(currentReceive));
   }
 
   private void runSanityChecks(long intervalNanos, long margin) {

@@ -306,6 +306,75 @@ class AutoBatchTimeTest {
   }
 
   @Test
+  void afterPostStableTailBusyWriteStillUpdatesBudgetWithoutAutoInfo() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+    finishProbeWithTwoGaps(auto, now, 60);
+
+    long gather = Duration.ofSeconds(45).toNanos();
+    long write = Duration.ofSeconds(5).toNanos();
+    int guard = 0;
+    while (!auto.receiveFrozen() && guard++ < 40) {
+      assertFalse(auto.shouldProbe());
+      now.addAndGet(gather);
+      auto.onGatherFinished(gather, 1);
+      now.addAndGet(write);
+      auto.onCommit();
+    }
+    assertTrue(auto.receiveFrozen());
+    assertTrue(auto.shouldLogAutoInfo());
+
+    for (int i = 0; i < AutoBatchTime.POST_STABLE_LOG_BATCHES; i++) {
+      assertFalse(auto.shouldProbe());
+      now.addAndGet(gather);
+      auto.onGatherFinished(gather, 1);
+      now.addAndGet(write);
+      auto.onCommit();
+    }
+    assertFalse(auto.shouldLogAutoInfo());
+
+    now.addAndGet(Duration.ofSeconds(16).toNanos());
+    long before = auto.estimatedWriteNanos();
+    assertFalse(auto.shouldProbe());
+    assertTrue(auto.estimatedWriteNanos() > before);
+    assertFalse(auto.shouldLogAutoInfo());
+  }
+
+  @Test
+  void loggingFrozenByThirtyCyclesThenBusyWriteStaysSilent() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+    finishProbeWithTwoGaps(auto, now, 60);
+
+    long gather = Duration.ofSeconds(50).toNanos();
+    int cap = AutoBatchTime.STARTUP_LOG_BATCHES + AutoBatchTime.POST_STABLE_LOG_BATCHES;
+    for (int i = 0; i < cap; i++) {
+      assertFalse(auto.shouldProbe());
+      now.addAndGet(gather);
+      auto.onGatherFinished(gather, 1);
+      now.addAndGet(Duration.ofMillis(i % 2 == 0 ? 400 : 9_000).toNanos());
+      auto.onCommit();
+    }
+    assertTrue(auto.receiveFrozen());
+
+    int guard = 0;
+    while (auto.shouldLogAutoInfo() && guard++ < AutoBatchTime.POST_STABLE_LOG_BATCHES) {
+      assertFalse(auto.shouldProbe());
+      now.addAndGet(gather);
+      auto.onGatherFinished(gather, 1);
+      now.addAndGet(Duration.ofSeconds(1).toNanos());
+      auto.onCommit();
+    }
+    assertFalse(auto.shouldLogAutoInfo());
+
+    long before = auto.estimatedWriteNanos();
+    now.addAndGet(Duration.ofSeconds(16).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertTrue(auto.estimatedWriteNanos() > before);
+    assertFalse(auto.shouldLogAutoInfo());
+  }
+
+  @Test
   void clampReceiveUsesWriteReserveWhenMeasuredWriteIsTiny() {
     long writeEstReserve = AutoBatchTime.receiveWriteReserveNanos(Duration.ofSeconds(60).toNanos());
     Duration target =
