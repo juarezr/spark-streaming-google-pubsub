@@ -38,7 +38,7 @@ import org.slf4j.LoggerFactory;
  *     writeBudget seed = 10% interval (no samples)
  *     else max(onCommit write, busyWrite peak) + margin
  *     busyWrite skips ProcessingTime idle (wall≈interval, cycle short)
- *     busyWrite peak holds until 5 consecutive on-time walls
+ *     busyWrite peak steps down 2s after 5 consecutive on-time walls
  *     rate limit receive step per batch
  *     sanity reset if write estimate biased
  *     INFO log 20 batches after stable, then silence
@@ -460,8 +460,8 @@ final class AutoBatchTime {
    * Spark {@code ProcessingTimeExecutor} wall includes sink work after {@code onCommit}. Sample
    * that on the next {@code shouldProbe} when the previous batch ran past the trigger (Spark
    * falling-behind: {@code wall > interval}). Skip when start-to-start is only ProcessingTime sleep
-   * after a short cycle. Keep the peak until {@link #STABLE_RECEIVE_CYCLES} consecutive walls are
-   * on time.
+   * after a short cycle. After {@link #STABLE_RECEIVE_CYCLES} consecutive on-time walls, step the
+   * peak down by at most {@link #MAX_RECEIVE_STEP_NANOS}.
    */
   private void maybeRecordBusyWriteFromWall(long now) {
     if (pendingWrite
@@ -515,7 +515,9 @@ final class AutoBatchTime {
     }
     onTimeWallStreak++;
     if (onTimeWallStreak >= STABLE_RECEIVE_CYCLES) {
-      peakBusyWriteNanos = 0L;
+      long stepped = peakBusyWriteNanos - MAX_RECEIVE_STEP_NANOS;
+      long peakSmoothedWriteNanos = smoothedWriteNanos();
+      peakBusyWriteNanos = stepped <= peakSmoothedWriteNanos ? 0L : stepped;
       onTimeWallStreak = 0;
       recomputeReceiveFromWrite(now);
     }
@@ -526,12 +528,13 @@ final class AutoBatchTime {
       return;
     }
     long gap = now - lastOffsetStartNanos;
-    if (gap <= batchInterval.toNanos()) {
+    long intervalNanos = batchInterval.toNanos();
+    long margin = receiveWriteMarginNanos(intervalNanos);
+    if (gap <= intervalNanos + margin) {
       return;
     }
     long write = calcWriteTime(now);
     long cycle = lastGatherNanos + write;
-    long margin = receiveWriteMarginNanos(batchInterval.toNanos());
     boolean sparkSlept = lastGatherEmpty || gap > cycle + margin;
     if (!sparkSlept) {
       return;

@@ -392,8 +392,48 @@ class AutoBatchTimeTest {
 
     now.addAndGet(Duration.ofSeconds(50).toNanos());
     assertFalse(auto.shouldProbe());
-    assertTrue(auto.estimatedWriteNanos() < peakBudget);
-    assertEquals(Duration.ofMillis(500).toNanos() + margin, auto.estimatedWriteNanos());
+    assertEquals(peakBudget - AutoBatchTime.MAX_RECEIVE_STEP_NANOS, auto.estimatedWriteNanos());
+  }
+
+  @Test
+  void slightOvershootDoesNotFreezeBatchInterval() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+    finishProbeWithTwoGaps(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+
+    now.addAndGet(Duration.ofSeconds(50).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), 10_000);
+    now.addAndGet(Duration.ofSeconds(1).toNanos());
+    auto.onCommit();
+
+    long batchStart = now.get() - Duration.ofSeconds(51).toNanos();
+    now.set(batchStart + Duration.ofMillis(60_109).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.batchInterval());
+  }
+
+  @Test
+  void longerGapAfterRecordedCycleStillRaisesInterval() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+    finishProbeWithTwoGaps(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+
+    now.addAndGet(Duration.ofSeconds(50).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(50).toNanos(), 10_000);
+    now.addAndGet(Duration.ofSeconds(1).toNanos());
+    auto.onCommit();
+
+    long batchStart = now.get() - Duration.ofSeconds(51).toNanos();
+    now.set(batchStart + Duration.ofSeconds(51).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.batchInterval());
+
+    auto.onGatherFinished(Duration.ofSeconds(1).toNanos(), 0);
+    now.set(batchStart + Duration.ofSeconds(51).toNanos() + Duration.ofSeconds(120).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(120), auto.batchInterval());
   }
 
   @Test
