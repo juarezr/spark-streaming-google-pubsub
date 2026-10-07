@@ -660,12 +660,12 @@ final class AutoBatchTime {
     boolean behind = cycle > intervalNanos + margin;
     String prefix;
     if (stabilizedForLogging) {
-      prefix = auto(7, "stable", 1, 1);
+      prefix = auto(7, "receiveTime stable", 1, 1);
     } else if (recentWriteCount <= 0) {
-      prefix = auto(2, "writeBudget seed", 1, 1);
+      prefix = auto(2, "writeBudget seeding", 1, 1);
     } else if (receiveDeltaNanos(priorReceive == null ? target : priorReceive, currentReceive)
         > STABLE_RECEIVE_DELTA_NANOS) {
-      prefix = auto(4, "receiveTime climb", 1, 1);
+      prefix = auto(4, "receiveTime fitting", 1, 1);
     } else {
       prefix = auto(3, "writeBudget measure", 1, 1);
     }
@@ -677,19 +677,15 @@ final class AutoBatchTime {
           Into.elapsed(lastWriteNanos));
     }
     autoInfo(
-        prefix
-            + "gather={} write={} writeBudget={} receive {} -> {} cycle={} behind={}"
-            + " count={} interval={} processingTimeHint={}",
-        Into.elapsed(lastGatherNanos),
-        Into.elapsed(lastWriteNanos),
-        Into.elapsed(writeBudget),
+        prefix + "receive {} -> {} write={} writeBudget={} cycle={} interval={} count={}{}",
         Into.elapsed(priorReceive),
         Into.elapsed(currentReceive),
+        Into.elapsed(lastWriteNanos),
+        Into.elapsed(writeBudget),
         Into.elapsed(cycle),
-        behind,
-        Into.abrevCount(lastGatherCount),
         Into.elapsed(batchInterval),
-        Into.elapsed(processingTimeHint, "auto"));
+        Into.abrevCount(lastGatherCount),
+        behind ? " behind=true" : "");
     if (postStableLogRemaining > 0) {
       postStableLogRemaining--;
       if (postStableLogRemaining == 0) {
