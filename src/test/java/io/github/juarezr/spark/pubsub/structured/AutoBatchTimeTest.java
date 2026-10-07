@@ -276,7 +276,7 @@ class AutoBatchTimeTest {
   }
 
   @Test
-  void wallJustOverIntervalRaisesWriteBudgetWithoutWaitingForMargin() {
+  void wallJustOverIntervalWithShortCycleDoesNotRaiseBusyWrite() {
     AtomicLong now = new AtomicLong(0);
     AutoBatchTime auto = new AutoBatchTime(null, now::get);
     finishProbeWithTwoGaps(auto, now, 60);
@@ -296,8 +296,29 @@ class AutoBatchTimeTest {
 
     long wall = Duration.ofMillis(60_300).toNanos();
     assertTrue(wall < Duration.ofSeconds(60).toNanos() + margin);
-    long busyWrite = wall - Duration.ofMillis(53_900).toNanos();
-    assertEquals(busyWrite + margin, auto.estimatedWriteNanos());
+    assertEquals(onCommitBudget, auto.estimatedWriteNanos());
+  }
+
+  @Test
+  void processingTimeIdleAfterShortCycleDoesNotCountAsBusyWrite() {
+    AtomicLong now = new AtomicLong(0);
+    AutoBatchTime auto = new AutoBatchTime(null, now::get);
+    finishProbeWithTwoGaps(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+
+    now.addAndGet(Duration.ofSeconds(38).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(38).toNanos(), 38_000);
+    now.addAndGet(Duration.ofSeconds(1).toNanos());
+    auto.onCommit();
+
+    long margin = AutoBatchTime.receiveWriteMarginNanos(Duration.ofSeconds(60).toNanos());
+    long onCommitBudget = Duration.ofSeconds(1).toNanos() + margin;
+    assertEquals(onCommitBudget, auto.estimatedWriteNanos());
+
+    now.addAndGet(Duration.ofSeconds(21).toNanos() + 1_000_000L);
+    assertFalse(auto.shouldProbe());
+    assertEquals(onCommitBudget, auto.estimatedWriteNanos());
+    assertTrue(auto.estimatedWriteNanos() < Duration.ofSeconds(5).toNanos());
   }
 
   @Test

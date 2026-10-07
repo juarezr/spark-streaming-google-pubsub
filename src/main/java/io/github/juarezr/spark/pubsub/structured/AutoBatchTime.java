@@ -37,7 +37,8 @@ import org.slf4j.LoggerFactory;
  *     margin = max(1s, 1.6% interval)
  *     writeBudget seed = 10% interval (no samples)
  *     else max(onCommit write, busyWrite peak) + margin
- *     busyWrite peak holds until 5 consecutive walls <= interval
+ *     busyWrite skips ProcessingTime idle (wall≈interval, cycle short)
+ *     busyWrite peak holds until 5 consecutive on-time walls
  *     rate limit receive step per batch
  *     sanity reset if write estimate biased
  *     INFO log 20 batches after stable, then silence
@@ -458,8 +459,9 @@ final class AutoBatchTime {
   /**
    * Spark {@code ProcessingTimeExecutor} wall includes sink work after {@code onCommit}. Sample
    * that on the next {@code shouldProbe} when the previous batch ran past the trigger (Spark
-   * falling-behind: {@code wall > interval}). Keep the peak until {@link #STABLE_RECEIVE_CYCLES}
-   * consecutive walls are on time.
+   * falling-behind: {@code wall > interval}). Skip when start-to-start is only ProcessingTime sleep
+   * after a short cycle. Keep the peak until {@link #STABLE_RECEIVE_CYCLES} consecutive walls are
+   * on time.
    */
   private void maybeRecordBusyWriteFromWall(long now) {
     if (pendingWrite
@@ -472,15 +474,8 @@ final class AutoBatchTime {
     }
     long wall = now - lastMicroBatchStartNanos;
     long intervalNanos = batchInterval.toNanos();
-    if (wall <= intervalNanos) {
-      if (peakBusyWriteNanos > 0L) {
-        onTimeWallStreak++;
-        if (onTimeWallStreak >= STABLE_RECEIVE_CYCLES) {
-          peakBusyWriteNanos = 0L;
-          onTimeWallStreak = 0;
-          recomputeReceiveFromWrite(now);
-        }
-      }
+    if (wall <= intervalNanos || isProcessingTimeIdle(wall, intervalNanos)) {
+      recordOnTimeWall(now);
       return;
     }
     onTimeWallStreak = 0;
@@ -500,6 +495,30 @@ final class AutoBatchTime {
         Into.elapsed(wall),
         Into.elapsed(lastGatherNanos));
     recomputeReceiveFromWrite(now);
+  }
+
+  /**
+   * {@code true} when {@code wall} overshoots the trigger only because Spark slept until the next
+   * ProcessingTime fire (deploy18: cycle 39s, wall 60s, busyWrite 22s).
+   */
+  private boolean isProcessingTimeIdle(long wall, long intervalNanos) {
+    long commitCycle = lastCycleNanos > 0L ? lastCycleNanos : lastGatherNanos + lastWriteNanos;
+    long expectedIdle = Math.max(0L, intervalNanos - commitCycle);
+    long actualGap = wall - commitCycle;
+    long margin = receiveWriteMarginNanos(intervalNanos);
+    return expectedIdle > 0L && actualGap <= expectedIdle + margin;
+  }
+
+  private void recordOnTimeWall(long now) {
+    if (peakBusyWriteNanos <= 0L) {
+      return;
+    }
+    onTimeWallStreak++;
+    if (onTimeWallStreak >= STABLE_RECEIVE_CYCLES) {
+      peakBusyWriteNanos = 0L;
+      onTimeWallStreak = 0;
+      recomputeReceiveFromWrite(now);
+    }
   }
 
   private void maybeIdleRaiseBatchInterval(long now) {
