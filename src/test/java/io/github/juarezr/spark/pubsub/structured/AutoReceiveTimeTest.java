@@ -117,6 +117,8 @@ class AutoReceiveTimeTest {
     assertTrue(auto.currentReceive().toNanos() > Duration.ofMillis(29_500).toNanos());
     assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
     batch(auto, now, 20, 1_000, 59_998, 1_000);
+    assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
+    batch(auto, now, 20, 1_000, 59_998, 1_000);
     assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
     assertEquals(Duration.ofSeconds(1).toNanos(), auto.writeDurationNanos());
   }
@@ -128,6 +130,8 @@ class AutoReceiveTimeTest {
     finishProbe(auto, now, 59);
     assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
     assertFalse(auto.shouldProbe());
+    batch(auto, now, 30, 1_000, 60_000, 10_000);
+    assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
     batch(auto, now, 30, 1_000, 60_000, 10_000);
     assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
   }
@@ -250,6 +254,18 @@ class AutoReceiveTimeTest {
     assertTrue(auto.shouldProbe());
     now.addAndGet(Duration.ofSeconds(60).toNanos());
     assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+  }
+
+  @Test
+  void singleLateCycleArmsAndTheNextClearsIt() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 30, 1_000, 60_977, 1_000);
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+    batch(auto, now, 30, 1_000, 66_000, 1_000);
     assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
   }
 

@@ -126,9 +126,9 @@ final class AutoReceiveTime {
   private long sleepDurationNanos;
   private long cycleDurationNanos;
   private int probeNoiseCount;
-  private int probeAttempts;
   private boolean zeroTriggerWarned;
   private boolean intervalRaised;
+  private boolean upperHalfArmed;
   private boolean postFirstHeavyChecked;
   private long returnNanos;
   private boolean commitRecorded;
@@ -225,13 +225,11 @@ final class AutoReceiveTime {
     }
     if (probeStartedNanos == null) {
       probeStartedNanos = now;
-      probeAttempts = 1;
       LOG.info(
           "AUTO phase=probe cycleTimeEst=unset receiveBudget=unset"
               + " (empty micro-batch until the trigger gap is consistent)");
       return true;
     }
-    probeAttempts++;
     long gap = now - probeStartedNanos;
     if (gap < PROBE_NOISE_NANOS) {
       probeNoiseCount++;
@@ -404,16 +402,19 @@ final class AutoReceiveTime {
           quiet,
           upperHalf);
     }
-    if (!quiet) {
-      return;
-    }
     long raised = wholeSecondNanos(cycleDurationNanos);
     boolean doublePeriod = raised >= cycleTimeEstNanos * 2;
-    if (upperHalf) {
+    if (upperHalf && quiet) {
+      if (!upperHalfArmed) {
+        upperHalfArmed = true;
+        return;
+      }
       raised = cycleTimeEstNanos + oneSecond;
-    } else if (!doublePeriod) {
+    } else if (!(quiet && doublePeriod)) {
+      upperHalfArmed = false;
       return;
     }
+    upperHalfArmed = false;
     // TODO: soak-only: remove or lower it to debug level before a provider release
     LOG.info(
         "AUTO phase={} cycleTimeEst raised {} -> {}",
@@ -449,9 +450,9 @@ final class AutoReceiveTime {
     writeBudgetNanos = 0L;
     probeStartedNanos = null;
     probeGapCount = 0;
-    probeAttempts = 0;
     probeNoiseCount = 0;
     intervalRaised = false;
+    upperHalfArmed = false;
     lastMicroBatchStartNanos = 0L;
     return true;
   }
