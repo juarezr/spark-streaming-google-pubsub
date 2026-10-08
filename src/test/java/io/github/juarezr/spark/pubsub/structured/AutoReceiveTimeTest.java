@@ -107,6 +107,21 @@ class AutoReceiveTimeTest {
   }
 
   @Test
+  void shortWallAfterReceiveClimbsRaisesFiftyNineToSixty() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 59);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 20, 1_000, 45_000, 1_000);
+    batch(auto, now, 20, 1_000, 45_000, 1_000);
+    assertTrue(auto.currentReceive().toNanos() > Duration.ofMillis(29_500).toNanos());
+    assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
+    batch(auto, now, 20, 1_000, 59_998, 1_000);
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+    assertEquals(Duration.ofSeconds(1).toNanos(), auto.writeDurationNanos());
+  }
+
+  @Test
   void fiftyNineSecondProbeRisesToSixtyOnTheNextFire() {
     AtomicLong now = new AtomicLong(0);
     AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
@@ -248,8 +263,6 @@ class AutoReceiveTimeTest {
     batch(auto, now, 30, 1_000, 60_000, 1_000);
     assertTrue(auto.currentReceive().toNanos() > Duration.ofSeconds(30).toNanos());
     batch(auto, now, 40, 1_000, 61_882, 10_000);
-    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
-    batch(auto, now, 40, 1_000, 61_000, 1_000);
     assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
   }
 

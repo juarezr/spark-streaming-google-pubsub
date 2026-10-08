@@ -380,10 +380,6 @@ final class AutoReceiveTime {
     if (intervalRaised || cycleDurationNanos <= 0L || cycleTimeEstNanos <= 0L) {
       return;
     }
-    long raised = wholeSecondNanos(cycleDurationNanos);
-    if (raised <= cycleTimeEstNanos) {
-      return;
-    }
     boolean slept = false;
     if (commitRecorded && receiveDurationNanos > 0L) {
       long expectedSleep =
@@ -396,10 +392,15 @@ final class AutoReceiveTime {
       return;
     }
     long oneSecond = TimeUnit.SECONDS.toNanos(1);
-    boolean oneSecondStep = raised == cycleTimeEstNanos + oneSecond;
+    long halfSecond = oneSecond / 2;
+    boolean upperHalf =
+        cycleDurationNanos > cycleTimeEstNanos + halfSecond
+            && cycleDurationNanos <= cycleTimeEstNanos + oneSecond;
+    long raised = wholeSecondNanos(cycleDurationNanos);
     boolean doublePeriod = raised >= cycleTimeEstNanos * 2;
-    boolean seedReceive = receiveBudgetNanos <= cycleTimeEstNanos / 2;
-    if (!doublePeriod && !(oneSecondStep && seedReceive)) {
+    if (upperHalf) {
+      raised = cycleTimeEstNanos + oneSecond;
+    } else if (!doublePeriod) {
       return;
     }
     cycleTimeEstNanos = raised;
