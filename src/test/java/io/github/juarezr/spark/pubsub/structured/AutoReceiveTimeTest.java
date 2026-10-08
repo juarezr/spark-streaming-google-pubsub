@@ -216,11 +216,11 @@ class AutoReceiveTimeTest {
 
   @Test
   void elapsedNanosFormatsSeconds() {
-    assertEquals("45s", Into.elapsed(Duration.ofSeconds(45).toNanos()));
-    assertEquals("15.3s", Into.elapsed(15_268_921_265L));
+    assertEquals("45000ms", Into.elapsed(Duration.ofSeconds(45).toNanos()));
+    assertEquals("15268ms", Into.elapsed(15_268_921_265L));
     assertEquals("56ms", Into.elapsed(Duration.ofMillis(56).toNanos()));
-    assertEquals("1.2s", Into.elapsed(Duration.ofMillis(1200).toNanos()));
-    assertEquals("5.3m", Into.elapsed(Duration.ofSeconds(315).toNanos()));
+    assertEquals("1200ms", Into.elapsed(Duration.ofMillis(1200).toNanos()));
     assertEquals("30:00", Into.elapsed(Duration.ofSeconds(1800).toNanos()));
+    assertEquals("5.3m", Into.elapsed(Duration.ofSeconds(315).toNanos()));
   }
 }

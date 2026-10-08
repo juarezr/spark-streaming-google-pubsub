@@ -44,13 +44,7 @@ public final class Into {
       return String.format("%d:%02d", millis / 60000L, (millis % 60000L) / 1000L);
     }
     if (millis > 99999L) {
-      return String.format("%.1fm", millis / 60000f);
-    }
-    if (millis > 19999L) {
-      return (millis / 1000L) + "s";
-    }
-    if (millis > 1000L) {
-      return String.format("%.1fs", millis / 1000f);
+      return String.format("%.1fm", millis / 60000f).replace(".0", "");
     }
     return millis + "ms";
   }
