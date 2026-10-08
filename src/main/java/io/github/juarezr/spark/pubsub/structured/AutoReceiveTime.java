@@ -247,6 +247,8 @@ final class AutoReceiveTime {
     }
     probeNoiseCount = 0;
     recordProbeGap(gap);
+    // TODO: soak-only: remove or lower it to debug level before a provider release
+    LOG.info("AUTO phase=probe gap={}ms", TimeUnit.NANOSECONDS.toMillis(gap));
     probeStartedNanos = now;
     if (processingTimeHint != null) {
       finishProbe(wholeSecondNanos(processingTimeHint.toNanos()));
@@ -388,14 +390,23 @@ final class AutoReceiveTime {
       slept = actualExtra <= expectedSleep + MARGIN_NANOS;
     }
     boolean quiet = slept || gatherCount <= 0;
-    if (!quiet) {
-      return;
-    }
     long oneSecond = TimeUnit.SECONDS.toNanos(1);
     long halfSecond = oneSecond / 2;
     boolean upperHalf =
         cycleDurationNanos > cycleTimeEstNanos + halfSecond
             && cycleDurationNanos <= cycleTimeEstNanos + oneSecond;
+    // TODO: soak-only: remove or lower it to debug level before a provider release
+    if (cycleDurationNanos > cycleTimeEstNanos) {
+      LOG.info(
+          "AUTO phase={} cycleTimeEst held cycleDuration={}ms quiet={} upperHalf={}",
+          phase.name().toLowerCase(),
+          TimeUnit.NANOSECONDS.toMillis(cycleDurationNanos),
+          quiet,
+          upperHalf);
+    }
+    if (!quiet) {
+      return;
+    }
     long raised = wholeSecondNanos(cycleDurationNanos);
     boolean doublePeriod = raised >= cycleTimeEstNanos * 2;
     if (upperHalf) {
@@ -403,6 +414,12 @@ final class AutoReceiveTime {
     } else if (!doublePeriod) {
       return;
     }
+    // TODO: soak-only: remove or lower it to debug level before a provider release
+    LOG.info(
+        "AUTO phase={} cycleTimeEst raised {} -> {}",
+        phase.name().toLowerCase(),
+        Into.elapsed(cycleTimeEstNanos),
+        Into.elapsed(raised));
     cycleTimeEstNanos = raised;
     intervalRaised = true;
     long target = cycleTimeEstNanos - writeBudgetNanos - MARGIN_NANOS;
