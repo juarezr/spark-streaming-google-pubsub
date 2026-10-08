@@ -30,9 +30,6 @@ final class AutoReceiveTime {
   static final int ZERO_TRIGGER_NOISE_CYCLES = 3;
   static final long SHORT_ESTIMATE_NANOS = TimeUnit.SECONDS.toNanos(45);
   static final double POST_FIRST_BATCH_CYCLE_RATIO = 1.25;
-  static final double IDLE_RAISE_ALIGN_LOW = 0.85;
-  static final double IDLE_RAISE_ALIGN_HIGH = 1.15;
-  static final double HINT_INTERVAL_FLOOR_RATIO = 0.8;
   static final Duration ZERO_TRIGGER_RECEIVE = Duration.ofSeconds(1);
   static final Duration ACK_DEADLINE_SEED = Duration.ofSeconds(180);
   static final Duration ACK_DEADLINE_MIN = Duration.ofSeconds(60);
@@ -138,7 +135,6 @@ final class AutoReceiveTime {
   private boolean gatherEmpty;
   private int gatherCount;
   private long lastMicroBatchStartNanos;
-  private long lastCycleNanos;
   private final long[] probeGapNanos = new long[PROBE_GAP_SAMPLES];
   private int probeGapCount;
   private CycleSnapshot lastSnapshot;
@@ -194,38 +190,13 @@ final class AutoReceiveTime {
     return lastSnapshot;
   }
 
-  /**
-   * A gap belongs to whole second {@code S} when it is in {@code (S − 1s, S + 0.5s]}. Overlaps take
-   * the nearer center. An exact {@code S + 0.5s} stays on {@code S}.
-   */
+  /** The greatest whole second the gap has reached. 60.6s stays 60s. 61.882s stays 61s. */
   static long wholeSecondNanos(long gapNanos) {
-    long second = TimeUnit.SECONDS.toNanos(1);
-    long half = second / 2;
     if (gapNanos <= 0L) {
       return 0L;
     }
-    long floorSec = gapNanos / second;
-    for (long s = floorSec; s <= floorSec + 1; s++) {
-      if (gapNanos == s * second + half) {
-        return s * second;
-      }
-    }
-    long best = floorSec * second;
-    long bestDist = Long.MAX_VALUE;
-    long from = Math.max(1L, floorSec - 1);
-    for (long s = from; s <= floorSec + 1; s++) {
-      long low = (s - 1) * second;
-      long high = s * second + half;
-      if (gapNanos > low && gapNanos <= high) {
-        long center = s * second - (half / 2);
-        long dist = Math.abs(gapNanos - center);
-        if (dist < bestDist) {
-          bestDist = dist;
-          best = s * second;
-        }
-      }
-    }
-    return best;
+    long second = TimeUnit.SECONDS.toNanos(1);
+    return (gapNanos / second) * second;
   }
 
   static boolean probeGapConsistent(long max, long second) {
@@ -289,7 +260,11 @@ final class AutoReceiveTime {
     if (!probeGapConsistent(max, second)) {
       return true;
     }
-    finishProbe(wholeSecondNanos(max));
+    long chosen = max;
+    if (Math.abs(max - second) <= (long) (max * PROBE_GAP_STABLE_RATIO)) {
+      chosen = Math.min(max, second);
+    }
+    finishProbe(wholeSecondNanos(chosen));
     return false;
   }
 
@@ -409,9 +384,6 @@ final class AutoReceiveTime {
     if (raised <= cycleTimeEstNanos) {
       return;
     }
-    if (!raiseAligned(raised)) {
-      return;
-    }
     boolean slept = false;
     if (commitRecorded && receiveDurationNanos > 0L) {
       long expectedSleep =
@@ -419,12 +391,15 @@ final class AutoReceiveTime {
       long actualExtra = cycleDurationNanos - receiveDurationNanos - commitDurationNanos;
       slept = actualExtra <= expectedSleep + MARGIN_NANOS;
     }
-    boolean busy =
-        commitRecorded
-            && receiveDurationNanos > 0L
-            && !slept
-            && cycleDurationNanos > cycleTimeEstNanos;
-    if (busy && raised < cycleTimeEstNanos * 2) {
+    boolean quiet = slept || gatherCount <= 0;
+    if (!quiet) {
+      return;
+    }
+    long oneSecond = TimeUnit.SECONDS.toNanos(1);
+    boolean oneSecondStep = raised == cycleTimeEstNanos + oneSecond;
+    boolean doublePeriod = raised >= cycleTimeEstNanos * 2;
+    boolean seedReceive = receiveBudgetNanos <= cycleTimeEstNanos / 2;
+    if (!doublePeriod && !(oneSecondStep && seedReceive)) {
       return;
     }
     cycleTimeEstNanos = raised;
@@ -433,17 +408,6 @@ final class AutoReceiveTime {
     if (receiveBudgetNanos > target && target > 0L) {
       receiveBudgetNanos = halfway(receiveBudgetNanos, target);
     }
-  }
-
-  private boolean raiseAligned(long raised) {
-    boolean near =
-        raised >= (long) (cycleTimeEstNanos * IDLE_RAISE_ALIGN_LOW)
-            && raised <= (long) (cycleTimeEstNanos * IDLE_RAISE_ALIGN_HIGH);
-    boolean hint =
-        processingTimeHint != null
-            && raised >= (long) (processingTimeHint.toNanos() * HINT_INTERVAL_FLOOR_RATIO);
-    boolean twice = lastCycleNanos > 0L && raised >= (long) (lastCycleNanos * 0.9);
-    return near || hint || twice || raised >= cycleTimeEstNanos * 2;
   }
 
   private boolean maybeCorrectShortEstimate() {
@@ -491,9 +455,6 @@ final class AutoReceiveTime {
             cycleDurationNanos,
             behind);
     LOG.info(lastSnapshot.toString());
-    if (commitRecorded) {
-      lastCycleNanos = receiveDurationNanos + commitDurationNanos;
-    }
   }
 
   private static long halfway(long current, long target) {

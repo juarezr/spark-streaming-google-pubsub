@@ -41,13 +41,19 @@ class AutoReceiveTimeTest {
   }
 
   @Test
-  void wholeSecondSnapsFiftyNinePointFourAndSixtyPointOneToSixty() {
+  void wholeSecondIsTheSecondTheGapHasReached() {
     assertEquals(
-        Duration.ofSeconds(60).toNanos(),
+        Duration.ofSeconds(59).toNanos(),
         AutoReceiveTime.wholeSecondNanos(Duration.ofMillis(59_400).toNanos()));
     assertEquals(
         Duration.ofSeconds(60).toNanos(),
         AutoReceiveTime.wholeSecondNanos(Duration.ofMillis(60_109).toNanos()));
+    assertEquals(
+        Duration.ofSeconds(60).toNanos(),
+        AutoReceiveTime.wholeSecondNanos(Duration.ofMillis(60_600).toNanos()));
+    assertEquals(
+        Duration.ofSeconds(61).toNanos(),
+        AutoReceiveTime.wholeSecondNanos(Duration.ofMillis(61_882).toNanos()));
     assertEquals(
         Duration.ofSeconds(61).toNanos(),
         AutoReceiveTime.wholeSecondNanos(Duration.ofSeconds(61).toNanos()));
@@ -205,6 +211,56 @@ class AutoReceiveTimeTest {
     assertFalse(auto.shouldProbe());
     assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
     assertEquals(Duration.ofSeconds(180), auto.inferredAckDeadline());
+  }
+
+  @Test
+  void twoSlightlyLongGapsFinishAtSixty() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofMillis(60_600).toNanos());
+    assertTrue(auto.shouldProbe());
+    now.addAndGet(Duration.ofMillis(60_800).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+    assertEquals(Duration.ofSeconds(30), auto.currentReceive());
+  }
+
+  @Test
+  void partialGapPlusFullPeriodKeepsTheLargerGap() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofSeconds(27).toNanos());
+    assertTrue(auto.shouldProbe());
+    now.addAndGet(Duration.ofSeconds(60).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+  }
+
+  @Test
+  void lateCycleAfterReceiveClimbsDoesNotRaiseTheEstimate() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 30, 1_000, 60_000, 1_000);
+    batch(auto, now, 30, 1_000, 60_000, 1_000);
+    assertTrue(auto.currentReceive().toNanos() > Duration.ofSeconds(30).toNanos());
+    batch(auto, now, 40, 1_000, 61_882, 10_000);
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+    batch(auto, now, 40, 1_000, 61_000, 1_000);
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+  }
+
+  @Test
+  void busyWallDoesNotRaiseTheEstimate() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 48, 1_000, 70_000, 10_000);
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
   }
 
   @Test
