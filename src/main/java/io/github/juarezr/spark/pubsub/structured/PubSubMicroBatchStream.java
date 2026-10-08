@@ -59,7 +59,7 @@ final class PubSubMicroBatchStream
   private volatile PublishTimeWindow lastGatheredWindow;
   private final ConcurrentMap<Long, List<PulledMessage>> messagesByBatch =
       new ConcurrentHashMap<>();
-  private final AutoBatchTime autoBatchTime;
+  private final AutoReceiveTime autoReceiveTime;
   private volatile boolean cancelled;
   private volatile boolean availableNow;
   private volatile boolean limitReached;
@@ -87,7 +87,7 @@ final class PubSubMicroBatchStream
     this.readSchema = readSchema == null ? PubSubSchema.tableSchema(config, null) : readSchema;
     this.client = client;
     this.ackCoordinator = new AckCoordinator(config.ackMode());
-    this.autoBatchTime = AutoBatchTime.create(config);
+    this.autoReceiveTime = AutoReceiveTime.create(config);
     this.numPartitions = Math.max(1, numPartitions);
     if (!startClient) {
       return;
@@ -158,7 +158,7 @@ final class PubSubMicroBatchStream
       resetMetrics();
       return nullIfEmpty ? null : this.currentOffset;
     }
-    if (!availableNow && autoBatchTime.shouldProbe()) {
+    if (!availableNow && autoReceiveTime.shouldProbe()) {
       resetMetrics();
       return nullIfEmpty ? null : currentOffset;
     }
@@ -219,7 +219,8 @@ final class PubSubMicroBatchStream
     AdmissionLimits limits =
         availableNow
             ? gatherLimits.withDrainUntilIdle()
-            : gatherLimits.withWaitTime(this.autoBatchTime.receiveWindow(gatherLimits.waitTime()));
+            : gatherLimits.withWaitTime(
+                this.autoReceiveTime.receiveWindow(gatherLimits.waitTime()));
 
     long gatherStarted = System.nanoTime();
     List<PulledMessage> pulled =
@@ -230,7 +231,7 @@ final class PubSubMicroBatchStream
                 : gatherMessagesUntilDeadline(limits);
     long gatherFinished = System.nanoTime();
 
-    this.autoBatchTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
+    this.autoReceiveTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
     return pulled;
   }
 
@@ -607,7 +608,7 @@ final class PubSubMicroBatchStream
       currentOffset = endOffset;
     }
     LOG.debug("BATCH: Committed offset batchId={}", endOffset.batchId());
-    autoBatchTime.onCommit();
+    autoReceiveTime.onCommit();
   }
 
   @Override
