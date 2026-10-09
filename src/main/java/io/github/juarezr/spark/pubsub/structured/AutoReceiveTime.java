@@ -17,9 +17,9 @@ import org.slf4j.LoggerFactory;
  * <p>{@code cycleTimeEst} is Spark's trigger, stored as a whole second. {@code receiveBudget} for
  * the next cycle is {@code cycleTimeEst − writeBudget}. {@code writeBudget} walks down from the
  * probe seed, by a quarter of the idle below the top quarter of the trigger and then by 3% of
- * {@code cycleTimeEst}, while that idle is above an eighth of the trigger. Once a quiet sleep fits
- * inside that 3% step, {@code writeBudget} is the median plus the spread of those non-receive times
- * ({@code sleepDuration + writeDuration}).
+ * {@code cycleTimeEst}, while that idle is above an eighth of the trigger and the cycle finished on
+ * time. In the top quarter the reserve becomes the median plus the spread of the commit and the
+ * overrun, once eight of those samples exist. Sleep is not one of the samples.
  */
 final class AutoReceiveTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoReceiveTime.class);
@@ -70,6 +70,7 @@ final class AutoReceiveTime {
     final long tailStdevNanos;
     final int messages;
     final long ratePerSecond;
+    final int tailSamples;
 
     CycleSnapshot(
         Phase phase,
@@ -87,7 +88,8 @@ final class AutoReceiveTime {
         long tailMedianNanos,
         long tailStdevNanos,
         int messages,
-        long ratePerSecond) {
+        long ratePerSecond,
+        int tailSamples) {
       this.phase = phase;
       this.cycleTimeEstNanos = cycleTimeEstNanos;
       this.marginTimeEstNanos = marginTimeEstNanos;
@@ -104,6 +106,7 @@ final class AutoReceiveTime {
       this.tailStdevNanos = tailStdevNanos;
       this.messages = messages;
       this.ratePerSecond = ratePerSecond;
+      this.tailSamples = tailSamples;
     }
 
     @Override
@@ -144,10 +147,14 @@ final class AutoReceiveTime {
     }
 
     private String phaseLabel() {
-      if (phase == Phase.CRUISE
-          && cycleTimeEstNanos > 0L
-          && receiveBudgetNanos < cycleTimeEstNanos - cycleTimeEstNanos / 4L) {
-        return "growth";
+      if (phase == Phase.CRUISE && cycleTimeEstNanos > 0L) {
+        long top = cycleTimeEstNanos - cycleTimeEstNanos / 4L;
+        if (receiveBudgetNanos < top) {
+          return "growth";
+        }
+        if (tailSamples < TAIL_WINDOW) {
+          return "sample";
+        }
       }
       return phase.name().toLowerCase();
     }
@@ -182,7 +189,6 @@ final class AutoReceiveTime {
   private boolean zeroTriggerWarned;
   private boolean intervalRaised;
   private boolean cycleCheckStopped;
-  private boolean reserveMeasured;
   private boolean cycleSlept;
   private boolean postFirstHeavyChecked;
   private long returnNanos;
@@ -463,32 +469,36 @@ final class AutoReceiveTime {
     }
     sleepDurationNanos =
         Math.max(0L, cycleDurationNanos - receiveDurationNanos - writeDurationNanos);
-    long nonReceive = sleepDurationNanos + writeDurationNanos;
     boolean quiet = slept || cycleDurationNanos <= estimate;
     boolean trulyLate = !slept && cycleDurationNanos > estimate + MARGIN_NANOS;
     boolean topQuarter = receiveBudgetNanos >= estimate - estimate / 4L;
     // Idle above an eighth of the trigger is spare from the climb, including after a spike.
     // Idle at or below that is the edge: another step is what made the next batch late.
     long idle = slept ? sleepDurationNanos : 0L;
-    boolean spare = idle > estimate / 8L;
-    if (trulyLate) {
+    long overrun = Math.max(0L, cycleDurationNanos - estimate);
+    // The 1s pad can still call a cycle slept when it is already past the trigger. That idle is
+    // not spare. A gap inside the 100ms snap is the whole second and still is.
+    boolean pastTrigger = overrun > WHOLE_SECOND_SNAP_NANOS;
+    boolean spare = idle > estimate / 8L && !pastTrigger;
+    if (topQuarter) {
+      // Sleep is the spare the budget left. The tail is the commit, plus the overrun when the
+      // cycle ran past the trigger.
+      pushTail(commitDurationNanos + (pastTrigger ? overrun : 0L));
+    }
+    boolean windowReady = topQuarter && tailCount >= TAIL_WINDOW;
+    if (windowReady) {
+      writeBudgetNanos = tailReserve();
+    } else if (trulyLate) {
       // The leftover still holds the climb's slack. Only the time past the trigger is new cost,
       // so one 62s cycle cannot freeze the reserve at sleep+write.
-      long overrun = cycleDurationNanos - estimate;
       if (overrun > 0L) {
         writeBudgetNanos += overrun;
       }
-    } else if (quiet && !reserveMeasured) {
-      if (topQuarter && sleepDurationNanos <= carefulStep(estimate) && nonReceive > 0L) {
-        pushTail(nonReceive);
-        writeBudgetNanos = tailReserve();
-        reserveMeasured = true;
-      } else if (spare) {
-        long step = growthStep(estimate, topQuarter);
-        if (step > 0L && sleepDurationNanos > step) {
-          long stepped = writeBudgetNanos - step;
-          writeBudgetNanos = Math.max(commitDurationNanos, stepped);
-        }
+    } else if (quiet && spare) {
+      long step = growthStep(estimate, topQuarter);
+      if (step > 0L && sleepDurationNanos > step) {
+        long stepped = writeBudgetNanos - step;
+        writeBudgetNanos = Math.max(commitDurationNanos, stepped);
       }
     }
     if (phase == Phase.WARMUP) {
@@ -498,7 +508,10 @@ final class AutoReceiveTime {
     long floor = Math.max(RECEIVE_FLOOR_NANOS, estimate / 4L);
     long next;
     if (target >= receiveBudgetNanos) {
-      long rise = quiet && (reserveMeasured || spare) ? growthStep(estimate, topQuarter) : 0L;
+      long rise =
+          windowReady
+              ? carefulStep(estimate)
+              : quiet && spare ? growthStep(estimate, topQuarter) : 0L;
       next = rise > 0L ? Math.min(receiveBudgetNanos + rise, target) : receiveBudgetNanos;
     } else {
       next = target;
@@ -687,7 +700,6 @@ final class AutoReceiveTime {
     probeNoiseCount = 0;
     intervalRaised = false;
     cycleCheckStopped = false;
-    reserveMeasured = false;
     tailCount = 0;
     tailCursor = 0;
     clearCycleCheck();
@@ -717,7 +729,8 @@ final class AutoReceiveTime {
             tailMedianNanos(),
             tailStdevNanos(),
             gatherCount,
-            rate);
+            rate,
+            tailCount);
     // TODO: soak-only: tailMedian, tailStdev, msgs, rate, and idleDuration — remove or lower this
     // line to debug before a provider release
     LOG.info(lastSnapshot.toString());

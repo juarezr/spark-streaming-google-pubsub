@@ -392,7 +392,7 @@ class AutoReceiveTimeTest {
   }
 
   @Test
-  void fullTriggerRecordsTheTailAndALaterQuietCycleDoesNotCutIt() {
+  void eightCruiseCyclesFillTheTailFromTheCommit() {
     AtomicLong now = new AtomicLong(0);
     AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
     finishProbe(auto, now, 60);
@@ -400,11 +400,31 @@ class AutoReceiveTimeTest {
     while (auto.currentReceive().compareTo(Duration.ofSeconds(45)) < 0) {
       batch(auto, now, 30, 1_000, 60_000, 1_000);
     }
-    batch(auto, now, 58, 1_000, 60_000, 1_000);
-    assertEquals(Duration.ofSeconds(2).toNanos(), auto.writeBudgetNanos());
-    assertTrue(auto.lastSnapshot().toString().contains("tailMedian=2000ms"));
-    batch(auto, now, 30, 1_000, 60_000, 1_000);
-    assertEquals(Duration.ofSeconds(2).toNanos(), auto.writeBudgetNanos());
+    for (int i = 0; i < 7; i++) {
+      batch(auto, now, 30, 1_000, 45_000, 1_000);
+      String line = auto.lastSnapshot().toString();
+      assertTrue(line.contains("phase=sample"));
+      assertTrue(line.contains("tailMedian=1000ms"));
+      assertFalse(line.contains("tailMedian=14000ms"));
+    }
+    batch(auto, now, 30, 1_000, 45_000, 1_000);
+    assertTrue(auto.lastSnapshot().toString().contains("phase=cruise"));
+    assertEquals(Duration.ofSeconds(1).toNanos(), auto.writeBudgetNanos());
+    long measured = auto.writeBudgetNanos();
+    batch(auto, now, 52, 1_000, 66_000, 10_000);
+    assertTrue(auto.writeBudgetNanos() < measured + Duration.ofSeconds(6).toNanos());
+    assertTrue(auto.lastSnapshot().toString().contains("tailMedian=1000ms"));
+  }
+
+  @Test
+  void lateCycleWithinThePadDoesNotStep() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    long seed = auto.writeBudgetNanos();
+    batch(auto, now, 52, 1_000, 60_905, 1_000);
+    assertEquals(seed, auto.writeBudgetNanos());
   }
 
   @Test
@@ -444,7 +464,7 @@ class AutoReceiveTimeTest {
     batch(auto, now, 30, 1_000, 60_000, 1_000);
     long careful = Duration.ofSeconds(60).toNanos() * 3L / 100L;
     assertEquals(before - careful, auto.writeBudgetNanos());
-    assertTrue(auto.lastSnapshot().toString().contains("phase=cruise"));
+    assertTrue(auto.lastSnapshot().toString().contains("phase=sample"));
     while (auto.currentReceive().compareTo(Duration.ofSeconds(52)) < 0) {
       batch(auto, now, 30, 1_000, 60_000, 1_000);
     }
