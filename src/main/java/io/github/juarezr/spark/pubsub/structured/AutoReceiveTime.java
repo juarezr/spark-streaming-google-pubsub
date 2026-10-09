@@ -15,8 +15,11 @@ import org.slf4j.LoggerFactory;
  * Fills {@code receiveTime} when the app omits it.
  *
  * <p>{@code cycleTimeEst} is Spark's trigger, stored as a whole second. {@code receiveBudget} for
- * the next cycle is {@code cycleTimeEst − writeBudget}. {@code writeBudget} is the median plus the
- * spread of the last full-trigger non-receive times ({@code sleepDuration + writeDuration}).
+ * the next cycle is {@code cycleTimeEst − writeBudget}. {@code writeBudget} walks down from the
+ * probe seed, by a quarter of the idle below the top quarter of the trigger and then by 3% of
+ * {@code cycleTimeEst}, and holds after a late cycle in that quarter. Once a quiet sleep fits
+ * inside that 3% step, {@code writeBudget} is the median plus the spread of those non-receive times
+ * ({@code sleepDuration + writeDuration}).
  */
 final class AutoReceiveTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoReceiveTime.class);
@@ -33,7 +36,8 @@ final class AutoReceiveTime {
   static final int CYCLE_CHECK_WINDOW = 8;
   static final long WHOLE_SECOND_SNAP_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
   static final long TAIL_SPREAD_CAP_NANOS = TimeUnit.SECONDS.toNanos(2);
-  static final long RECEIVE_STEP_NANOS = TimeUnit.SECONDS.toNanos(2);
+  static final int RAPID_IDLE_DIVISOR = 4;
+  static final int CAREFUL_STEP_PERCENT = 3;
   static final long SHORT_ESTIMATE_NANOS = TimeUnit.SECONDS.toNanos(45);
   static final double POST_FIRST_BATCH_CYCLE_RATIO = 1.25;
   static final Duration ZERO_TRIGGER_RECEIVE = Duration.ofSeconds(1);
@@ -59,6 +63,7 @@ final class AutoReceiveTime {
     final long writeDurationNanos;
     final long writeBudgetNanos;
     final long sleepDurationNanos;
+    final long idleDurationNanos;
     final long cycleDurationNanos;
     final long behindDurationNanos;
     final long tailMedianNanos;
@@ -76,6 +81,7 @@ final class AutoReceiveTime {
         long writeDurationNanos,
         long writeBudgetNanos,
         long sleepDurationNanos,
+        long idleDurationNanos,
         long cycleDurationNanos,
         long behindDurationNanos,
         long tailMedianNanos,
@@ -91,6 +97,7 @@ final class AutoReceiveTime {
       this.writeDurationNanos = writeDurationNanos;
       this.writeBudgetNanos = writeBudgetNanos;
       this.sleepDurationNanos = sleepDurationNanos;
+      this.idleDurationNanos = idleDurationNanos;
       this.cycleDurationNanos = cycleDurationNanos;
       this.behindDurationNanos = behindDurationNanos;
       this.tailMedianNanos = tailMedianNanos;
@@ -119,6 +126,8 @@ final class AutoReceiveTime {
           + elapsed(writeBudgetNanos)
           + " sleepDuration="
           + elapsed(sleepDurationNanos)
+          + " idleDuration="
+          + millis(idleDurationNanos)
           + " cycleDuration="
           + elapsed(cycleDurationNanos)
           + " behindDuration="
@@ -139,7 +148,11 @@ final class AutoReceiveTime {
     }
 
     private static String tailMillis(long nanos) {
-      return nanos < 0L ? "unset" : Long.toString(TimeUnit.NANOSECONDS.toMillis(nanos)) + "ms";
+      return nanos < 0L ? "unset" : millis(nanos);
+    }
+
+    private static String millis(long nanos) {
+      return Long.toString(TimeUnit.NANOSECONDS.toMillis(nanos)) + "ms";
     }
   }
 
@@ -161,6 +174,8 @@ final class AutoReceiveTime {
   private boolean intervalRaised;
   private boolean cycleCheckStopped;
   private boolean reserveMeasured;
+  private boolean climbHeld;
+  private boolean cycleSlept;
   private boolean postFirstHeavyChecked;
   private long returnNanos;
   private boolean commitRecorded;
@@ -398,6 +413,7 @@ final class AutoReceiveTime {
     if (lastMicroBatchStartNanos <= 0L) {
       return;
     }
+    cycleSlept = false;
     cycleDurationNanos = now - lastMicroBatchStartNanos;
     if (maybeCorrectShortEstimate()) {
       return;
@@ -431,6 +447,7 @@ final class AutoReceiveTime {
 
   private void applyWrite(long estimate) {
     boolean slept = sleptAgainstEstimate(estimate);
+    cycleSlept = slept;
     if (slept || cycleDurationNanos <= estimate) {
       writeDurationNanos = commitDurationNanos;
     } else {
@@ -441,6 +458,7 @@ final class AutoReceiveTime {
     long nonReceive = sleepDurationNanos + writeDurationNanos;
     boolean quiet = slept || cycleDurationNanos <= estimate;
     boolean trulyLate = !slept && cycleDurationNanos > estimate + MARGIN_NANOS;
+    boolean topQuarter = receiveBudgetNanos >= estimate - estimate / 4L;
     if (trulyLate) {
       // The leftover still holds the climb's slack. Only the time past the trigger is new cost,
       // so one 62s cycle cannot freeze the reserve at sleep+write.
@@ -448,14 +466,20 @@ final class AutoReceiveTime {
       if (overrun > 0L) {
         writeBudgetNanos += overrun;
       }
-    } else if (quiet && !reserveMeasured) {
-      if (sleepDurationNanos > RECEIVE_STEP_NANOS) {
-        long stepped = writeBudgetNanos - RECEIVE_STEP_NANOS;
-        writeBudgetNanos = Math.max(commitDurationNanos, stepped);
-      } else if (nonReceive > 0L) {
+      // A miss in the top quarter is the edge. Giving that step back to receive makes the next
+      // batch late by the same amount.
+      if (topQuarter) {
+        climbHeld = true;
+      }
+    } else if (quiet && !climbHeld && !reserveMeasured) {
+      long step = growthStep(estimate, topQuarter);
+      if (topQuarter && sleepDurationNanos <= carefulStep(estimate) && nonReceive > 0L) {
         pushTail(nonReceive);
         writeBudgetNanos = tailReserve();
         reserveMeasured = true;
+      } else if (step > 0L && sleepDurationNanos > step) {
+        long stepped = writeBudgetNanos - step;
+        writeBudgetNanos = Math.max(commitDurationNanos, stepped);
       }
     }
     if (phase == Phase.WARMUP) {
@@ -465,7 +489,8 @@ final class AutoReceiveTime {
     long floor = Math.max(RECEIVE_FLOOR_NANOS, estimate / 4L);
     long next;
     if (target >= receiveBudgetNanos) {
-      next = Math.min(receiveBudgetNanos + RECEIVE_STEP_NANOS, target);
+      long step = climbHeld ? 0L : growthStep(estimate, topQuarter);
+      next = step > 0L ? Math.min(receiveBudgetNanos + step, target) : receiveBudgetNanos;
     } else {
       next = target;
     }
@@ -473,6 +498,17 @@ final class AutoReceiveTime {
       next = floor;
     }
     receiveBudgetNanos = next;
+  }
+
+  private long growthStep(long estimate, boolean topQuarter) {
+    if (topQuarter) {
+      return carefulStep(estimate);
+    }
+    return sleepDurationNanos / RAPID_IDLE_DIVISOR;
+  }
+
+  private static long carefulStep(long estimate) {
+    return estimate * CAREFUL_STEP_PERCENT / 100L;
   }
 
   private void pushTail(long sample) {
@@ -643,6 +679,7 @@ final class AutoReceiveTime {
     intervalRaised = false;
     cycleCheckStopped = false;
     reserveMeasured = false;
+    climbHeld = false;
     tailCount = 0;
     tailCursor = 0;
     clearCycleCheck();
@@ -666,14 +703,15 @@ final class AutoReceiveTime {
             writeDurationNanos,
             writeBudgetNanos,
             sleepDurationNanos,
+            cycleSlept ? sleepDurationNanos : 0L,
             cycleDurationNanos,
             behind,
             tailMedianNanos(),
             tailStdevNanos(),
             gatherCount,
             rate);
-    // TODO: soak-only: tailMedian, tailStdev, msgs, and rate — remove or lower this line to debug
-    // before a provider release
+    // TODO: soak-only: tailMedian, tailStdev, msgs, rate, and idleDuration — remove or lower this
+    // line to debug before a provider release
     LOG.info(lastSnapshot.toString());
   }
 

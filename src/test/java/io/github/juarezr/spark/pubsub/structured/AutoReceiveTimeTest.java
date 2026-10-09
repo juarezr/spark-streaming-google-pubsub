@@ -173,8 +173,9 @@ class AutoReceiveTimeTest {
     assertFalse(auto.shouldProbe());
     batch(auto, now, 38, 1_000, 60_100, 10_000);
     assertEquals(Duration.ofSeconds(1).toNanos(), auto.writeDurationNanos());
-    assertEquals(Duration.ofSeconds(27).toNanos(), auto.writeBudgetNanos());
+    assertEquals(Duration.ofMillis(23_725).toNanos(), auto.writeBudgetNanos());
     String line = auto.lastSnapshot().toString();
+    assertTrue(line.contains("idleDuration=21100ms"));
     assertTrue(line.contains("tailMedian="));
     assertTrue(line.contains("tailStdev="));
     assertTrue(line.contains("msgs=10000"));
@@ -205,7 +206,7 @@ class AutoReceiveTimeTest {
     batch(auto, now, 48, 1_000, 70_000, 10_000);
     long bumped = auto.writeBudgetNanos();
     batch(auto, now, 40, 1_000, 50_000, 1_000);
-    assertEquals(bumped - Duration.ofSeconds(2).toNanos(), auto.writeBudgetNanos());
+    assertEquals(bumped - Duration.ofMillis(2_250).toNanos(), auto.writeBudgetNanos());
     assertTrue(auto.lastSnapshot().toString().contains("tailMedian=unset"));
   }
 
@@ -383,9 +384,10 @@ class AutoReceiveTimeTest {
     assertFalse(auto.shouldProbe());
     batch(auto, now, 48, 1_000, 62_301, 10_000);
     assertEquals(Duration.ofMillis(31_301).toNanos(), auto.writeBudgetNanos());
+    assertTrue(auto.lastSnapshot().toString().contains("idleDuration=0ms"));
     assertTrue(auto.lastSnapshot().toString().contains("tailMedian=unset"));
     batch(auto, now, 30, 1_000, 60_000, 1_000);
-    assertEquals(Duration.ofMillis(29_301).toNanos(), auto.writeBudgetNanos());
+    assertEquals(Duration.ofMillis(24_051).toNanos(), auto.writeBudgetNanos());
     assertTrue(auto.lastSnapshot().toString().contains("tailMedian=unset"));
   }
 
@@ -395,11 +397,74 @@ class AutoReceiveTimeTest {
     AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
     finishProbe(auto, now, 60);
     assertFalse(auto.shouldProbe());
+    while (auto.currentReceive().compareTo(Duration.ofSeconds(45)) < 0) {
+      batch(auto, now, 30, 1_000, 60_000, 1_000);
+    }
     batch(auto, now, 58, 1_000, 60_000, 1_000);
     assertEquals(Duration.ofSeconds(2).toNanos(), auto.writeBudgetNanos());
     assertTrue(auto.lastSnapshot().toString().contains("tailMedian=2000ms"));
     batch(auto, now, 30, 1_000, 60_000, 1_000);
     assertEquals(Duration.ofSeconds(2).toNanos(), auto.writeBudgetNanos());
+  }
+
+  @Test
+  void rapidClimbStepsByAQuarterOfTheIdle() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 30, 1_000, 47_000, 1_000);
+    assertEquals(Duration.ofSeconds(25).toNanos(), auto.writeBudgetNanos());
+    assertTrue(auto.lastSnapshot().toString().contains("idleDuration=16000ms"));
+  }
+
+  @Test
+  void shortIdleStepsByAQuarterOfThatIdle() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 30, 1_000, 34_600, 1_000);
+    assertEquals(Duration.ofMillis(28_100).toNanos(), auto.writeBudgetNanos());
+  }
+
+  @Test
+  void topQuarterStepsByThreePercentUntilALateCycleHolds() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    while (auto.currentReceive().compareTo(Duration.ofSeconds(45)) < 0) {
+      batch(auto, now, 30, 1_000, 60_000, 1_000);
+    }
+    long before = auto.writeBudgetNanos();
+    batch(auto, now, 30, 1_000, 60_000, 1_000);
+    long careful = Duration.ofSeconds(60).toNanos() * 3L / 100L;
+    assertEquals(before - careful, auto.writeBudgetNanos());
+    while (auto.currentReceive().compareTo(Duration.ofSeconds(52)) < 0) {
+      batch(auto, now, 30, 1_000, 60_000, 1_000);
+    }
+    long atEdge = auto.writeBudgetNanos();
+    batch(auto, now, 52, 1_000, 62_000, 10_000);
+    assertEquals(atEdge + Duration.ofSeconds(2).toNanos(), auto.writeBudgetNanos());
+    assertTrue(auto.lastSnapshot().toString().contains("idleDuration=0ms"));
+    batch(auto, now, 30, 1_000, 60_000, 1_000);
+    assertEquals(atEdge + Duration.ofSeconds(2).toNanos(), auto.writeBudgetNanos());
+  }
+
+  @Test
+  void lateCycleBelowTheTopQuarterStillSteps() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 30, 1_000, 55_000, 1_000);
+    assertEquals(Duration.ofSeconds(36), auto.currentReceive());
+    batch(auto, now, 36, 1_000, 62_000, 10_000);
+    long afterLate = auto.writeBudgetNanos();
+    batch(auto, now, 30, 1_000, 60_000, 1_000);
+    long idle = Duration.ofSeconds(29).toNanos();
+    assertEquals(afterLate - idle / 4L, auto.writeBudgetNanos());
   }
 
   @Test
