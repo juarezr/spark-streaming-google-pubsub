@@ -4,6 +4,7 @@ import io.github.juarezr.spark.pubsub.common.Into;
 import io.github.juarezr.spark.pubsub.config.GatherMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
@@ -13,9 +14,8 @@ import org.slf4j.LoggerFactory;
  * Fills {@code receiveTime} when the app omits it.
  *
  * <p>{@code cycleTimeEst} is Spark's trigger, stored as a whole second. {@code receiveBudget} for
- * the next cycle is {@code cycleTimeEst − writeBudget − marginTimeEst}. {@code writeBudget} is the
- * forecast of this cycle's {@code writeDuration}: it rises to a heavier measurement immediately and
- * otherwise moves halfway toward it.
+ * the next cycle is {@code cycleTimeEst − writeBudget}. {@code writeBudget} is the median plus the
+ * spread of the last full-trigger non-receive times ({@code sleepDuration + writeDuration}).
  */
 final class AutoReceiveTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoReceiveTime.class);
@@ -28,6 +28,9 @@ final class AutoReceiveTime {
   static final double PROBE_GAP_STABLE_RATIO = 0.10;
   static final double PROBE_FULL_PERIOD_RATIO = 1.5;
   static final int ZERO_TRIGGER_NOISE_CYCLES = 3;
+  static final int TAIL_WINDOW = 8;
+  static final long TAIL_SPREAD_CAP_NANOS = TimeUnit.SECONDS.toNanos(2);
+  static final long RECEIVE_STEP_NANOS = TimeUnit.SECONDS.toNanos(2);
   static final long SHORT_ESTIMATE_NANOS = TimeUnit.SECONDS.toNanos(45);
   static final double POST_FIRST_BATCH_CYCLE_RATIO = 1.25;
   static final Duration ZERO_TRIGGER_RECEIVE = Duration.ofSeconds(1);
@@ -137,6 +140,9 @@ final class AutoReceiveTime {
   private long lastMicroBatchStartNanos;
   private final long[] probeGapNanos = new long[PROBE_GAP_SAMPLES];
   private int probeGapCount;
+  private final long[] tailWindow = new long[TAIL_WINDOW];
+  private int tailCount;
+  private int tailCursor;
   private CycleSnapshot lastSnapshot;
 
   static AutoReceiveTime create(PubSubConfig config) {
@@ -357,23 +363,73 @@ final class AutoReceiveTime {
     }
     sleepDurationNanos =
         Math.max(0L, cycleDurationNanos - receiveDurationNanos - writeDurationNanos);
+    // sleep + write is the time that was not receive. A short receive leaves Spark's wait in that
+    // sum, so only a cycle that filled the trigger teaches the reserve.
+    long nonReceive = sleepDurationNanos + writeDurationNanos;
+    boolean filled = receiveDurationNanos >= estimate / 2L || cycleDurationNanos > estimate;
+    if (filled && nonReceive > 0L) {
+      pushTail(nonReceive);
+    }
     if (phase == Phase.WARMUP) {
-      writeBudgetNanos = writeDurationNanos;
+      writeBudgetNanos = tailCount > 0 ? writeBudgetFromWindow(nonReceive) : writeDurationNanos;
       phase = Phase.CRUISE;
       return;
     }
-    if (writeDurationNanos > writeBudgetNanos) {
-      writeBudgetNanos = writeDurationNanos;
-    } else if (slept || cycleDurationNanos <= estimate) {
-      writeBudgetNanos = halfway(writeBudgetNanos, writeDurationNanos);
+    if (tailCount > 0) {
+      writeBudgetNanos =
+          filled ? writeBudgetFromWindow(nonReceive) : tailReserve();
     }
-    long target = estimate - writeBudgetNanos - MARGIN_NANOS;
+    long target = Math.max(0L, estimate - writeBudgetNanos);
     long floor = Math.max(RECEIVE_FLOOR_NANOS, estimate / 4L);
-    long next = halfway(receiveBudgetNanos, target);
+    long next;
+    if (target >= receiveBudgetNanos) {
+      next = Math.min(receiveBudgetNanos + RECEIVE_STEP_NANOS, target);
+    } else {
+      next = target;
+    }
     if (next < floor) {
       next = floor;
     }
     receiveBudgetNanos = next;
+  }
+
+  private void pushTail(long sample) {
+    tailWindow[tailCursor] = sample;
+    tailCursor = (tailCursor + 1) % TAIL_WINDOW;
+    if (tailCount < TAIL_WINDOW) {
+      tailCount++;
+    }
+  }
+
+  /** Median plus one standard deviation. The added spread stops at {@link #TAIL_SPREAD_CAP_NANOS}. */
+  private long tailReserve() {
+    long[] sorted = Arrays.copyOf(tailWindow, tailCount);
+    Arrays.sort(sorted);
+    int n = sorted.length;
+    long median = (n & 1) == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2L;
+    if (n < 2) {
+      return median;
+    }
+    double mean = 0.0d;
+    for (long value : sorted) {
+      mean += value;
+    }
+    mean /= n;
+    double variance = 0.0d;
+    for (long value : sorted) {
+      double delta = value - mean;
+      variance += delta * delta;
+    }
+    long spread = (long) Math.sqrt(variance / n);
+    if (spread > TAIL_SPREAD_CAP_NANOS) {
+      spread = TAIL_SPREAD_CAP_NANOS;
+    }
+    return median + spread;
+  }
+
+  private long writeBudgetFromWindow(long sample) {
+    long reserve = tailReserve();
+    return sample > reserve ? sample : reserve;
   }
 
   private void maybeRaiseWholeSecond() {

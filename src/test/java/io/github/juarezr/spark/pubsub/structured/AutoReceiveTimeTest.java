@@ -116,9 +116,9 @@ class AutoReceiveTimeTest {
     batch(auto, now, 20, 1_000, 45_000, 1_000);
     assertTrue(auto.currentReceive().toNanos() > Duration.ofMillis(29_500).toNanos());
     assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
-    batch(auto, now, 20, 1_000, 59_998, 1_000);
+    batch(auto, now, 20, 1_000, 60_000, 1_000);
     assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
-    batch(auto, now, 20, 1_000, 59_998, 1_000);
+    batch(auto, now, 20, 1_000, 60_000, 1_000);
     assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
     assertEquals(Duration.ofSeconds(1).toNanos(), auto.writeDurationNanos());
   }
@@ -155,11 +155,11 @@ class AutoReceiveTimeTest {
     assertFalse(auto.shouldProbe());
     batch(auto, now, 38, 1_000, 60_100, 10_000);
     assertEquals(Duration.ofSeconds(1).toNanos(), auto.writeDurationNanos());
-    assertTrue(auto.writeBudgetNanos() < Duration.ofSeconds(5).toNanos());
+    assertEquals(Duration.ofMillis(22_100).toNanos(), auto.writeBudgetNanos());
   }
 
   @Test
-  void heavyWriteMovesReceiveHalfwayInsteadOfSnapping() {
+  void heavyWriteRaisesTheReserveWithoutJumpingReceive() {
     AtomicLong now = new AtomicLong(0);
     AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
     finishProbe(auto, now, 60);
@@ -167,28 +167,21 @@ class AutoReceiveTimeTest {
     batch(auto, now, 30, 1_000, 60_000, 1_000);
     long before = auto.currentReceive().toNanos();
     batch(auto, now, 48, 1_000, 70_000, 10_000);
-    long write = auto.writeDurationNanos();
-    assertTrue(write >= Duration.ofSeconds(20).toNanos());
-    long target =
-        Duration.ofSeconds(60).toNanos()
-            - auto.writeBudgetNanos()
-            - Duration.ofSeconds(1).toNanos();
-    long halfway = before + (target - before) / 2;
-    assertEquals(halfway, auto.currentReceive().toNanos());
-    assertTrue(auto.currentReceive().toNanos() != target);
+    assertTrue(auto.writeDurationNanos() >= Duration.ofSeconds(20).toNanos());
+    assertEquals(before + Duration.ofSeconds(2).toNanos(), auto.currentReceive().toNanos());
+    assertEquals(Duration.ofMillis(28_000).toNanos(), auto.writeBudgetNanos());
   }
 
   @Test
-  void quietStretchHalvesTheBudget() {
+  void quietCycleKeepsTheWindowReserve() {
     AtomicLong now = new AtomicLong(0);
     AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
     finishProbe(auto, now, 60);
     assertFalse(auto.shouldProbe());
     batch(auto, now, 48, 1_000, 70_000, 10_000);
-    long peak = auto.writeBudgetNanos();
-    assertTrue(peak >= Duration.ofSeconds(20).toNanos());
+    assertTrue(auto.writeBudgetNanos() >= Duration.ofSeconds(20).toNanos());
     batch(auto, now, 40, 1_000, 50_000, 1_000);
-    assertEquals(peak + (Duration.ofSeconds(1).toNanos() - peak) / 2, auto.writeBudgetNanos());
+    assertEquals(Duration.ofMillis(18_000).toNanos(), auto.writeBudgetNanos());
   }
 
   @Test
@@ -289,7 +282,7 @@ class AutoReceiveTimeTest {
     assertFalse(auto.shouldProbe());
     batch(auto, now, 30, 1_000, 60_000, 1_000);
     batch(auto, now, 30, 1_000, 60_000, 1_000);
-    assertTrue(auto.currentReceive().toNanos() > Duration.ofSeconds(30).toNanos());
+    assertEquals(Duration.ofSeconds(30), auto.currentReceive());
     batch(auto, now, 40, 1_000, 61_882, 10_000);
     assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
   }
