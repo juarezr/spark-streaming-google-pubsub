@@ -17,7 +17,7 @@ import org.slf4j.LoggerFactory;
  * <p>{@code cycleTimeEst} is Spark's trigger, stored as a whole second. {@code receiveBudget} for
  * the next cycle is {@code cycleTimeEst − writeBudget}. {@code writeBudget} walks down from the
  * probe seed, by a quarter of the idle below the top quarter of the trigger and then by 3% of
- * {@code cycleTimeEst}, and holds after a late cycle in that quarter. Once a quiet sleep fits
+ * {@code cycleTimeEst}, while that idle is above an eighth of the trigger. Once a quiet sleep fits
  * inside that 3% step, {@code writeBudget} is the median plus the spread of those non-receive times
  * ({@code sleepDuration + writeDuration}).
  */
@@ -109,7 +109,7 @@ final class AutoReceiveTime {
     @Override
     public String toString() {
       return "AUTO phase="
-          + phase.name().toLowerCase()
+          + phaseLabel()
           + " cycleTimeEst="
           + elapsed(cycleTimeEstNanos)
           + " marginTimeEst="
@@ -143,6 +143,15 @@ final class AutoReceiveTime {
           + "/s";
     }
 
+    private String phaseLabel() {
+      if (phase == Phase.CRUISE
+          && cycleTimeEstNanos > 0L
+          && receiveBudgetNanos < cycleTimeEstNanos - cycleTimeEstNanos / 4L) {
+        return "growth";
+      }
+      return phase.name().toLowerCase();
+    }
+
     private static String elapsed(long nanos) {
       return nanos <= 0L ? "0s" : Into.elapsed(nanos);
     }
@@ -174,7 +183,6 @@ final class AutoReceiveTime {
   private boolean intervalRaised;
   private boolean cycleCheckStopped;
   private boolean reserveMeasured;
-  private boolean climbHeld;
   private boolean cycleSlept;
   private boolean postFirstHeavyChecked;
   private long returnNanos;
@@ -459,6 +467,10 @@ final class AutoReceiveTime {
     boolean quiet = slept || cycleDurationNanos <= estimate;
     boolean trulyLate = !slept && cycleDurationNanos > estimate + MARGIN_NANOS;
     boolean topQuarter = receiveBudgetNanos >= estimate - estimate / 4L;
+    // Idle above an eighth of the trigger is spare from the climb, including after a spike.
+    // Idle at or below that is the edge: another step is what made the next batch late.
+    long idle = slept ? sleepDurationNanos : 0L;
+    boolean spare = idle > estimate / 8L;
     if (trulyLate) {
       // The leftover still holds the climb's slack. Only the time past the trigger is new cost,
       // so one 62s cycle cannot freeze the reserve at sleep+write.
@@ -466,20 +478,17 @@ final class AutoReceiveTime {
       if (overrun > 0L) {
         writeBudgetNanos += overrun;
       }
-      // A miss in the top quarter is the edge. Giving that step back to receive makes the next
-      // batch late by the same amount.
-      if (topQuarter) {
-        climbHeld = true;
-      }
-    } else if (quiet && !climbHeld && !reserveMeasured) {
-      long step = growthStep(estimate, topQuarter);
+    } else if (quiet && !reserveMeasured) {
       if (topQuarter && sleepDurationNanos <= carefulStep(estimate) && nonReceive > 0L) {
         pushTail(nonReceive);
         writeBudgetNanos = tailReserve();
         reserveMeasured = true;
-      } else if (step > 0L && sleepDurationNanos > step) {
-        long stepped = writeBudgetNanos - step;
-        writeBudgetNanos = Math.max(commitDurationNanos, stepped);
+      } else if (spare) {
+        long step = growthStep(estimate, topQuarter);
+        if (step > 0L && sleepDurationNanos > step) {
+          long stepped = writeBudgetNanos - step;
+          writeBudgetNanos = Math.max(commitDurationNanos, stepped);
+        }
       }
     }
     if (phase == Phase.WARMUP) {
@@ -489,8 +498,8 @@ final class AutoReceiveTime {
     long floor = Math.max(RECEIVE_FLOOR_NANOS, estimate / 4L);
     long next;
     if (target >= receiveBudgetNanos) {
-      long step = climbHeld ? 0L : growthStep(estimate, topQuarter);
-      next = step > 0L ? Math.min(receiveBudgetNanos + step, target) : receiveBudgetNanos;
+      long rise = quiet && (reserveMeasured || spare) ? growthStep(estimate, topQuarter) : 0L;
+      next = rise > 0L ? Math.min(receiveBudgetNanos + rise, target) : receiveBudgetNanos;
     } else {
       next = target;
     }
@@ -679,7 +688,6 @@ final class AutoReceiveTime {
     intervalRaised = false;
     cycleCheckStopped = false;
     reserveMeasured = false;
-    climbHeld = false;
     tailCount = 0;
     tailCursor = 0;
     clearCycleCheck();
