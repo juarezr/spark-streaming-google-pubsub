@@ -258,6 +258,18 @@ class AutoReceiveTimeTest {
   }
 
   @Test
+  void pairJustUnderTheNextSecondStaysAtSixty() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 30, 1_000, 60_736, 1_000);
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+    batch(auto, now, 30, 1_000, 60_957, 1_000);
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+  }
+
+  @Test
   void singleLateCycleArmsAndTheNextClearsIt() {
     AtomicLong now = new AtomicLong(0);
     AutoReceiveTime auto = new AutoReceiveTime(null, now::get);

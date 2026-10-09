@@ -389,10 +389,11 @@ final class AutoReceiveTime {
     }
     boolean quiet = slept || gatherCount <= 0;
     long oneSecond = TimeUnit.SECONDS.toNanos(1);
-    long halfSecond = oneSecond / 2;
+    // The estimate is stored in whole seconds, so the raise is one second, and only after the
+    // batch has actually reached that next second. A batch at 60.7s against 60s stays put.
     boolean upperHalf =
-        cycleDurationNanos > cycleTimeEstNanos + halfSecond
-            && cycleDurationNanos <= cycleTimeEstNanos + oneSecond;
+        cycleDurationNanos >= cycleTimeEstNanos + oneSecond
+            && cycleDurationNanos < cycleTimeEstNanos + 2 * oneSecond;
     // TODO: soak-only: remove or lower it to debug level before a provider release
     if (cycleDurationNanos > cycleTimeEstNanos) {
       LOG.info(
@@ -423,9 +424,9 @@ final class AutoReceiveTime {
         Into.elapsed(raised));
     cycleTimeEstNanos = raised;
     intervalRaised = true;
-    long target = cycleTimeEstNanos - writeBudgetNanos - MARGIN_NANOS;
-    if (receiveBudgetNanos > target && target > 0L) {
-      receiveBudgetNanos = halfway(receiveBudgetNanos, target);
+    long target = Math.max(0L, cycleTimeEstNanos - writeBudgetNanos);
+    if (receiveBudgetNanos > target) {
+      receiveBudgetNanos = target;
     }
   }
 
@@ -453,6 +454,8 @@ final class AutoReceiveTime {
     probeNoiseCount = 0;
     intervalRaised = false;
     upperHalfArmed = false;
+    tailCount = 0;
+    tailCursor = 0;
     lastMicroBatchStartNanos = 0L;
     return true;
   }
@@ -474,10 +477,6 @@ final class AutoReceiveTime {
             cycleDurationNanos,
             behind);
     LOG.info(lastSnapshot.toString());
-  }
-
-  private static long halfway(long current, long target) {
-    return current + (target - current) / 2;
   }
 
   private void enterZeroTrigger() {
