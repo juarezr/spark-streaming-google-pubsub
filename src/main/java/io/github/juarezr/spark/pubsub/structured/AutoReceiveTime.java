@@ -5,6 +5,7 @@ import io.github.juarezr.spark.pubsub.config.GatherMode;
 import io.github.juarezr.spark.pubsub.config.PubSubConfig;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.OptionalLong;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
@@ -29,6 +30,8 @@ final class AutoReceiveTime {
   static final double PROBE_FULL_PERIOD_RATIO = 1.5;
   static final int ZERO_TRIGGER_NOISE_CYCLES = 3;
   static final int TAIL_WINDOW = 8;
+  static final int CYCLE_CHECK_WINDOW = 8;
+  static final long WHOLE_SECOND_SNAP_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
   static final long TAIL_SPREAD_CAP_NANOS = TimeUnit.SECONDS.toNanos(2);
   static final long RECEIVE_STEP_NANOS = TimeUnit.SECONDS.toNanos(2);
   static final long SHORT_ESTIMATE_NANOS = TimeUnit.SECONDS.toNanos(45);
@@ -58,6 +61,10 @@ final class AutoReceiveTime {
     final long sleepDurationNanos;
     final long cycleDurationNanos;
     final long behindDurationNanos;
+    final long tailMedianNanos;
+    final long tailStdevNanos;
+    final int messages;
+    final long ratePerSecond;
 
     CycleSnapshot(
         Phase phase,
@@ -70,7 +77,11 @@ final class AutoReceiveTime {
         long writeBudgetNanos,
         long sleepDurationNanos,
         long cycleDurationNanos,
-        long behindDurationNanos) {
+        long behindDurationNanos,
+        long tailMedianNanos,
+        long tailStdevNanos,
+        int messages,
+        long ratePerSecond) {
       this.phase = phase;
       this.cycleTimeEstNanos = cycleTimeEstNanos;
       this.marginTimeEstNanos = marginTimeEstNanos;
@@ -82,6 +93,10 @@ final class AutoReceiveTime {
       this.sleepDurationNanos = sleepDurationNanos;
       this.cycleDurationNanos = cycleDurationNanos;
       this.behindDurationNanos = behindDurationNanos;
+      this.tailMedianNanos = tailMedianNanos;
+      this.tailStdevNanos = tailStdevNanos;
+      this.messages = messages;
+      this.ratePerSecond = ratePerSecond;
     }
 
     @Override
@@ -107,11 +122,24 @@ final class AutoReceiveTime {
           + " cycleDuration="
           + elapsed(cycleDurationNanos)
           + " behindDuration="
-          + elapsed(behindDurationNanos);
+          + elapsed(behindDurationNanos)
+          + " tailMedian="
+          + tailMillis(tailMedianNanos)
+          + " tailStdev="
+          + tailMillis(tailStdevNanos)
+          + " msgs="
+          + messages
+          + " rate="
+          + ratePerSecond
+          + "/s";
     }
 
     private static String elapsed(long nanos) {
       return nanos <= 0L ? "0s" : Into.elapsed(nanos);
+    }
+
+    private static String tailMillis(long nanos) {
+      return nanos < 0L ? "unset" : Long.toString(TimeUnit.NANOSECONDS.toMillis(nanos)) + "ms";
     }
   }
 
@@ -131,7 +159,8 @@ final class AutoReceiveTime {
   private int probeNoiseCount;
   private boolean zeroTriggerWarned;
   private boolean intervalRaised;
-  private boolean upperHalfArmed;
+  private boolean cycleCheckStopped;
+  private boolean reserveMeasured;
   private boolean postFirstHeavyChecked;
   private long returnNanos;
   private boolean commitRecorded;
@@ -143,6 +172,9 @@ final class AutoReceiveTime {
   private final long[] tailWindow = new long[TAIL_WINDOW];
   private int tailCount;
   private int tailCursor;
+  private final long[] cycleWindow = new long[CYCLE_CHECK_WINDOW];
+  private int cycleCount;
+  private Long pendingCycleSecondNanos;
   private CycleSnapshot lastSnapshot;
 
   static AutoReceiveTime create(PubSubConfig config) {
@@ -196,13 +228,38 @@ final class AutoReceiveTime {
     return lastSnapshot;
   }
 
-  /** The greatest whole second the gap has reached. 60.6s stays 60s. 61.882s stays 61s. */
+  /**
+   * The greatest whole second the gap has reached. 60.6s stays 60s. A gap within {@link
+   * #WHOLE_SECOND_SNAP_NANOS} under the next second is that second, so 59999ms is 60s.
+   */
   static long wholeSecondNanos(long gapNanos) {
     if (gapNanos <= 0L) {
       return 0L;
     }
     long second = TimeUnit.SECONDS.toNanos(1);
-    return (gapNanos / second) * second;
+    long floor = (gapNanos / second) * second;
+    long next = floor + second;
+    if (gapNanos != floor && next - gapNanos <= WHOLE_SECOND_SNAP_NANOS) {
+      return next;
+    }
+    return floor;
+  }
+
+  /** The whole second a cycle sits on, or empty when it is more than the snap away from both. */
+  static OptionalLong namedWholeSecond(long nanos) {
+    if (nanos <= 0L) {
+      return OptionalLong.empty();
+    }
+    long second = TimeUnit.SECONDS.toNanos(1);
+    long floor = (nanos / second) * second;
+    if (nanos - floor <= WHOLE_SECOND_SNAP_NANOS) {
+      return OptionalLong.of(floor);
+    }
+    long next = floor + second;
+    if (next - nanos <= WHOLE_SECOND_SNAP_NANOS) {
+      return OptionalLong.of(next);
+    }
+    return OptionalLong.empty();
   }
 
   static boolean probeGapConsistent(long max, long second) {
@@ -345,17 +402,35 @@ final class AutoReceiveTime {
     if (maybeCorrectShortEstimate()) {
       return;
     }
-    maybeRaiseWholeSecond();
+    maybeCorrectCycleTime();
     if (commitRecorded && receiveDurationNanos > 0L) {
       applyWrite(cycleTimeEstNanos);
     }
     logSnapshot();
   }
 
-  private void applyWrite(long estimate) {
+  private boolean sleptAgainstEstimate(long estimate) {
+    if (!commitRecorded || receiveDurationNanos <= 0L) {
+      return false;
+    }
     long expectedSleep = Math.max(0L, estimate - receiveDurationNanos - commitDurationNanos);
     long actualExtra = cycleDurationNanos - receiveDurationNanos - commitDurationNanos;
-    boolean slept = actualExtra <= expectedSleep + MARGIN_NANOS;
+    if (actualExtra <= expectedSleep + MARGIN_NANOS) {
+      return true;
+    }
+    // A cycle that lands within the snap of this second or the next one is the trigger, not a late
+    // write. A 1ms-short estimate otherwise labels the whole wait as writeDuration.
+    long oneSecond = TimeUnit.SECONDS.toNanos(1);
+    return withinSnap(cycleDurationNanos, estimate)
+        || withinSnap(cycleDurationNanos, estimate + oneSecond);
+  }
+
+  private static boolean withinSnap(long value, long second) {
+    return Math.abs(value - second) <= WHOLE_SECOND_SNAP_NANOS;
+  }
+
+  private void applyWrite(long estimate) {
+    boolean slept = sleptAgainstEstimate(estimate);
     if (slept || cycleDurationNanos <= estimate) {
       writeDurationNanos = commitDurationNanos;
     } else {
@@ -363,21 +438,28 @@ final class AutoReceiveTime {
     }
     sleepDurationNanos =
         Math.max(0L, cycleDurationNanos - receiveDurationNanos - writeDurationNanos);
-    // sleep + write is the time that was not receive. A short receive leaves Spark's wait in that
-    // sum, so only a cycle that filled the trigger teaches the reserve.
     long nonReceive = sleepDurationNanos + writeDurationNanos;
-    boolean filled = receiveDurationNanos >= estimate / 2L || cycleDurationNanos > estimate;
-    if (filled && nonReceive > 0L) {
+    boolean trulyLate = !slept && cycleDurationNanos > estimate + MARGIN_NANOS;
+    if (!reserveMeasured) {
+      if (trulyLate && nonReceive > 0L) {
+        pushTail(nonReceive);
+        writeBudgetNanos = nonReceive;
+        reserveMeasured = true;
+      } else if (slept || cycleDurationNanos <= estimate) {
+        // The probe seed is half the trigger. A quiet leftover is Spark's wait, so step it down
+        // instead of teaching that wait to the reserve.
+        long stepped = writeBudgetNanos - RECEIVE_STEP_NANOS;
+        writeBudgetNanos = Math.max(commitDurationNanos, stepped);
+      }
+    } else if (trulyLate && nonReceive > 0L) {
       pushTail(nonReceive);
+      writeBudgetNanos = writeBudgetFromWindow(nonReceive);
+    } else if (slept && nonReceive > 0L && nonReceive <= writeBudgetNanos + RECEIVE_STEP_NANOS) {
+      pushTail(nonReceive);
+      writeBudgetNanos = tailReserve();
     }
     if (phase == Phase.WARMUP) {
-      writeBudgetNanos = tailCount > 0 ? writeBudgetFromWindow(nonReceive) : writeDurationNanos;
       phase = Phase.CRUISE;
-      return;
-    }
-    if (tailCount > 0) {
-      writeBudgetNanos =
-          filled ? writeBudgetFromWindow(nonReceive) : tailReserve();
     }
     long target = Math.max(0L, estimate - writeBudgetNanos);
     long floor = Math.max(RECEIVE_FLOOR_NANOS, estimate / 4L);
@@ -401,30 +483,55 @@ final class AutoReceiveTime {
     }
   }
 
-  /** Median plus one standard deviation. The added spread stops at {@link #TAIL_SPREAD_CAP_NANOS}. */
+  /**
+   * Median plus one standard deviation. The added spread stops at {@link #TAIL_SPREAD_CAP_NANOS}.
+   */
   private long tailReserve() {
-    long[] sorted = Arrays.copyOf(tailWindow, tailCount);
-    Arrays.sort(sorted);
-    int n = sorted.length;
-    long median = (n & 1) == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2L;
-    if (n < 2) {
+    long median = tailMedianNanos();
+    if (tailCount < 2) {
       return median;
     }
+    long spread = tailStdevNanos();
+    if (spread > TAIL_SPREAD_CAP_NANOS) {
+      spread = TAIL_SPREAD_CAP_NANOS;
+    }
+    return median + spread;
+  }
+
+  private long tailMedianNanos() {
+    if (tailCount <= 0) {
+      return -1L;
+    }
+    long[] sorted = sortedTail();
+    int n = sorted.length;
+    return (n & 1) == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2L;
+  }
+
+  private long tailStdevNanos() {
+    if (tailCount <= 0) {
+      return -1L;
+    }
+    if (tailCount < 2) {
+      return 0L;
+    }
+    long[] sorted = sortedTail();
     double mean = 0.0d;
     for (long value : sorted) {
       mean += value;
     }
-    mean /= n;
+    mean /= sorted.length;
     double variance = 0.0d;
     for (long value : sorted) {
       double delta = value - mean;
       variance += delta * delta;
     }
-    long spread = (long) Math.sqrt(variance / n);
-    if (spread > TAIL_SPREAD_CAP_NANOS) {
-      spread = TAIL_SPREAD_CAP_NANOS;
-    }
-    return median + spread;
+    return (long) Math.sqrt(variance / sorted.length);
+  }
+
+  private long[] sortedTail() {
+    long[] sorted = Arrays.copyOf(tailWindow, tailCount);
+    Arrays.sort(sorted);
+    return sorted;
   }
 
   private long writeBudgetFromWindow(long sample) {
@@ -432,58 +539,88 @@ final class AutoReceiveTime {
     return sample > reserve ? sample : reserve;
   }
 
-  private void maybeRaiseWholeSecond() {
-    if (intervalRaised || cycleDurationNanos <= 0L || cycleTimeEstNanos <= 0L) {
+  private void maybeCorrectCycleTime() {
+    if (cycleDurationNanos <= 0L || cycleTimeEstNanos <= 0L || cycleCheckStopped) {
       return;
     }
-    boolean slept = false;
-    if (commitRecorded && receiveDurationNanos > 0L) {
-      long expectedSleep =
-          Math.max(0L, cycleTimeEstNanos - receiveDurationNanos - commitDurationNanos);
-      long actualExtra = cycleDurationNanos - receiveDurationNanos - commitDurationNanos;
-      slept = actualExtra <= expectedSleep + MARGIN_NANOS;
+    if (!intervalRaised && quietDoublePeriod()) {
+      adoptEstimate(wholeSecondNanos(cycleDurationNanos));
+      intervalRaised = true;
+      clearCycleCheck();
+      return;
     }
-    boolean quiet = slept || gatherCount <= 0;
-    long oneSecond = TimeUnit.SECONDS.toNanos(1);
-    // The estimate is stored in whole seconds, so the raise is one second, and only after the
-    // batch has actually reached that next second. A batch at 60.7s against 60s stays put.
-    boolean upperHalf =
-        cycleDurationNanos >= cycleTimeEstNanos + oneSecond
-            && cycleDurationNanos < cycleTimeEstNanos + 2 * oneSecond;
-    // TODO: soak-only: remove or lower it to debug level before a provider release
-    if (cycleDurationNanos > cycleTimeEstNanos) {
-      LOG.info(
-          "AUTO phase={} cycleTimeEst held cycleDuration={}ms quiet={} upperHalf={}",
-          phase.name().toLowerCase(),
-          TimeUnit.NANOSECONDS.toMillis(cycleDurationNanos),
-          quiet,
-          upperHalf);
-    }
+    noteCycleDuration(cycleDurationNanos);
+  }
+
+  private boolean quietDoublePeriod() {
     long raised = wholeSecondNanos(cycleDurationNanos);
-    boolean doublePeriod = raised >= cycleTimeEstNanos * 2;
-    if (upperHalf && quiet) {
-      if (!upperHalfArmed) {
-        upperHalfArmed = true;
-        return;
-      }
-      raised = cycleTimeEstNanos + oneSecond;
-    } else if (!(quiet && doublePeriod)) {
-      upperHalfArmed = false;
+    if (raised < cycleTimeEstNanos * 2L) {
+      return false;
+    }
+    return gatherCount <= 0 || sleptAgainstEstimate(cycleTimeEstNanos);
+  }
+
+  private void noteCycleDuration(long cycle) {
+    cycleWindow[cycleCount] = cycle;
+    cycleCount++;
+    if (cycleCount < CYCLE_CHECK_WINDOW) {
       return;
     }
-    upperHalfArmed = false;
+    OptionalLong tight = tightSecond(cycleWindow);
+    cycleCount = 0;
     // TODO: soak-only: remove or lower it to debug level before a provider release
     LOG.info(
-        "AUTO phase={} cycleTimeEst raised {} -> {}",
+        "AUTO phase={} cycleCheck round={} pending={}",
+        phase.name().toLowerCase(),
+        tight.isPresent() ? Into.elapsed(tight.getAsLong()) : "unset",
+        pendingCycleSecondNanos == null ? "unset" : Into.elapsed(pendingCycleSecondNanos));
+    if (tight.isEmpty()) {
+      pendingCycleSecondNanos = null;
+      return;
+    }
+    long second = tight.getAsLong();
+    if (pendingCycleSecondNanos == null || pendingCycleSecondNanos.longValue() != second) {
+      pendingCycleSecondNanos = second;
+      return;
+    }
+    if (second != cycleTimeEstNanos) {
+      adoptEstimate(second);
+    }
+    cycleCheckStopped = true;
+    pendingCycleSecondNanos = null;
+  }
+
+  private static OptionalLong tightSecond(long[] samples) {
+    OptionalLong named = namedWholeSecond(samples[0]);
+    if (named.isEmpty()) {
+      return OptionalLong.empty();
+    }
+    long second = named.getAsLong();
+    for (int i = 1; i < samples.length; i++) {
+      if (!withinSnap(samples[i], second)) {
+        return OptionalLong.empty();
+      }
+    }
+    return named;
+  }
+
+  private void adoptEstimate(long next) {
+    // TODO: soak-only: remove or lower it to debug level before a provider release
+    LOG.info(
+        "AUTO phase={} cycleTimeEst set {} -> {}",
         phase.name().toLowerCase(),
         Into.elapsed(cycleTimeEstNanos),
-        Into.elapsed(raised));
-    cycleTimeEstNanos = raised;
-    intervalRaised = true;
+        Into.elapsed(next));
+    cycleTimeEstNanos = next;
     long target = Math.max(0L, cycleTimeEstNanos - writeBudgetNanos);
     if (receiveBudgetNanos > target) {
       receiveBudgetNanos = target;
     }
+  }
+
+  private void clearCycleCheck() {
+    cycleCount = 0;
+    pendingCycleSecondNanos = null;
   }
 
   private boolean maybeCorrectShortEstimate() {
@@ -509,9 +646,11 @@ final class AutoReceiveTime {
     probeGapCount = 0;
     probeNoiseCount = 0;
     intervalRaised = false;
-    upperHalfArmed = false;
+    cycleCheckStopped = false;
+    reserveMeasured = false;
     tailCount = 0;
     tailCursor = 0;
+    clearCycleCheck();
     lastMicroBatchStartNanos = 0L;
     return true;
   }
@@ -519,6 +658,8 @@ final class AutoReceiveTime {
   private void logSnapshot() {
     long behind =
         Math.max(0L, cycleDurationNanos - (cycleTimeEstNanos > 0L ? cycleTimeEstNanos : 0L));
+    long rate =
+        receiveDurationNanos <= 0L ? 0L : (gatherCount * 1_000_000_000L) / receiveDurationNanos;
     lastSnapshot =
         new CycleSnapshot(
             phase,
@@ -531,7 +672,13 @@ final class AutoReceiveTime {
             writeBudgetNanos,
             sleepDurationNanos,
             cycleDurationNanos,
-            behind);
+            behind,
+            tailMedianNanos(),
+            tailStdevNanos(),
+            gatherCount,
+            rate);
+    // TODO: soak-only: tailMedian, tailStdev, msgs, and rate — remove or lower this line to debug
+    // before a provider release
     LOG.info(lastSnapshot.toString());
   }
 

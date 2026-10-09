@@ -40,6 +40,13 @@ class AutoReceiveTimeTest {
     assertFalse(auto.shouldProbe());
   }
 
+  private static void batches(
+      AutoReceiveTime auto, AtomicLong now, int times, long gatherSeconds, long wallMillis) {
+    for (int i = 0; i < times; i++) {
+      batch(auto, now, gatherSeconds, 1_000, wallMillis, 1_000);
+    }
+  }
+
   @Test
   void wholeSecondIsTheSecondTheGapHasReached() {
     assertEquals(
@@ -66,6 +73,15 @@ class AutoReceiveTimeTest {
     assertEquals(
         Duration.ofSeconds(60).toNanos(),
         AutoReceiveTime.wholeSecondNanos(Duration.ofMillis(60_500).toNanos()));
+    assertEquals(
+        Duration.ofSeconds(60).toNanos(),
+        AutoReceiveTime.wholeSecondNanos(Duration.ofMillis(59_999).toNanos()));
+    assertEquals(
+        Duration.ofSeconds(60).toNanos(),
+        AutoReceiveTime.wholeSecondNanos(Duration.ofMillis(59_900).toNanos()));
+    assertEquals(
+        Duration.ofSeconds(59).toNanos(),
+        AutoReceiveTime.wholeSecondNanos(Duration.ofMillis(59_899).toNanos()));
   }
 
   @Test
@@ -107,7 +123,7 @@ class AutoReceiveTimeTest {
   }
 
   @Test
-  void shortWallAfterReceiveClimbsRaisesFiftyNineToSixty() {
+  void shortWallAfterReceiveClimbsStaysAtFiftyNine() {
     AtomicLong now = new AtomicLong(0);
     AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
     finishProbe(auto, now, 59);
@@ -119,20 +135,22 @@ class AutoReceiveTimeTest {
     batch(auto, now, 20, 1_000, 60_000, 1_000);
     assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
     batch(auto, now, 20, 1_000, 60_000, 1_000);
-    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+    assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
     assertEquals(Duration.ofSeconds(1).toNanos(), auto.writeDurationNanos());
   }
 
   @Test
-  void fiftyNineSecondProbeRisesToSixtyOnTheNextFire() {
+  void fiftyNineSecondProbeRisesToSixtyAfterTwoRounds() {
     AtomicLong now = new AtomicLong(0);
     AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
     finishProbe(auto, now, 59);
     assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
     assertFalse(auto.shouldProbe());
-    batch(auto, now, 30, 1_000, 60_000, 10_000);
+    batches(auto, now, 8, 30, 60_000);
     assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
-    batch(auto, now, 30, 1_000, 60_000, 10_000);
+    batches(auto, now, 8, 30, 60_000);
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+    batches(auto, now, 16, 30, 70_000);
     assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
   }
 
@@ -155,7 +173,12 @@ class AutoReceiveTimeTest {
     assertFalse(auto.shouldProbe());
     batch(auto, now, 38, 1_000, 60_100, 10_000);
     assertEquals(Duration.ofSeconds(1).toNanos(), auto.writeDurationNanos());
-    assertEquals(Duration.ofMillis(22_100).toNanos(), auto.writeBudgetNanos());
+    assertEquals(Duration.ofSeconds(27).toNanos(), auto.writeBudgetNanos());
+    String line = auto.lastSnapshot().toString();
+    assertTrue(line.contains("tailMedian="));
+    assertTrue(line.contains("tailStdev="));
+    assertTrue(line.contains("msgs=10000"));
+    assertTrue(line.contains("rate="));
   }
 
   @Test
@@ -169,7 +192,7 @@ class AutoReceiveTimeTest {
     batch(auto, now, 48, 1_000, 70_000, 10_000);
     assertTrue(auto.writeDurationNanos() >= Duration.ofSeconds(20).toNanos());
     assertEquals(before + Duration.ofSeconds(2).toNanos(), auto.currentReceive().toNanos());
-    assertEquals(Duration.ofMillis(28_000).toNanos(), auto.writeBudgetNanos());
+    assertEquals(Duration.ofMillis(22_000).toNanos(), auto.writeBudgetNanos());
   }
 
   @Test
@@ -282,7 +305,6 @@ class AutoReceiveTimeTest {
     assertFalse(auto.shouldProbe());
     batch(auto, now, 30, 1_000, 60_000, 1_000);
     batch(auto, now, 30, 1_000, 60_000, 1_000);
-    assertEquals(Duration.ofSeconds(30), auto.currentReceive());
     batch(auto, now, 40, 1_000, 61_882, 10_000);
     assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
   }
@@ -295,6 +317,73 @@ class AutoReceiveTimeTest {
     assertFalse(auto.shouldProbe());
     batch(auto, now, 48, 1_000, 70_000, 10_000);
     assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+  }
+
+  @Test
+  void gapOneMillisecondUnderSixtyFinishesAtSixty() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    assertTrue(auto.shouldProbe());
+    now.set(Duration.ofMillis(59_999).toNanos());
+    assertTrue(auto.shouldProbe());
+    now.addAndGet(Duration.ofMillis(59_999).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+    assertEquals(Duration.ofSeconds(30), auto.currentReceive());
+  }
+
+  @Test
+  void oneTightRoundDoesNotAdoptAndALateRoundResetsThePair() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 59);
+    assertFalse(auto.shouldProbe());
+    batches(auto, now, 8, 30, 60_000);
+    assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
+    batches(auto, now, 8, 30, 60_736);
+    assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
+    batches(auto, now, 8, 30, 60_000);
+    assertEquals(Duration.ofSeconds(59), auto.cycleTimeEst());
+    batches(auto, now, 8, 30, 60_000);
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+  }
+
+  @Test
+  void doublePeriodRaiseIsUndoneByTwoRoundsThenStops() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 50, 1_000, 51_000, 1_000);
+    now.addAndGet(Duration.ofSeconds(1).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(1).toNanos(), 0);
+    long start = now.get() - Duration.ofSeconds(1).toNanos();
+    now.set(start + Duration.ofSeconds(120).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(120), auto.cycleTimeEst());
+    batches(auto, now, 8, 30, 60_000);
+    assertEquals(Duration.ofSeconds(120), auto.cycleTimeEst());
+    batches(auto, now, 8, 30, 60_000);
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+    now.addAndGet(Duration.ofSeconds(1).toNanos());
+    auto.onGatherFinished(Duration.ofSeconds(1).toNanos(), 0);
+    start = now.get() - Duration.ofSeconds(1).toNanos();
+    now.set(start + Duration.ofSeconds(120).toNanos());
+    assertFalse(auto.shouldProbe());
+    assertEquals(Duration.ofSeconds(60), auto.cycleTimeEst());
+  }
+
+  @Test
+  void quietIdleDoesNotReplaceTheReserve() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 48, 1_000, 70_000, 10_000);
+    assertEquals(Duration.ofMillis(22_000).toNanos(), auto.writeBudgetNanos());
+    long reserve = auto.writeBudgetNanos();
+    batch(auto, now, 15, 1_000, 60_000, 1_000);
+    assertEquals(reserve, auto.writeBudgetNanos());
   }
 
   @Test
