@@ -439,24 +439,24 @@ final class AutoReceiveTime {
     sleepDurationNanos =
         Math.max(0L, cycleDurationNanos - receiveDurationNanos - writeDurationNanos);
     long nonReceive = sleepDurationNanos + writeDurationNanos;
+    boolean quiet = slept || cycleDurationNanos <= estimate;
     boolean trulyLate = !slept && cycleDurationNanos > estimate + MARGIN_NANOS;
-    if (!reserveMeasured) {
-      if (trulyLate && nonReceive > 0L) {
-        pushTail(nonReceive);
-        writeBudgetNanos = nonReceive;
-        reserveMeasured = true;
-      } else if (slept || cycleDurationNanos <= estimate) {
-        // The probe seed is half the trigger. A quiet leftover is Spark's wait, so step it down
-        // instead of teaching that wait to the reserve.
+    if (trulyLate) {
+      // The leftover still holds the climb's slack. Only the time past the trigger is new cost,
+      // so one 62s cycle cannot freeze the reserve at sleep+write.
+      long overrun = cycleDurationNanos - estimate;
+      if (overrun > 0L) {
+        writeBudgetNanos += overrun;
+      }
+    } else if (quiet && !reserveMeasured) {
+      if (sleepDurationNanos > RECEIVE_STEP_NANOS) {
         long stepped = writeBudgetNanos - RECEIVE_STEP_NANOS;
         writeBudgetNanos = Math.max(commitDurationNanos, stepped);
+      } else if (nonReceive > 0L) {
+        pushTail(nonReceive);
+        writeBudgetNanos = tailReserve();
+        reserveMeasured = true;
       }
-    } else if (trulyLate && nonReceive > 0L) {
-      pushTail(nonReceive);
-      writeBudgetNanos = writeBudgetFromWindow(nonReceive);
-    } else if (slept && nonReceive > 0L && nonReceive <= writeBudgetNanos + RECEIVE_STEP_NANOS) {
-      pushTail(nonReceive);
-      writeBudgetNanos = tailReserve();
     }
     if (phase == Phase.WARMUP) {
       phase = Phase.CRUISE;
@@ -532,11 +532,6 @@ final class AutoReceiveTime {
     long[] sorted = Arrays.copyOf(tailWindow, tailCount);
     Arrays.sort(sorted);
     return sorted;
-  }
-
-  private long writeBudgetFromWindow(long sample) {
-    long reserve = tailReserve();
-    return sample > reserve ? sample : reserve;
   }
 
   private void maybeCorrectCycleTime() {

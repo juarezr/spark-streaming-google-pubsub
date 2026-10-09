@@ -189,10 +189,11 @@ class AutoReceiveTimeTest {
     assertFalse(auto.shouldProbe());
     batch(auto, now, 30, 1_000, 60_000, 1_000);
     long before = auto.currentReceive().toNanos();
+    long seed = auto.writeBudgetNanos();
     batch(auto, now, 48, 1_000, 70_000, 10_000);
     assertTrue(auto.writeDurationNanos() >= Duration.ofSeconds(20).toNanos());
-    assertEquals(before + Duration.ofSeconds(2).toNanos(), auto.currentReceive().toNanos());
-    assertEquals(Duration.ofMillis(22_000).toNanos(), auto.writeBudgetNanos());
+    assertTrue(auto.currentReceive().toNanos() <= before);
+    assertEquals(seed + Duration.ofSeconds(10).toNanos(), auto.writeBudgetNanos());
   }
 
   @Test
@@ -202,9 +203,10 @@ class AutoReceiveTimeTest {
     finishProbe(auto, now, 60);
     assertFalse(auto.shouldProbe());
     batch(auto, now, 48, 1_000, 70_000, 10_000);
-    assertTrue(auto.writeBudgetNanos() >= Duration.ofSeconds(20).toNanos());
+    long bumped = auto.writeBudgetNanos();
     batch(auto, now, 40, 1_000, 50_000, 1_000);
-    assertEquals(Duration.ofMillis(18_000).toNanos(), auto.writeBudgetNanos());
+    assertEquals(bumped - Duration.ofSeconds(2).toNanos(), auto.writeBudgetNanos());
+    assertTrue(auto.lastSnapshot().toString().contains("tailMedian=unset"));
   }
 
   @Test
@@ -374,16 +376,30 @@ class AutoReceiveTimeTest {
   }
 
   @Test
-  void quietIdleDoesNotReplaceTheReserve() {
+  void lateCycleAddsOnlyTheOverrun() {
     AtomicLong now = new AtomicLong(0);
     AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
     finishProbe(auto, now, 60);
     assertFalse(auto.shouldProbe());
-    batch(auto, now, 48, 1_000, 70_000, 10_000);
-    assertEquals(Duration.ofMillis(22_000).toNanos(), auto.writeBudgetNanos());
-    long reserve = auto.writeBudgetNanos();
-    batch(auto, now, 15, 1_000, 60_000, 1_000);
-    assertEquals(reserve, auto.writeBudgetNanos());
+    batch(auto, now, 48, 1_000, 62_301, 10_000);
+    assertEquals(Duration.ofMillis(31_301).toNanos(), auto.writeBudgetNanos());
+    assertTrue(auto.lastSnapshot().toString().contains("tailMedian=unset"));
+    batch(auto, now, 30, 1_000, 60_000, 1_000);
+    assertEquals(Duration.ofMillis(29_301).toNanos(), auto.writeBudgetNanos());
+    assertTrue(auto.lastSnapshot().toString().contains("tailMedian=unset"));
+  }
+
+  @Test
+  void fullTriggerRecordsTheTailAndALaterQuietCycleDoesNotCutIt() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 58, 1_000, 60_000, 1_000);
+    assertEquals(Duration.ofSeconds(2).toNanos(), auto.writeBudgetNanos());
+    assertTrue(auto.lastSnapshot().toString().contains("tailMedian=2000ms"));
+    batch(auto, now, 30, 1_000, 60_000, 1_000);
+    assertEquals(Duration.ofSeconds(2).toNanos(), auto.writeBudgetNanos());
   }
 
   @Test
