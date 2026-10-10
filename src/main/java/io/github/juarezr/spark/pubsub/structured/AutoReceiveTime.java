@@ -18,9 +18,10 @@ import org.slf4j.LoggerFactory;
  * the next cycle is {@code cycleTimeEst − writeBudget}. {@code writeBudget} walks down from the
  * probe seed, by a quarter of the idle below the top quarter of the trigger and then by 3% of
  * {@code cycleTimeEst}, while that idle is above an eighth of the trigger and the cycle finished on
- * time. In the top quarter a late cycle records its post-receive time. Once eight of those exist,
- * {@code writeBudget} steps toward their median plus the spread by at most 3% of {@code
- * cycleTimeEst}, up or down. Sleep and a quiet commit are not samples.
+ * time. In the top quarter a late cycle records its post-receive time. Once one of those exists,
+ * {@code writeBudget} steps toward the current median plus the spread by at most 3% of {@code
+ * cycleTimeEst}, up or down, and a quiet cycle no longer takes the climb step. Sleep and a quiet
+ * commit are not samples.
  */
 final class AutoReceiveTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoReceiveTime.class);
@@ -488,8 +489,10 @@ final class AutoReceiveTime {
       // never moved. The time that missed the trigger is the post-receive work.
       pushTail(writeDurationNanos);
     }
-    boolean windowReady = topQuarter && tailCount >= TAIL_WINDOW;
-    if (windowReady) {
+    // One late sample is enough to follow. Waiting for eight left the climb step free, and one
+    // quiet idle gave receive back while the fat writes were still arriving.
+    boolean reserveOpen = topQuarter && tailCount > 0;
+    if (reserveOpen) {
       long reserve = tailReserve();
       long step = carefulStep(estimate);
       if (reserve > writeBudgetNanos) {
@@ -503,7 +506,7 @@ final class AutoReceiveTime {
       if (overrun > 0L) {
         writeBudgetNanos += overrun;
       }
-    } else if (quiet && spare) {
+    } else if (quiet && spare && tailCount == 0) {
       long step = growthStep(estimate, topQuarter);
       if (step > 0L && sleepDurationNanos > step) {
         long stepped = writeBudgetNanos - step;
@@ -518,9 +521,9 @@ final class AutoReceiveTime {
     long next;
     if (target >= receiveBudgetNanos) {
       long rise =
-          windowReady
+          reserveOpen
               ? carefulStep(estimate)
-              : quiet && spare ? growthStep(estimate, topQuarter) : 0L;
+              : quiet && spare && tailCount == 0 ? growthStep(estimate, topQuarter) : 0L;
       next = rise > 0L ? Math.min(receiveBudgetNanos + rise, target) : receiveBudgetNanos;
     } else {
       next = target;

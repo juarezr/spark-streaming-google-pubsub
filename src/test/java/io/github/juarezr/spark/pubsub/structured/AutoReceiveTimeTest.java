@@ -418,22 +418,39 @@ class AutoReceiveTimeTest {
     batch(auto, now, 52, 1_000, 60_905, 1_000);
     assertEquals(climbed, auto.writeBudgetNanos());
     assertTrue(auto.lastSnapshot().toString().contains("tailMedian=unset"));
-    for (int i = 0; i < 7; i++) {
+    long careful = Duration.ofSeconds(60).toNanos() * 3L / 100L;
+    long beforeLate = auto.writeBudgetNanos();
+    long receiveBeforeLate = auto.currentReceive().toNanos();
+    batch(auto, now, 52, 1_000, 62_000, 10_000);
+    String first = auto.lastSnapshot().toString();
+    assertTrue(first.contains("phase=sample"));
+    assertTrue(first.contains("tailMedian=10000ms"));
+    assertFalse(first.contains("tailMedian=14000ms"));
+    long firstStep = auto.writeBudgetNanos();
+    assertTrue(firstStep > beforeLate);
+    assertTrue(firstStep - beforeLate <= careful);
+    assertTrue(firstStep < beforeLate + Duration.ofSeconds(2).toNanos());
+    assertTrue(auto.currentReceive().toNanos() < receiveBeforeLate);
+    long receiveAfterLate = auto.currentReceive().toNanos();
+    batch(auto, now, 30, 1_000, 45_000, 1_000);
+    String quiet = auto.lastSnapshot().toString();
+    assertTrue(quiet.contains("phase=sample"));
+    assertTrue(quiet.contains("idleDuration=14000ms"));
+    assertTrue(quiet.contains("tailMedian=10000ms"));
+    assertFalse(quiet.contains("tailMedian=14000ms"));
+    assertTrue(auto.currentReceive().toNanos() <= receiveAfterLate);
+    assertTrue(auto.writeBudgetNanos() >= firstStep);
+    for (int i = 0; i < 6; i++) {
       batch(auto, now, 52, 1_000, 62_000, 10_000);
       String line = auto.lastSnapshot().toString();
       assertTrue(line.contains("phase=sample"));
       assertTrue(line.contains("tailMedian=10000ms"));
       assertFalse(line.contains("tailMedian=14000ms"));
     }
-    assertEquals(climbed, auto.writeBudgetNanos());
     batch(auto, now, 52, 1_000, 62_000, 10_000);
     assertTrue(auto.lastSnapshot().toString().contains("phase=cruise"));
-    long careful = Duration.ofSeconds(60).toNanos() * 3L / 100L;
-    long stepped = auto.writeBudgetNanos();
-    assertTrue(stepped > climbed);
-    assertTrue(stepped - climbed <= careful);
-    assertTrue(stepped < climbed + Duration.ofSeconds(2).toNanos());
-    long high = stepped;
+    long high = auto.writeBudgetNanos();
+    assertTrue(high > climbed);
     long previous = high;
     for (int i = 0; i < 8; i++) {
       batch(auto, now, 58, 1_000, 62_000, 1_000);
@@ -498,14 +515,21 @@ class AutoReceiveTimeTest {
       batch(auto, now, 30, 1_000, 60_000, 1_000);
     }
     long atEdge = auto.writeBudgetNanos();
+    long receiveAtEdge = auto.currentReceive().toNanos();
     batch(auto, now, 52, 1_000, 62_000, 10_000);
-    assertEquals(atEdge, auto.writeBudgetNanos());
-    assertTrue(auto.lastSnapshot().toString().contains("idleDuration=0ms"));
     long afterLate = auto.writeBudgetNanos();
-    batch(auto, now, 52, 1_000, 60_000, 1_000);
-    assertEquals(afterLate, auto.writeBudgetNanos());
-    batch(auto, now, 30, 1_000, 60_000, 1_000);
-    assertTrue(auto.writeBudgetNanos() < afterLate);
+    assertTrue(afterLate > atEdge);
+    assertTrue(afterLate - atEdge <= careful);
+    assertTrue(afterLate < atEdge + Duration.ofSeconds(2).toNanos());
+    assertTrue(auto.lastSnapshot().toString().contains("idleDuration=0ms"));
+    assertTrue(auto.lastSnapshot().toString().contains("phase=sample"));
+    assertTrue(auto.currentReceive().toNanos() < receiveAtEdge);
+    long receiveAfterLate = auto.currentReceive().toNanos();
+    batch(auto, now, 30, 1_000, 45_000, 1_000);
+    assertTrue(auto.currentReceive().toNanos() <= receiveAfterLate);
+    assertTrue(auto.writeBudgetNanos() >= afterLate);
+    assertTrue(auto.lastSnapshot().toString().contains("idleDuration=14000ms"));
+    assertFalse(auto.lastSnapshot().toString().contains("tailMedian=14000ms"));
   }
 
   @Test
