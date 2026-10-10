@@ -18,9 +18,9 @@ import org.slf4j.LoggerFactory;
  * the next cycle is {@code cycleTimeEst − writeBudget}. {@code writeBudget} walks down from the
  * probe seed, by a quarter of the idle below the top quarter of the trigger and then by 3% of
  * {@code cycleTimeEst}, while that idle is above an eighth of the trigger and the cycle finished on
- * time. In the top quarter that reserve rises to the median plus the spread of the commit and the
- * overrun, once eight of those samples exist, and only when that is larger than the budget the
- * climb already has. Sleep is not one of the samples.
+ * time. In the top quarter a late cycle records its post-receive time. Once eight of those exist,
+ * {@code writeBudget} steps toward their median plus the spread by at most 3% of {@code
+ * cycleTimeEst}, up or down. Sleep and a quiet commit are not samples.
  */
 final class AutoReceiveTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoReceiveTime.class);
@@ -483,20 +483,21 @@ final class AutoReceiveTime {
     // not spare. A gap inside the 100ms snap is the whole second and still is.
     boolean pastTrigger = overrun > WHOLE_SECOND_SNAP_NANOS;
     boolean spare = idle > estimate / 8L && !pastTrigger;
-    if (topQuarter) {
-      // Sleep is the spare the budget left. The tail is the commit, plus the overrun when the
-      // cycle ran past the trigger.
-      pushTail(commitDurationNanos + (pastTrigger ? overrun : 0L));
+    if (topQuarter && trulyLate) {
+      // The commit plus the overrun is about 2s and sits under the climb's budget, so the window
+      // never moved. The time that missed the trigger is the post-receive work.
+      pushTail(writeDurationNanos);
     }
     boolean windowReady = topQuarter && tailCount >= TAIL_WINDOW;
     if (windowReady) {
-      // A commit median below the climb's leftover is not a new reserve. Replacing it walked
-      // receive from the 51s the climb had reached up toward 56s.
       long reserve = tailReserve();
+      long step = carefulStep(estimate);
       if (reserve > writeBudgetNanos) {
-        writeBudgetNanos = reserve;
+        writeBudgetNanos = Math.min(writeBudgetNanos + step, reserve);
+      } else if (reserve < writeBudgetNanos) {
+        writeBudgetNanos = Math.max(writeBudgetNanos - step, reserve);
       }
-    } else if (trulyLate) {
+    } else if (trulyLate && !topQuarter) {
       // The leftover still holds the climb's slack. Only the time past the trigger is new cost,
       // so one 62s cycle cannot freeze the reserve at sleep+write.
       if (overrun > 0L) {
@@ -516,7 +517,10 @@ final class AutoReceiveTime {
     long floor = Math.max(RECEIVE_FLOOR_NANOS, estimate / 4L);
     long next;
     if (target >= receiveBudgetNanos) {
-      long rise = !windowReady && quiet && spare ? growthStep(estimate, topQuarter) : 0L;
+      long rise =
+          windowReady
+              ? carefulStep(estimate)
+              : quiet && spare ? growthStep(estimate, topQuarter) : 0L;
       next = rise > 0L ? Math.min(receiveBudgetNanos + rise, target) : receiveBudgetNanos;
     } else {
       next = target;
