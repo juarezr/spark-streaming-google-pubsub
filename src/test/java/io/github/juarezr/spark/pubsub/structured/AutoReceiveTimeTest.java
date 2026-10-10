@@ -400,20 +400,37 @@ class AutoReceiveTimeTest {
     while (auto.currentReceive().compareTo(Duration.ofSeconds(45)) < 0) {
       batch(auto, now, 30, 1_000, 60_000, 1_000);
     }
-    for (int i = 0; i < 7; i++) {
-      batch(auto, now, 30, 1_000, 45_000, 1_000);
+    String crossed = auto.lastSnapshot().toString();
+    assertTrue(crossed.contains("phase=growth"));
+    assertTrue(crossed.contains("tailMedian=unset"));
+    batch(auto, now, 30, 1_000, 45_000, 1_000);
+    String first = auto.lastSnapshot().toString();
+    assertTrue(first.contains("phase=sample"));
+    assertTrue(first.contains("tailMedian=1000ms"));
+    assertTrue(first.contains("idleDuration=14000ms"));
+    for (int i = 0; i < 6; i++) {
+      batch(auto, now, 52, 1_000, 60_000, 1_000);
       String line = auto.lastSnapshot().toString();
       assertTrue(line.contains("phase=sample"));
       assertTrue(line.contains("tailMedian=1000ms"));
-      assertFalse(line.contains("tailMedian=14000ms"));
     }
-    batch(auto, now, 30, 1_000, 45_000, 1_000);
+    long climbed = auto.writeBudgetNanos();
+    long climbedReceive = auto.currentReceive().toNanos();
+    assertTrue(climbed > Duration.ofSeconds(1).toNanos());
+    batch(auto, now, 52, 1_000, 60_000, 1_000);
     assertTrue(auto.lastSnapshot().toString().contains("phase=cruise"));
-    assertEquals(Duration.ofSeconds(1).toNanos(), auto.writeBudgetNanos());
-    long measured = auto.writeBudgetNanos();
-    batch(auto, now, 52, 1_000, 66_000, 10_000);
-    assertTrue(auto.writeBudgetNanos() < measured + Duration.ofSeconds(6).toNanos());
-    assertTrue(auto.lastSnapshot().toString().contains("tailMedian=1000ms"));
+    assertEquals(climbed, auto.writeBudgetNanos());
+    assertEquals(climbedReceive, auto.currentReceive().toNanos());
+    batch(auto, now, 52, 1_000, 67_000, 10_000);
+    assertEquals(climbed, auto.writeBudgetNanos());
+    for (int i = 0; i < 7; i++) {
+      batch(auto, now, 52, 1_000, 67_000, 10_000);
+    }
+    assertTrue(auto.writeBudgetNanos() > climbed);
+    assertTrue(auto.writeBudgetNanos() < climbed + Duration.ofSeconds(7).toNanos());
+    long reserved = auto.writeBudgetNanos();
+    batch(auto, now, 52, 1_000, 67_000, 10_000);
+    assertEquals(reserved, auto.writeBudgetNanos());
   }
 
   @Test

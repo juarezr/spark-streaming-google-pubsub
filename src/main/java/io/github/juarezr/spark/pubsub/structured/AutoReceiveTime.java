@@ -18,8 +18,9 @@ import org.slf4j.LoggerFactory;
  * the next cycle is {@code cycleTimeEst − writeBudget}. {@code writeBudget} walks down from the
  * probe seed, by a quarter of the idle below the top quarter of the trigger and then by 3% of
  * {@code cycleTimeEst}, while that idle is above an eighth of the trigger and the cycle finished on
- * time. In the top quarter the reserve becomes the median plus the spread of the commit and the
- * overrun, once eight of those samples exist. Sleep is not one of the samples.
+ * time. In the top quarter that reserve rises to the median plus the spread of the commit and the
+ * overrun, once eight of those samples exist, and only when that is larger than the budget the
+ * climb already has. Sleep is not one of the samples.
  */
 final class AutoReceiveTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoReceiveTime.class);
@@ -149,7 +150,9 @@ final class AutoReceiveTime {
     private String phaseLabel() {
       if (phase == Phase.CRUISE && cycleTimeEstNanos > 0L) {
         long top = cycleTimeEstNanos - cycleTimeEstNanos / 4L;
-        if (receiveBudgetNanos < top) {
+        // A cycle can finish inside the top quarter without a sample: the sample uses the budget
+        // the cycle started with.
+        if (receiveBudgetNanos < top || tailSamples == 0) {
           return "growth";
         }
         if (tailSamples < TAIL_WINDOW) {
@@ -487,7 +490,12 @@ final class AutoReceiveTime {
     }
     boolean windowReady = topQuarter && tailCount >= TAIL_WINDOW;
     if (windowReady) {
-      writeBudgetNanos = tailReserve();
+      // A commit median below the climb's leftover is not a new reserve. Replacing it walked
+      // receive from the 51s the climb had reached up toward 56s.
+      long reserve = tailReserve();
+      if (reserve > writeBudgetNanos) {
+        writeBudgetNanos = reserve;
+      }
     } else if (trulyLate) {
       // The leftover still holds the climb's slack. Only the time past the trigger is new cost,
       // so one 62s cycle cannot freeze the reserve at sleep+write.
@@ -508,10 +516,7 @@ final class AutoReceiveTime {
     long floor = Math.max(RECEIVE_FLOOR_NANOS, estimate / 4L);
     long next;
     if (target >= receiveBudgetNanos) {
-      long rise =
-          windowReady
-              ? carefulStep(estimate)
-              : quiet && spare ? growthStep(estimate, topQuarter) : 0L;
+      long rise = !windowReady && quiet && spare ? growthStep(estimate, topQuarter) : 0L;
       next = rise > 0L ? Math.min(receiveBudgetNanos + rise, target) : receiveBudgetNanos;
     } else {
       next = target;
