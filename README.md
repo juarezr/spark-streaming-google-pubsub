@@ -94,7 +94,7 @@ Full script: [`examples/python/structured_streaming_example.py`](examples/python
 | `gatherMode` | `batch` | `batch` collects until `receiveTime` / caps; `immediate` returns a batch as soon as messages arrive (`pull` is a deprecated alias) |
 | `receiveTime` | auto | How long this batch may take from the queue. Omit with `Trigger.ProcessingTime` |
 | `processingTime` | | Spark `Trigger.ProcessingTime` duration (e.g. `60s`). When `receiveTime` is auto, sets the batch interval hint so startup probe gaps are not mistaken for the trigger |
-| `batchSize` | `64m` | Max payload bytes per batch and Subscriber outstanding bytes. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
+| `batchSize` | `512m` | Max payload bytes per batch and Subscriber outstanding bytes. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
 | `batchCount` | | Max messages per batch. Capped by Spark `maxRowsPerTrigger` |
 | `numWriters` | `1` | Spark tasks per micro-batch; integer ≥1 or `auto` (driver CPU count) |
 | `schemaMode` | `basic` | `raw`, `basic`, `slim`, `dynamic`, or `mixed` |

@@ -58,7 +58,7 @@ class PubSubConfigTest {
     assertEquals(SeekMode.NONE, config.seekMode());
     assertEquals(GatherMode.BATCH, config.gatherMode());
     assertEquals(null, config.receiveTime());
-    assertEquals(64L * 1024 * 1024, config.batchSize());
+    assertEquals(512L * 1024 * 1024, config.batchSize());
     assertEquals(1, config.numWriters());
     assertEquals(SchemaMode.BASIC, config.schemaMode());
     assertEquals(MetadataMode.NONE, config.metadataMode());
