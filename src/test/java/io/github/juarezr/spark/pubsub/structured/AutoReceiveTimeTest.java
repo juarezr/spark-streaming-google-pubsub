@@ -439,7 +439,7 @@ class AutoReceiveTimeTest {
     assertTrue(quiet.contains("tailMedian=10000ms"));
     assertFalse(quiet.contains("tailMedian=14000ms"));
     assertTrue(auto.currentReceive().toNanos() <= receiveAfterLate);
-    assertTrue(auto.writeBudgetNanos() >= firstStep);
+    assertEquals(firstStep, auto.writeBudgetNanos());
     for (int i = 0; i < 6; i++) {
       batch(auto, now, 52, 1_000, 62_000, 10_000);
       String line = auto.lastSnapshot().toString();
@@ -527,7 +527,7 @@ class AutoReceiveTimeTest {
     long receiveAfterLate = auto.currentReceive().toNanos();
     batch(auto, now, 30, 1_000, 45_000, 1_000);
     assertTrue(auto.currentReceive().toNanos() <= receiveAfterLate);
-    assertTrue(auto.writeBudgetNanos() >= afterLate);
+    assertEquals(afterLate, auto.writeBudgetNanos());
     assertTrue(auto.lastSnapshot().toString().contains("idleDuration=14000ms"));
     assertFalse(auto.lastSnapshot().toString().contains("tailMedian=14000ms"));
   }
@@ -547,6 +547,76 @@ class AutoReceiveTimeTest {
     long idle = Duration.ofSeconds(24).toNanos();
     assertEquals(afterLate - idle / 4L, auto.writeBudgetNanos());
     assertTrue(auto.lastSnapshot().toString().contains("phase=growth"));
+  }
+
+  @Test
+  void quietCycleStepsDownTowardTheReserveAndNotBelowIt() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    while (auto.currentReceive().compareTo(Duration.ofSeconds(56)) < 0) {
+      batch(auto, now, 30, 1_000, 60_000, 1_000);
+    }
+    long careful = Duration.ofSeconds(60).toNanos() * 3L / 100L;
+    for (int i = 0; i < 4; i++) {
+      batch(auto, now, 54, 1_000, 62_000, 10_000);
+    }
+    for (int i = 0; i < 3; i++) {
+      batch(auto, now, 57, 1_000, 62_000, 1_000);
+    }
+    long above = auto.writeBudgetNanos();
+    batch(auto, now, 57, 1_000, 62_000, 1_000);
+    long afterPush = auto.writeBudgetNanos();
+    assertTrue(above > afterPush);
+    assertTrue(above - afterPush <= careful);
+    assertTrue(afterPush >= Duration.ofSeconds(8).toNanos());
+    assertTrue(auto.lastSnapshot().toString().contains("phase=cruise"));
+    batch(auto, now, 30, 1_000, 45_000, 1_000);
+    assertEquals(afterPush, auto.writeBudgetNanos());
+    assertTrue(auto.currentReceive().compareTo(Duration.ofSeconds(45)) > 0);
+  }
+
+  @Test
+  void lateCycleBelowTheTopQuarterDoesNotAddTheWholeOverrunOnceASampleExists() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    while (auto.currentReceive().compareTo(Duration.ofSeconds(45)) < 0) {
+      batch(auto, now, 30, 1_000, 60_000, 1_000);
+    }
+    long careful = Duration.ofSeconds(60).toNanos() * 3L / 100L;
+    while (auto.currentReceive().compareTo(Duration.ofSeconds(45)) >= 0) {
+      long before = auto.writeBudgetNanos();
+      batch(auto, now, 40, 1_000, 70_000, 10_000);
+      assertTrue(auto.writeBudgetNanos() - before <= careful);
+    }
+    long under = auto.writeBudgetNanos();
+    batch(auto, now, 40, 1_000, 80_000, 10_000);
+    long stepped = auto.writeBudgetNanos() - under;
+    assertTrue(stepped > 0L);
+    assertTrue(stepped <= careful);
+    assertTrue(stepped < Duration.ofSeconds(20).toNanos());
+    assertTrue(auto.lastSnapshot().toString().contains("phase=sample"));
+  }
+
+  @Test
+  void eightSamplesSayCruiseEvenWhenReceiveIsUnderFortyFive() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    while (auto.currentReceive().compareTo(Duration.ofSeconds(45)) < 0) {
+      batch(auto, now, 30, 1_000, 60_000, 1_000);
+    }
+    for (int i = 0; i < 8; i++) {
+      batch(auto, now, 40, 1_000, 70_000, 10_000);
+    }
+    String line = auto.lastSnapshot().toString();
+    assertTrue(line.contains("phase=cruise"));
+    assertTrue(auto.currentReceive().compareTo(Duration.ofSeconds(45)) < 0);
+    assertTrue(auto.currentReceive().compareTo(Duration.ofSeconds(15)) > 0);
   }
 
   @Test

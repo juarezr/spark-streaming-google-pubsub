@@ -18,10 +18,11 @@ import org.slf4j.LoggerFactory;
  * the next cycle is {@code cycleTimeEst − writeBudget}. {@code writeBudget} walks down from the
  * probe seed, by a quarter of the idle below the top quarter of the trigger and then by 3% of
  * {@code cycleTimeEst}, while that idle is above an eighth of the trigger and the cycle finished on
- * time. In the top quarter a late cycle records its post-receive time. Once one of those exists,
- * {@code writeBudget} steps toward the current median plus the spread by at most 3% of {@code
- * cycleTimeEst}, up or down, and a quiet cycle no longer takes the climb step. Sleep and a quiet
- * commit are not samples.
+ * time. In the top quarter a late cycle records its post-receive time. While fewer than eight
+ * samples exist, {@code writeBudget} steps toward that reserve by at most 3% of {@code
+ * cycleTimeEst} only on the cycle that recorded one. A quiet cycle does not step it up. Once the
+ * budget is above the reserve, a quiet cycle may step down to it. Sleep and a quiet commit are not
+ * samples.
  */
 final class AutoReceiveTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoReceiveTime.class);
@@ -150,10 +151,9 @@ final class AutoReceiveTime {
 
     private String phaseLabel() {
       if (phase == Phase.CRUISE && cycleTimeEstNanos > 0L) {
-        long top = cycleTimeEstNanos - cycleTimeEstNanos / 4L;
-        // A cycle can finish inside the top quarter without a sample: the sample uses the budget
-        // the cycle started with.
-        if (receiveBudgetNanos < top || tailSamples == 0) {
+        // Growth is only the climb, before any late sample. A receive under the top quarter with
+        // samples already in is still sample or cruise. The 15s floor used to hide that.
+        if (tailSamples == 0) {
           return "growth";
         }
         if (tailSamples < TAIL_WINDOW) {
@@ -484,32 +484,44 @@ final class AutoReceiveTime {
     // not spare. A gap inside the 100ms snap is the whole second and still is.
     boolean pastTrigger = overrun > WHOLE_SECOND_SNAP_NANOS;
     boolean spare = idle > estimate / 8L && !pastTrigger;
-    if (topQuarter && trulyLate) {
+    // Below the top quarter a short receive inflates writeDuration, so the first sample still
+    // waits for the top quarter. After one exists, a late cycle above half the trigger still
+    // records. A floor cycle does not.
+    boolean record =
+        trulyLate && (topQuarter || (tailCount > 0 && receiveBudgetNanos >= estimate / 2L));
+    if (record) {
       // The commit plus the overrun is about 2s and sits under the climb's budget, so the window
       // never moved. The time that missed the trigger is the post-receive work.
       pushTail(writeDurationNanos);
     }
-    // One late sample is enough to follow. Waiting for eight left the climb step free, and one
-    // quiet idle gave receive back while the fat writes were still arriving.
-    boolean reserveOpen = topQuarter && tailCount > 0;
+    boolean windowFull = tailCount >= TAIL_WINDOW;
+    // Idle minutes must not chase the reserve up while the window is still filling. Once it is
+    // full, every cycle tracks it. A quiet cycle may only step down, and not below the reserve.
+    boolean reserveOpen = tailCount > 0 && (windowFull || record);
+    long step = carefulStep(estimate);
     if (reserveOpen) {
       long reserve = tailReserve();
-      long step = carefulStep(estimate);
       if (reserve > writeBudgetNanos) {
         writeBudgetNanos = Math.min(writeBudgetNanos + step, reserve);
       } else if (reserve < writeBudgetNanos) {
         writeBudgetNanos = Math.max(writeBudgetNanos - step, reserve);
       }
-    } else if (trulyLate && !topQuarter) {
+    } else if (tailCount > 0 && quiet) {
+      long reserve = tailReserve();
+      if (reserve < writeBudgetNanos) {
+        writeBudgetNanos = Math.max(writeBudgetNanos - step, reserve);
+      }
+    } else if (trulyLate && !topQuarter && tailCount == 0) {
       // The leftover still holds the climb's slack. Only the time past the trigger is new cost,
-      // so one 62s cycle cannot freeze the reserve at sleep+write.
+      // so one 62s cycle cannot freeze the reserve at sleep+write. Once a sample exists this add
+      // is closed: one 88s cycle pinned receive at the floor.
       if (overrun > 0L) {
         writeBudgetNanos += overrun;
       }
     } else if (quiet && spare && tailCount == 0) {
-      long step = growthStep(estimate, topQuarter);
-      if (step > 0L && sleepDurationNanos > step) {
-        long stepped = writeBudgetNanos - step;
+      long growth = growthStep(estimate, topQuarter);
+      if (growth > 0L && sleepDurationNanos > growth) {
+        long stepped = writeBudgetNanos - growth;
         writeBudgetNanos = Math.max(commitDurationNanos, stepped);
       }
     }
@@ -521,8 +533,8 @@ final class AutoReceiveTime {
     long next;
     if (target >= receiveBudgetNanos) {
       long rise =
-          reserveOpen
-              ? carefulStep(estimate)
+          tailCount > 0 && (reserveOpen || quiet)
+              ? step
               : quiet && spare && tailCount == 0 ? growthStep(estimate, topQuarter) : 0L;
       next = rise > 0L ? Math.min(receiveBudgetNanos + rise, target) : receiveBudgetNanos;
     } else {
