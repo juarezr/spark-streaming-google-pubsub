@@ -233,6 +233,7 @@ final class PubSubMicroBatchStream
     long gatherFinished = System.nanoTime();
 
     this.autoReceiveTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
+    logDriverHeap("gather", PulledMessage.payloadBytes(pulled));
     noteIntakeLag(pulled);
     return pulled;
   }
@@ -572,6 +573,8 @@ final class PubSubMicroBatchStream
   public void commit(Offset end) {
     PubSubOffset endOffset = (PubSubOffset) end;
     String batchKey = Long.toString(endOffset.batchId());
+long committedBytes =
+        PulledMessage.payloadBytes(messagesByBatch.getOrDefault(endOffset.batchId(), List.of()));
     if (config.ackMode() == AckMode.AFTER_COMMIT) {
       List<PulledMessage> messages = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
       List<String> ackIds = PulledMessage.ackIds(messages);
@@ -610,6 +613,7 @@ final class PubSubMicroBatchStream
       currentOffset = endOffset;
     }
     LOG.debug("BATCH: Committed offset batchId={}", endOffset.batchId());
+    logDriverHeap("commit", committedBytes);
     autoReceiveTime.onCommit();
   }
 
@@ -660,6 +664,12 @@ final class PubSubMicroBatchStream
     }
   }
 
+  private void logDriverHeap(String at, long gatherBytes) {
+    Runtime runtime = Runtime.getRuntime();
+    long heapUsed = DriverHeap.used(runtime.totalMemory(), runtime.freeMemory());
+    // TODO: drop this soak line to debug before a provider release.
+    LOG.info(DriverHeap.line(at, runtime.maxMemory(), heapUsed, gatherBytes, client.queuedBytes()));
+  }
 
   private void logStop(int uncommitted) {
     PublishTimeWindow window = lastGatheredWindow;
