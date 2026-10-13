@@ -60,6 +60,7 @@ final class PubSubMicroBatchStream
   private final ConcurrentMap<Long, List<PulledMessage>> messagesByBatch =
       new ConcurrentHashMap<>();
   private final AutoReceiveTime autoReceiveTime;
+  private final IntakePace intakePace = new IntakePace();
   private volatile boolean cancelled;
   private volatile boolean availableNow;
   private volatile boolean limitReached;
@@ -232,6 +233,7 @@ final class PubSubMicroBatchStream
     long gatherFinished = System.nanoTime();
 
     this.autoReceiveTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
+    noteIntakeLag(pulled);
     return pulled;
   }
 
@@ -644,6 +646,20 @@ final class PubSubMicroBatchStream
     this.firstBatchLogged = true;
     LOG.info(window.formatStats(batchId, "BATCH: First batch:"));
   }
+
+  private void noteIntakeLag(List<PulledMessage> pulled) {
+    Long ageMs = PubSubSourceMetrics.newestMessageAgeMs(pulled, System.currentTimeMillis());
+    if (ageMs == null) {
+      return;
+    }
+    Duration cycle = autoReceiveTime.cycleTimeEst();
+    long triggerMs = cycle == null ? 0L : cycle.toMillis();
+    String warning = intakePace.observe(System.currentTimeMillis(), ageMs, triggerMs);
+    if (warning != null) {
+      LOG.warn(warning);
+    }
+  }
+
 
   private void logStop(int uncommitted) {
     PublishTimeWindow window = lastGatheredWindow;
