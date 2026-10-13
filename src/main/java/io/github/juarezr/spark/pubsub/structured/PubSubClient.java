@@ -432,6 +432,53 @@ final class PubSubClient implements Closeable, Serializable {
     return this.outstandingBytes == null ? 0L : this.outstandingBytes.get();
   }
 
+  long queuedBytes() {
+    return this.queuedBytes == null ? 0L : this.queuedBytes.get();
+  }
+
+  /**
+   * Puts messages that did not fit this batch back on the local queue. Does not ack or nack them.
+   * The subscriber still blocks at one {@code batchSize}; this does not raise that cap.
+   */
+  void requeue(List<PulledMessage> messages) {
+    if (messages == null || messages.isEmpty()) {
+      return;
+    }
+    List<String> failed = new ArrayList<>();
+    for (PulledMessage message : messages) {
+      if (!putBack(message)) {
+        failed.add(message.ackId());
+      }
+    }
+    if (!failed.isEmpty()) {
+      nack(failed);
+    }
+  }
+
+  private boolean putBack(PulledMessage message) {
+    if (message == null || queue == null || consumers == null) {
+      return false;
+    }
+    AckReplyConsumer consumer = consumers.get(message.ackId());
+    if (consumer == null) {
+      return false;
+    }
+    int bytes = message.data().length;
+    if (queuedBytes != null) {
+      queuedBytes.addAndGet(bytes);
+    }
+    try {
+      queue.put(new HeldMessage(message, consumer));
+      return true;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      if (queuedBytes != null) {
+        queuedBytes.addAndGet(-bytes);
+      }
+      return false;
+    }
+  }
+
   long retryAttempts() {
     return retryPolicy.retryAttempts();
   }

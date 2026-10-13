@@ -343,14 +343,10 @@ final class PubSubMicroBatchStream
       payloadBytes += message.data().length;
     }
     if (!overflow.isEmpty()) {
-      if (config.ackMode() == AckMode.AFTER_COMMIT) {
-        try {
-          client.nack(PulledMessage.ackIds(overflow));
-        } catch (RuntimeException e) {
-          LOG.warn("BATCH: Failed to nack overflow messages: {}", e.getMessage());
-        } finally {
-          client.releaseMessages(overflow);
-        }
+      try {
+        client.requeue(overflow);
+      } catch (RuntimeException e) {
+        LOG.warn("BATCH: Failed to requeue overflow messages: {}", e.getMessage());
       }
     }
     List<PulledMessage> kept =
@@ -573,7 +569,7 @@ final class PubSubMicroBatchStream
   public void commit(Offset end) {
     PubSubOffset endOffset = (PubSubOffset) end;
     String batchKey = Long.toString(endOffset.batchId());
-long committedBytes =
+    long committedBytes =
         PulledMessage.payloadBytes(messagesByBatch.getOrDefault(endOffset.batchId(), List.of()));
     if (config.ackMode() == AckMode.AFTER_COMMIT) {
       List<PulledMessage> messages = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());

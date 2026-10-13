@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -426,6 +427,37 @@ class PubSubGatherTest {
     ReadLimit limit = stream.getDefaultReadLimit();
 
     assertEquals(ReadLimit.maxRows(250), limit);
+  }
+
+  @Test
+  void byteOverflowIsRequeuedInsteadOfNacked() {
+    PubSubClient client = mock(PubSubClient.class);
+    int oneMib = 1024 * 1024;
+    PulledMessage fits =
+        new PulledMessage("fit", new byte[oneMib], Collections.emptyMap(), 0L, "", "ack-fit");
+    PulledMessage extra =
+        new PulledMessage("extra", new byte[] {1}, Collections.emptyMap(), 0L, "", "ack-extra");
+    when(client.poll(any(Duration.class))).thenReturn(List.of(fits, extra));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .batchSize(oneMib)
+            .receiveTime(Duration.ofMillis(200))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset latest = stream.latestOffset();
+    InputPartition[] partitions = stream.planInputPartitions(stream.initialOffset(), latest);
+
+    assertEquals(1, ((PubSubInputPartition) partitions[0]).messages().size());
+    assertEquals("ack-fit", ((PubSubInputPartition) partitions[0]).messages().get(0).ackId());
+    verify(client)
+        .requeue(
+            argThat(
+                overflow -> overflow.size() == 1 && "ack-extra".equals(overflow.get(0).ackId())));
+    verify(client, never()).nack(anyList());
+    verify(client, never()).releaseMessages(anyList());
   }
 
   @Test

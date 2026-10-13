@@ -165,6 +165,44 @@ class PubSubClientTest {
     assertTrue(queue.isEmpty());
   }
 
+  @Test
+  void requeueReturnsOverflowOnTheNextPollWithinOneBatch() throws Exception {
+    int oneMib = 1024 * 1024;
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").batchSize(oneMib).build();
+    PubSubClient client = new PubSubClient(config);
+    setField(client, "subscriber", mock(Subscriber.class));
+    setField(client, "stopped", new AtomicBoolean(false));
+    ConcurrentHashMap<String, AckReplyConsumer> consumers = new ConcurrentHashMap<>();
+    AckReplyConsumer firstConsumer = mock(AckReplyConsumer.class);
+    AckReplyConsumer secondConsumer = mock(AckReplyConsumer.class);
+    consumers.put("a", firstConsumer);
+    consumers.put("b", secondConsumer);
+    setField(client, "consumers", consumers);
+    LinkedBlockingQueue<PubSubClient.HeldMessage> queue = new LinkedBlockingQueue<>();
+    queue.put(heldBytes("a", 1_000L, firstConsumer, new byte[oneMib]));
+    queue.put(heldBytes("b", 2_000L, secondConsumer, new byte[oneMib]));
+    setField(client, "queue", queue);
+    setField(client, "queuedBytes", new AtomicLong(2L * oneMib));
+
+    List<PulledMessage> polled = client.poll(Duration.ofSeconds(1));
+
+    assertEquals(2, polled.size());
+    assertEquals(0L, client.queuedBytes());
+    client.requeue(List.of(polled.get(1)));
+
+    assertEquals(oneMib, client.queuedBytes());
+    assertTrue(client.queuedBytes() <= config.batchSize());
+    verify(firstConsumer, never()).nack();
+    verify(secondConsumer, never()).nack();
+
+    List<PulledMessage> next = client.poll(Duration.ofMillis(200));
+
+    assertEquals(1, next.size());
+    assertEquals("b", next.get(0).messageId());
+    assertEquals(0L, client.queuedBytes());
+  }
+
   private static PubSubClient newPubSubClientReadyForPoll() throws Exception {
     PubSubClient client = new PubSubClient(minimalConfig());
     setField(client, "subscriber", mock(Subscriber.class));
@@ -180,8 +218,13 @@ class PubSubClientTest {
 
   private static PubSubClient.HeldMessage held(
       String id, long publishMillis, AckReplyConsumer consumer) {
+    return heldBytes(id, publishMillis, consumer, new byte[] {1});
+  }
+
+  private static PubSubClient.HeldMessage heldBytes(
+      String id, long publishMillis, AckReplyConsumer consumer, byte[] data) {
     PulledMessage message =
-        new PulledMessage(id, new byte[] {1}, Collections.emptyMap(), publishMillis, "", id);
+        new PulledMessage(id, data, Collections.emptyMap(), publishMillis, "", id);
     return new PubSubClient.HeldMessage(message, consumer);
   }
 
