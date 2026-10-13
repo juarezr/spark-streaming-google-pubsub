@@ -58,7 +58,7 @@ final class AutoReceiveTime {
 
   static final class CycleSnapshot {
     final Phase phase;
-    final long cycleTimeEstNanos;
+    final long cycleBudgetNanos;
     final long marginTimeEstNanos;
     final long receiveBudgetNanos;
     final long receiveDurationNanos;
@@ -77,7 +77,7 @@ final class AutoReceiveTime {
 
     CycleSnapshot(
         Phase phase,
-        long cycleTimeEstNanos,
+        long cycleBudgetNanos,
         long marginTimeEstNanos,
         long receiveBudgetNanos,
         long receiveDurationNanos,
@@ -94,7 +94,7 @@ final class AutoReceiveTime {
         long ratePerSecond,
         int tailSamples) {
       this.phase = phase;
-      this.cycleTimeEstNanos = cycleTimeEstNanos;
+      this.cycleBudgetNanos = cycleBudgetNanos;
       this.marginTimeEstNanos = marginTimeEstNanos;
       this.receiveBudgetNanos = receiveBudgetNanos;
       this.receiveDurationNanos = receiveDurationNanos;
@@ -116,26 +116,24 @@ final class AutoReceiveTime {
     public String toString() {
       return "AUTO phase="
           + phaseLabel()
-          + " cycleTimeEst="
-          + elapsed(cycleTimeEstNanos)
-          + " marginTimeEst="
-          + elapsed(marginTimeEstNanos)
+          + " cycleBudget="
+          + elapsed(cycleBudgetNanos)
+          + " cycleDuration="
+          + elapsed(cycleDurationNanos)
           + " receiveBudget="
           + elapsed(receiveBudgetNanos)
           + " receiveDuration="
           + elapsed(receiveDurationNanos)
-          + " commitDuration="
-          + elapsed(commitDurationNanos)
-          + " writeDuration="
-          + elapsed(writeDurationNanos)
           + " writeBudget="
           + elapsed(writeBudgetNanos)
+          + " writeDuration="
+          + elapsed(writeDurationNanos)
+          + " commitDuration="
+          + elapsed(commitDurationNanos)
           + " sleepDuration="
           + elapsed(sleepDurationNanos)
           + " idleDuration="
           + millis(idleDurationNanos)
-          + " cycleDuration="
-          + elapsed(cycleDurationNanos)
           + " behindDuration="
           + elapsed(behindDurationNanos)
           + " tailMedian="
@@ -150,7 +148,7 @@ final class AutoReceiveTime {
     }
 
     private String phaseLabel() {
-      if (phase == Phase.CRUISE && cycleTimeEstNanos > 0L) {
+      if (phase == Phase.CRUISE && cycleBudgetNanos > 0L) {
         // Growth is only the climb, before any late sample. A receive under the top quarter with
         // samples already in is still sample or cruise. The 15s floor used to hide that.
         if (tailSamples == 0) {
@@ -181,7 +179,7 @@ final class AutoReceiveTime {
   private final Duration processingTimeHint;
   private Phase phase;
   private Long probeStartedNanos;
-  private long cycleTimeEstNanos;
+  private long cycleBudgetNanos;
   private long receiveBudgetNanos;
   private long writeBudgetNanos;
   private long receiveDurationNanos;
@@ -242,7 +240,7 @@ final class AutoReceiveTime {
   }
 
   Duration cycleTimeEst() {
-    return cycleTimeEstNanos <= 0L ? null : Duration.ofNanos(cycleTimeEstNanos);
+    return cycleBudgetNanos <= 0L ? null : Duration.ofNanos(cycleBudgetNanos);
   }
 
   Duration currentReceive() {
@@ -385,7 +383,7 @@ final class AutoReceiveTime {
   }
 
   void onCommit() {
-    if (gatherEmpty || gatherCount <= 0 || cycleTimeEstNanos <= 0L || returnNanos <= 0L) {
+    if (gatherEmpty || gatherCount <= 0 || cycleBudgetNanos <= 0L || returnNanos <= 0L) {
       return;
     }
     if (phase != Phase.WARMUP && phase != Phase.CRUISE) {
@@ -401,10 +399,10 @@ final class AutoReceiveTime {
    * 60s–600s. Not updated after the probe.
    */
   Duration inferredAckDeadline() {
-    if (cycleTimeEstNanos <= 0L) {
+    if (cycleBudgetNanos <= 0L) {
       return ACK_DEADLINE_SEED;
     }
-    long seconds = Math.max(1L, TimeUnit.NANOSECONDS.toSeconds(cycleTimeEstNanos) * 3L);
+    long seconds = Math.max(1L, TimeUnit.NANOSECONDS.toSeconds(cycleBudgetNanos) * 3L);
     Duration inferred = Duration.ofSeconds(seconds);
     if (inferred.compareTo(ACK_DEADLINE_MIN) < 0) {
       return ACK_DEADLINE_MIN;
@@ -416,13 +414,13 @@ final class AutoReceiveTime {
   }
 
   private void finishProbe(long wholeSecond) {
-    cycleTimeEstNanos = wholeSecond;
-    receiveBudgetNanos = cycleTimeEstNanos / 2;
-    writeBudgetNanos = cycleTimeEstNanos - receiveBudgetNanos - MARGIN_NANOS;
+    cycleBudgetNanos = wholeSecond;
+    receiveBudgetNanos = cycleBudgetNanos / 2;
+    writeBudgetNanos = cycleBudgetNanos - receiveBudgetNanos - MARGIN_NANOS;
     phase = Phase.WARMUP;
     LOG.info(
         "AUTO phase=warmup cycleTimeEst={} receiveBudget={} writeBudget={} marginTimeEst=1s",
-        Into.elapsed(cycleTimeEstNanos),
+        Into.elapsed(cycleBudgetNanos),
         Into.elapsed(receiveBudgetNanos),
         Into.elapsed(writeBudgetNanos));
   }
@@ -438,7 +436,7 @@ final class AutoReceiveTime {
     }
     maybeCorrectCycleTime();
     if (commitRecorded && receiveDurationNanos > 0L) {
-      applyWrite(cycleTimeEstNanos);
+      applyWrite(cycleBudgetNanos);
     }
     logSnapshot();
   }
@@ -617,7 +615,7 @@ final class AutoReceiveTime {
   }
 
   private void maybeCorrectCycleTime() {
-    if (cycleDurationNanos <= 0L || cycleTimeEstNanos <= 0L || cycleCheckStopped) {
+    if (cycleDurationNanos <= 0L || cycleBudgetNanos <= 0L || cycleCheckStopped) {
       return;
     }
     if (!intervalRaised && quietDoublePeriod()) {
@@ -631,10 +629,10 @@ final class AutoReceiveTime {
 
   private boolean quietDoublePeriod() {
     long raised = wholeSecondNanos(cycleDurationNanos);
-    if (raised < cycleTimeEstNanos * 2L) {
+    if (raised < cycleBudgetNanos * 2L) {
       return false;
     }
-    return gatherCount <= 0 || sleptAgainstEstimate(cycleTimeEstNanos);
+    return gatherCount <= 0 || sleptAgainstEstimate(cycleBudgetNanos);
   }
 
   private void noteCycleDuration(long cycle) {
@@ -660,7 +658,7 @@ final class AutoReceiveTime {
       pendingCycleSecondNanos = second;
       return;
     }
-    if (second != cycleTimeEstNanos) {
+    if (second != cycleBudgetNanos) {
       adoptEstimate(second);
     }
     cycleCheckStopped = true;
@@ -686,10 +684,10 @@ final class AutoReceiveTime {
     LOG.info(
         "AUTO phase={} cycleTimeEst set {} -> {}",
         phase.name().toLowerCase(),
-        Into.elapsed(cycleTimeEstNanos),
+        Into.elapsed(cycleBudgetNanos),
         Into.elapsed(next));
-    cycleTimeEstNanos = next;
-    long target = Math.max(0L, cycleTimeEstNanos - writeBudgetNanos);
+    cycleBudgetNanos = next;
+    long target = Math.max(0L, cycleBudgetNanos - writeBudgetNanos);
     if (receiveBudgetNanos > target) {
       receiveBudgetNanos = target;
     }
@@ -701,22 +699,22 @@ final class AutoReceiveTime {
   }
 
   private boolean maybeCorrectShortEstimate() {
-    if (postFirstHeavyChecked || gatherCount <= 0 || cycleTimeEstNanos <= 0L) {
+    if (postFirstHeavyChecked || gatherCount <= 0 || cycleBudgetNanos <= 0L) {
       return false;
     }
     postFirstHeavyChecked = true;
-    if (cycleTimeEstNanos >= SHORT_ESTIMATE_NANOS) {
+    if (cycleBudgetNanos >= SHORT_ESTIMATE_NANOS) {
       return false;
     }
-    if (cycleDurationNanos <= (long) (cycleTimeEstNanos * POST_FIRST_BATCH_CYCLE_RATIO)) {
+    if (cycleDurationNanos <= (long) (cycleBudgetNanos * POST_FIRST_BATCH_CYCLE_RATIO)) {
       return false;
     }
     LOG.warn(
         "AUTO phase=probe cycleTimeEst reset; cycleDuration={} exceeds short estimate {}",
         Into.elapsed(cycleDurationNanos),
-        Into.elapsed(cycleTimeEstNanos));
+        Into.elapsed(cycleBudgetNanos));
     phase = Phase.PROBE;
-    cycleTimeEstNanos = 0L;
+    cycleBudgetNanos = 0L;
     receiveBudgetNanos = 0L;
     writeBudgetNanos = 0L;
     probeStartedNanos = null;
@@ -733,13 +731,13 @@ final class AutoReceiveTime {
 
   private void logSnapshot() {
     long behind =
-        Math.max(0L, cycleDurationNanos - (cycleTimeEstNanos > 0L ? cycleTimeEstNanos : 0L));
+        Math.max(0L, cycleDurationNanos - (cycleBudgetNanos > 0L ? cycleBudgetNanos : 0L));
     long rate =
         receiveDurationNanos <= 0L ? 0L : (gatherCount * 1_000_000_000L) / receiveDurationNanos;
     lastSnapshot =
         new CycleSnapshot(
             phase,
-            cycleTimeEstNanos,
+            cycleBudgetNanos,
             MARGIN_NANOS,
             receiveBudgetNanos,
             receiveDurationNanos,
@@ -762,7 +760,7 @@ final class AutoReceiveTime {
 
   private void enterZeroTrigger() {
     phase = Phase.ZERO;
-    cycleTimeEstNanos = 0L;
+    cycleBudgetNanos = 0L;
     receiveBudgetNanos = ZERO_TRIGGER_RECEIVE.toNanos();
     if (!zeroTriggerWarned) {
       zeroTriggerWarned = true;
