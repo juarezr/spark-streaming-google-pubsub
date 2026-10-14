@@ -58,6 +58,11 @@ final class PubSubClient implements Closeable, Serializable {
 
   private final AtomicLong lastSeenNewestPublishMillis = new AtomicLong(Long.MIN_VALUE);
   private final AtomicLong lastHeapCeilingWarnMillis = new AtomicLong(Long.MIN_VALUE);
+  private final AtomicLong cachedAvailableBytes = new AtomicLong(Long.MIN_VALUE);
+  private final AtomicLong cachedAvailableAtMillis = new AtomicLong(Long.MIN_VALUE);
+  private volatile long cycleBudgetMillis;
+  private long hostPauseSinceMillis = Long.MIN_VALUE;
+  private boolean hostCollected;
 
   final class PubSubMessageReceiver implements MessageReceiver {
 
@@ -80,6 +85,7 @@ final class PubSubClient implements Closeable, Serializable {
       }
       while (aboveHeapCeiling() && stopped != null && !stopped.get()) {
         noteHeapCeiling();
+        collectHostReserveOnce();
         try {
           TimeUnit.MILLISECONDS.sleep(10);
         } catch (InterruptedException e) {
@@ -87,6 +93,9 @@ final class PubSubClient implements Closeable, Serializable {
           consumer.nack();
           return;
         }
+      }
+      if (!DriverHeap.belowHostReserve(cachedAvailable(System.currentTimeMillis()))) {
+        resetHostPause();
       }
       if (stopped != null && stopped.get()) {
         consumer.nack();
@@ -447,10 +456,54 @@ final class PubSubClient implements Closeable, Serializable {
     return this.queuedBytes == null ? 0L : this.queuedBytes.get();
   }
 
+  void noteCycleBudget(Duration cycle) {
+    cycleBudgetMillis = cycle == null ? 0L : cycle.toMillis();
+  }
+
   boolean aboveHeapCeiling() {
+    return heapAboveCeiling()
+        || DriverHeap.belowHostReserve(cachedAvailable(System.currentTimeMillis()));
+  }
+
+  private boolean heapAboveCeiling() {
     Runtime runtime = Runtime.getRuntime();
     return DriverHeap.aboveCeiling(
         DriverHeap.used(runtime.totalMemory(), runtime.freeMemory()), runtime.maxMemory());
+  }
+
+  private long cachedAvailable(long nowMillis) {
+    long at = cachedAvailableAtMillis.get();
+    long cached = cachedAvailableBytes.get();
+    if (at != Long.MIN_VALUE
+        && cached != Long.MIN_VALUE
+        && nowMillis >= at
+        && nowMillis - at < DriverHeap.HOST_CACHE_MILLIS) {
+      return cached;
+    }
+    long read = DriverHeap.availableBytes();
+    cachedAvailableBytes.set(read);
+    cachedAvailableAtMillis.set(nowMillis);
+    return read;
+  }
+
+  private void collectHostReserveOnce() {
+    long now = System.currentTimeMillis();
+    if (!DriverHeap.belowHostReserve(cachedAvailable(now))) {
+      resetHostPause();
+      return;
+    }
+    if (hostPauseSinceMillis == Long.MIN_VALUE) {
+      hostPauseSinceMillis = now;
+    }
+    if (DriverHeap.collectDue(hostPauseSinceMillis, now, cycleBudgetMillis, hostCollected)) {
+      hostCollected = true;
+      System.gc();
+    }
+  }
+
+  private void resetHostPause() {
+    hostPauseSinceMillis = Long.MIN_VALUE;
+    hostCollected = false;
   }
 
   void noteHeapCeiling() {
@@ -462,9 +515,22 @@ final class PubSubClient implements Closeable, Serializable {
     if (!lastHeapCeilingWarnMillis.compareAndSet(previous, now)) {
       return;
     }
-    LOG.warn(
-        "HEAP: driver heap used is at or above {}% of max; stopped taking more messages",
-        DriverHeap.CEILING_PERCENT);
+    boolean heap = heapAboveCeiling();
+    boolean host = DriverHeap.belowHostReserve(cachedAvailable(now));
+    if (heap && host) {
+      LOG.warn(
+          "HEAP: driver heap used is at or above {}% of max and host MemAvailable is below {}"
+              + " bytes; stopped taking more messages",
+          DriverHeap.CEILING_PERCENT, DriverHeap.HOST_RESERVE_BYTES);
+    } else if (host) {
+      LOG.warn(
+          "HEAP: host MemAvailable is below {} bytes; stopped taking more messages",
+          DriverHeap.HOST_RESERVE_BYTES);
+    } else {
+      LOG.warn(
+          "HEAP: driver heap used is at or above {}% of max; stopped taking more messages",
+          DriverHeap.CEILING_PERCENT);
+    }
   }
 
   /**

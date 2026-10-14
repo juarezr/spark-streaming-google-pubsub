@@ -8,6 +8,8 @@ import java.nio.file.Path;
 final class DriverHeap {
   static final int CEILING_PERCENT = 60;
   static final long HOUR_MILLIS = 3_600_000L;
+  static final long HOST_RESERVE_BYTES = 512L * 1024L * 1024L;
+  static final long HOST_CACHE_MILLIS = 1_000L;
 
   private DriverHeap() {}
 
@@ -25,6 +27,23 @@ final class DriverHeap {
 
   static boolean warnDue(long previousMillis, long nowMillis) {
     return previousMillis == Long.MIN_VALUE || nowMillis - previousMillis >= HOUR_MILLIS;
+  }
+
+  /** True when a real reading is under {@link #HOST_RESERVE_BYTES}. {@code -1} does not pause. */
+  static boolean belowHostReserve(long memAvailable) {
+    return memAvailable >= 0L && memAvailable < HOST_RESERVE_BYTES;
+  }
+
+  /**
+   * One collect per pause, after the in-flight cycle can have finished. A null cycle budget is
+   * {@code cycleBudgetMillis <= 0} and does not collect.
+   */
+  static boolean collectDue(
+      long pauseSinceMillis, long nowMillis, long cycleBudgetMillis, boolean alreadyCollected) {
+    if (alreadyCollected || cycleBudgetMillis <= 0L || pauseSinceMillis == Long.MIN_VALUE) {
+      return false;
+    }
+    return nowMillis - pauseSinceMillis >= cycleBudgetMillis;
   }
 
   static long residentBytes() {

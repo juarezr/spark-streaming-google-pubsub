@@ -217,6 +217,7 @@ final class PubSubMicroBatchStream
   }
 
   private List<PulledMessage> gatherMessages(AdmissionLimits gatherLimits) {
+    client.noteCycleBudget(autoReceiveTime.cycleTimeEst());
     AdmissionLimits limits =
         availableNow
             ? gatherLimits.withDrainUntilIdle()
@@ -233,6 +234,7 @@ final class PubSubMicroBatchStream
     long gatherFinished = System.nanoTime();
 
     this.autoReceiveTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
+    client.noteCycleBudget(autoReceiveTime.cycleTimeEst());
     logDriverHeap("gather", PulledMessage.payloadBytes(pulled));
     noteIntakeLag(pulled);
     return pulled;

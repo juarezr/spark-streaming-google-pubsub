@@ -57,6 +57,27 @@ class DriverHeapTest {
   }
 
   @Test
+  void hostReservePausesOnlyUnder512MiB() {
+    long reserve = DriverHeap.HOST_RESERVE_BYTES;
+
+    assertTrue(DriverHeap.belowHostReserve(reserve - 1L));
+    assertFalse(DriverHeap.belowHostReserve(reserve));
+    assertFalse(DriverHeap.belowHostReserve(-1L));
+  }
+
+  @Test
+  void collectWaitsOneCycleBudget() {
+    long budget = 60_000L;
+
+    assertFalse(DriverHeap.collectDue(0L, 1_000L, budget, false));
+    assertFalse(DriverHeap.collectDue(0L, budget - 1L, budget, false));
+    assertTrue(DriverHeap.collectDue(0L, budget, budget, false));
+    assertFalse(DriverHeap.collectDue(0L, budget, 0L, false));
+    assertFalse(DriverHeap.collectDue(0L, budget, budget, true));
+    assertFalse(DriverHeap.collectDue(Long.MIN_VALUE, budget, budget, false));
+  }
+
+  @Test
   void meminfoReadsAvailableAndTotal() {
     String meminfo = "MemTotal:\t     4 kB\nMemFree:\t     1 kB\nMemAvailable:\t     2 kB\n";
 
