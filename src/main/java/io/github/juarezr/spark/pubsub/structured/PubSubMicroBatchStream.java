@@ -247,6 +247,9 @@ final class PubSubMicroBatchStream
     if (limits.remainingRows(0) <= 0) {
       return messages;
     }
+    if (stopForHeapCeiling()) {
+      return messages;
+    }
     List<PulledMessage> pulled = poll(limits, messages.size(), RECEIVE_IDLE);
     return retainPolled(messages, pulled, limits, 0L).messages;
   }
@@ -266,6 +269,9 @@ final class PubSubMicroBatchStream
         }
         if (limits.reachedMax(messages.size(), payloadBytes)
             || limits.remainingRows(messages.size()) <= 0) {
+          break;
+        }
+        if (stopForHeapCeiling()) {
           break;
         }
         Duration slice = remainingWait(deadlineNanos);
@@ -373,6 +379,9 @@ final class PubSubMicroBatchStream
         }
         if (limits.reachedMax(messages.size(), payloadBytes)
             || limits.remainingRows(messages.size()) <= 0) {
+          break;
+        }
+        if (stopForHeapCeiling()) {
           break;
         }
         List<PulledMessage> pulled = poll(limits, messages.size(), RECEIVE_IDLE);
@@ -645,6 +654,14 @@ final class PubSubMicroBatchStream
     }
     this.firstBatchLogged = true;
     LOG.info(window.formatStats(batchId, "BATCH: First batch:"));
+  }
+
+  private boolean stopForHeapCeiling() {
+    if (!client.aboveHeapCeiling()) {
+      return false;
+    }
+    client.noteHeapCeiling();
+    return true;
   }
 
   private void noteIntakeLag(List<PulledMessage> pulled) {

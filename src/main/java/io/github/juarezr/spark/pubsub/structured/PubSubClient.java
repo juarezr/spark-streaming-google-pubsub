@@ -57,6 +57,7 @@ final class PubSubClient implements Closeable, Serializable {
   private transient int nextPollMax = Integer.MAX_VALUE;
 
   private final AtomicLong lastSeenNewestPublishMillis = new AtomicLong(Long.MIN_VALUE);
+  private final AtomicLong lastHeapCeilingWarnMillis = new AtomicLong(Long.MIN_VALUE);
 
   final class PubSubMessageReceiver implements MessageReceiver {
 
@@ -69,6 +70,16 @@ final class PubSubClient implements Closeable, Serializable {
       PulledMessage pulled = toPulled(message);
       long cap = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
       while (queuedBytes != null && queuedBytes.get() >= cap && stopped != null && !stopped.get()) {
+        try {
+          TimeUnit.MILLISECONDS.sleep(10);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          consumer.nack();
+          return;
+        }
+      }
+      while (aboveHeapCeiling() && stopped != null && !stopped.get()) {
+        noteHeapCeiling();
         try {
           TimeUnit.MILLISECONDS.sleep(10);
         } catch (InterruptedException e) {
@@ -434,6 +445,26 @@ final class PubSubClient implements Closeable, Serializable {
 
   long queuedBytes() {
     return this.queuedBytes == null ? 0L : this.queuedBytes.get();
+  }
+
+  boolean aboveHeapCeiling() {
+    Runtime runtime = Runtime.getRuntime();
+    return DriverHeap.aboveCeiling(
+        DriverHeap.used(runtime.totalMemory(), runtime.freeMemory()), runtime.maxMemory());
+  }
+
+  void noteHeapCeiling() {
+    long now = System.currentTimeMillis();
+    long previous = lastHeapCeilingWarnMillis.get();
+    if (!DriverHeap.warnDue(previous, now)) {
+      return;
+    }
+    if (!lastHeapCeilingWarnMillis.compareAndSet(previous, now)) {
+      return;
+    }
+    LOG.warn(
+        "HEAP: driver heap used is at or above {}% of max; stopped taking more messages",
+        DriverHeap.CEILING_PERCENT);
   }
 
   /**
