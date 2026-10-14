@@ -16,10 +16,11 @@ class DriverHeapTest {
 
   @Test
   void lineIncludesHeapMaxAndUsed() {
-    String line = DriverHeap.line("gather", 4_096L, DriverHeap.used(1_000L, 400L), 96L, 8L);
+    String line = DriverHeap.line("gather", 4_096L, DriverHeap.used(1_000L, 400L), 2_048L, 96L, 8L);
 
     assertTrue(line.contains("heapMax=4096"));
     assertTrue(line.contains("heapUsed=600"));
+    assertTrue(line.contains("rss=2048"));
     assertTrue(line.contains("at=gather"));
     assertTrue(line.contains("gatherBytes=96"));
     assertTrue(line.contains("queuedBytes=8"));
@@ -43,5 +44,11 @@ class DriverHeapTest {
     assertTrue(DriverHeap.warnDue(Long.MIN_VALUE, 0L));
     assertFalse(DriverHeap.warnDue(0L, DriverHeap.HOUR_MILLIS - 1L));
     assertTrue(DriverHeap.warnDue(0L, DriverHeap.HOUR_MILLIS));
+  }
+
+  @Test
+  void residentBytesReadsVmRss() {
+    assertEquals(2048L, DriverHeap.residentBytes("Name:\tjava\nVmRSS:\t     2 kB\n"));
+    assertEquals(-1L, DriverHeap.residentBytes("Name:\tjava\n"));
   }
 }

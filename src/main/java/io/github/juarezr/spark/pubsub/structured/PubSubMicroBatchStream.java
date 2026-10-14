@@ -271,8 +271,18 @@ final class PubSubMicroBatchStream
             || limits.remainingRows(messages.size()) <= 0) {
           break;
         }
-        if (stopForHeapCeiling()) {
-          break;
+        if (client.aboveHeapCeiling()) {
+          client.noteHeapCeiling();
+          if (!messages.isEmpty()) {
+            break;
+          }
+          try {
+            Thread.sleep(10);
+          } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return abortGatherNackAndRelease(messages, null);
+          }
+          continue;
         }
         Duration slice = remainingWait(deadlineNanos);
         List<PulledMessage> pulled = poll(limits, messages.size(), slice);
@@ -681,7 +691,14 @@ final class PubSubMicroBatchStream
     Runtime runtime = Runtime.getRuntime();
     long heapUsed = DriverHeap.used(runtime.totalMemory(), runtime.freeMemory());
     // TODO: drop this soak line to debug before a provider release.
-    LOG.info(DriverHeap.line(at, runtime.maxMemory(), heapUsed, gatherBytes, client.queuedBytes()));
+    LOG.info(
+        DriverHeap.line(
+            at,
+            runtime.maxMemory(),
+            heapUsed,
+            DriverHeap.residentBytes(),
+            gatherBytes,
+            client.queuedBytes()));
   }
 
   private void logStop(int uncommitted) {
