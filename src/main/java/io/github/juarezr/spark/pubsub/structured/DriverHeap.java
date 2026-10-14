@@ -36,17 +36,41 @@ final class DriverHeap {
   }
 
   static long residentBytes(String status) {
-    if (status == null) {
+    return fieldBytes(status, "VmRSS:");
+  }
+
+  static long availableBytes() {
+    return meminfoBytes("MemAvailable:");
+  }
+
+  static long totalBytes() {
+    return meminfoBytes("MemTotal:");
+  }
+
+  static long meminfoBytes(String meminfo, String field) {
+    return fieldBytes(meminfo, field);
+  }
+
+  private static long meminfoBytes(String field) {
+    try {
+      return meminfoBytes(Files.readString(Path.of("/proc/meminfo")), field);
+    } catch (IOException e) {
       return -1L;
     }
-    for (String statusLine : status.split("\n")) {
-      if (!statusLine.startsWith("VmRSS:")) {
+  }
+
+  private static long fieldBytes(String text, String field) {
+    if (text == null) {
+      return -1L;
+    }
+    for (String textLine : text.split("\n")) {
+      if (!textLine.startsWith(field)) {
         continue;
       }
       long kib = 0L;
       boolean digit = false;
-      for (int i = 0; i < statusLine.length(); i++) {
-        char c = statusLine.charAt(i);
+      for (int i = 0; i < textLine.length(); i++) {
+        char c = textLine.charAt(i);
         if (c >= '0' && c <= '9') {
           digit = true;
           kib = kib * 10L + (c - '0');
@@ -60,9 +84,17 @@ final class DriverHeap {
   }
 
   static String line(
-      String at, long heapMax, long heapUsed, long rssBytes, long gatherBytes, long queuedBytes) {
+      String at,
+      long heapMax,
+      long heapUsed,
+      long rssBytes,
+      long memAvailable,
+      long memTotal,
+      long gatherBytes,
+      long queuedBytes) {
     return String.format(
-        "HEAP: at=%s heapMax=%d heapUsed=%d rss=%d gatherBytes=%d queuedBytes=%d",
-        at, heapMax, heapUsed, rssBytes, gatherBytes, queuedBytes);
+        "HEAP: at=%s heapMax=%d heapUsed=%d rss=%d memAvailable=%d memTotal=%d"
+            + " gatherBytes=%d queuedBytes=%d",
+        at, heapMax, heapUsed, rssBytes, memAvailable, memTotal, gatherBytes, queuedBytes);
   }
 }

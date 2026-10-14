@@ -16,11 +16,15 @@ class DriverHeapTest {
 
   @Test
   void lineIncludesHeapMaxAndUsed() {
-    String line = DriverHeap.line("gather", 4_096L, DriverHeap.used(1_000L, 400L), 2_048L, 96L, 8L);
+    String line =
+        DriverHeap.line(
+            "gather", 4_096L, DriverHeap.used(1_000L, 400L), 2_048L, 8_192L, 16_384L, 96L, 8L);
 
     assertTrue(line.contains("heapMax=4096"));
     assertTrue(line.contains("heapUsed=600"));
     assertTrue(line.contains("rss=2048"));
+    assertTrue(line.contains("memAvailable=8192"));
+    assertTrue(line.contains("memTotal=16384"));
     assertTrue(line.contains("at=gather"));
     assertTrue(line.contains("gatherBytes=96"));
     assertTrue(line.contains("queuedBytes=8"));
@@ -50,5 +54,15 @@ class DriverHeapTest {
   void residentBytesReadsVmRss() {
     assertEquals(2048L, DriverHeap.residentBytes("Name:\tjava\nVmRSS:\t     2 kB\n"));
     assertEquals(-1L, DriverHeap.residentBytes("Name:\tjava\n"));
+  }
+
+  @Test
+  void meminfoReadsAvailableAndTotal() {
+    String meminfo = "MemTotal:\t     4 kB\nMemFree:\t     1 kB\nMemAvailable:\t     2 kB\n";
+
+    assertEquals(4096L, DriverHeap.meminfoBytes(meminfo, "MemTotal:"));
+    assertEquals(2048L, DriverHeap.meminfoBytes(meminfo, "MemAvailable:"));
+    assertEquals(-1L, DriverHeap.meminfoBytes("MemFree:\t     1 kB\n", "MemAvailable:"));
+    assertEquals(-1L, DriverHeap.meminfoBytes(null, "MemTotal:"));
   }
 }

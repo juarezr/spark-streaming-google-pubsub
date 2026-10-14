@@ -697,6 +697,8 @@ final class PubSubMicroBatchStream
             runtime.maxMemory(),
             heapUsed,
             DriverHeap.residentBytes(),
+            DriverHeap.availableBytes(),
+            DriverHeap.totalBytes(),
             gatherBytes,
             client.queuedBytes()));
   }
