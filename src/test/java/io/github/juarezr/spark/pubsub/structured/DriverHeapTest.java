@@ -2,6 +2,7 @@ package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -18,16 +19,62 @@ class DriverHeapTest {
   void lineIncludesHeapMaxAndUsed() {
     String line =
         DriverHeap.line(
-            "gather", 4_096L, DriverHeap.used(1_000L, 400L), 2_048L, 8_192L, 16_384L, 96L, 8L);
+            "gather",
+            4_096L,
+            DriverHeap.used(1_000L, 400L),
+            DriverHeap.percent(600L, 4_096L),
+            10L,
+            2_048L,
+            -20L,
+            8_192L,
+            30L,
+            16_384L,
+            DriverHeap.percent(8_192L, 16_384L),
+            96L,
+            4,
+            8L,
+            2);
 
     assertTrue(line.contains("heapMax=4096"));
     assertTrue(line.contains("heapUsed=600"));
+    assertTrue(line.contains("heapFraction=14"));
+    assertTrue(line.contains("heapChange=10"));
     assertTrue(line.contains("rss=2048"));
+    assertTrue(line.contains("rssChange=-20"));
     assertTrue(line.contains("memAvailable=8192"));
+    assertTrue(line.contains("memChange=30"));
     assertTrue(line.contains("memTotal=16384"));
+    assertTrue(line.contains("memFraction=50"));
     assertTrue(line.contains("at=gather"));
     assertTrue(line.contains("gatherBytes=96"));
+    assertTrue(line.contains("gatherMsgs=4"));
     assertTrue(line.contains("queuedBytes=8"));
+    assertTrue(line.contains("queuedMsgs=2"));
+  }
+
+  @Test
+  void startupNamesTheTwoConstants() {
+    assertEquals("HEAP: startup heapMax=4096 memTotal=16384", DriverHeap.startup(4_096L, 16_384L));
+  }
+
+  @Test
+  void percentAndSignedChange() {
+    assertEquals(14L, DriverHeap.percent(600L, 4_096L));
+    assertEquals(50L, DriverHeap.percent(8_192L, 16_384L));
+    assertEquals(-1L, DriverHeap.percent(1L, 0L));
+    assertEquals(-1L, DriverHeap.percent(-1L, 100L));
+    assertEquals(0L, DriverHeap.change(Long.MIN_VALUE, 100L));
+    assertEquals(0L, DriverHeap.change(-1L, 100L));
+    assertEquals(50L, DriverHeap.change(100L, 150L));
+    assertEquals(-50L, DriverHeap.change(150L, 100L));
+  }
+
+  @Test
+  void pauseReasonNamesHeapHostOrBoth() {
+    assertEquals("heap", DriverHeap.pauseReason(true, false));
+    assertEquals("host", DriverHeap.pauseReason(false, true));
+    assertEquals("heap and host", DriverHeap.pauseReason(true, true));
+    assertNull(DriverHeap.pauseReason(false, false));
   }
 
   @Test
@@ -48,6 +95,14 @@ class DriverHeapTest {
     assertTrue(DriverHeap.warnDue(Long.MIN_VALUE, 0L));
     assertFalse(DriverHeap.warnDue(0L, DriverHeap.HOUR_MILLIS - 1L));
     assertTrue(DriverHeap.warnDue(0L, DriverHeap.HOUR_MILLIS));
+  }
+
+  @Test
+  void hostWarningStaysDueAfterAHeapWarning() {
+    long heapWarnedAt = 0L;
+
+    assertFalse(DriverHeap.warnDue(heapWarnedAt, 1_000L));
+    assertTrue(DriverHeap.warnDue(Long.MIN_VALUE, 1_000L));
   }
 
   @Test

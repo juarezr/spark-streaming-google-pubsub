@@ -29,6 +29,35 @@ final class DriverHeap {
     return previousMillis == Long.MIN_VALUE || nowMillis - previousMillis >= HOUR_MILLIS;
   }
 
+  /** {@code -1} when {@code whole} is missing or {@code part} was not read. */
+  static long percent(long part, long whole) {
+    if (whole <= 0L || part < 0L) {
+      return -1L;
+    }
+    return part * 100L / whole;
+  }
+
+  /** Signed byte delta. The first sample, and a missing reading, are 0. */
+  static long change(long previous, long current) {
+    if (previous == Long.MIN_VALUE || previous < 0L || current < 0L) {
+      return 0L;
+    }
+    return current - previous;
+  }
+
+  static String pauseReason(boolean heap, boolean host) {
+    if (heap && host) {
+      return "heap and host";
+    }
+    if (host) {
+      return "host";
+    }
+    if (heap) {
+      return "heap";
+    }
+    return null;
+  }
+
   /** True when a real reading is under {@link #HOST_RESERVE_BYTES}. {@code -1} does not pause. */
   static boolean belowHostReserve(long memAvailable) {
     return memAvailable >= 0L && memAvailable < HOST_RESERVE_BYTES;
@@ -102,18 +131,44 @@ final class DriverHeap {
     return -1L;
   }
 
+  static String startup(long heapMax, long memTotal) {
+    return String.format("HEAP: startup heapMax=%d memTotal=%d", heapMax, memTotal);
+  }
+
   static String line(
       String at,
       long heapMax,
       long heapUsed,
+      long heapFraction,
+      long heapChange,
       long rssBytes,
+      long rssChange,
       long memAvailable,
+      long memChange,
       long memTotal,
+      long memFraction,
       long gatherBytes,
-      long queuedBytes) {
+      int gatherMsgs,
+      long queuedBytes,
+      int queuedMsgs) {
     return String.format(
-        "HEAP: at=%s heapMax=%d heapUsed=%d rss=%d memAvailable=%d memTotal=%d"
-            + " gatherBytes=%d queuedBytes=%d",
-        at, heapMax, heapUsed, rssBytes, memAvailable, memTotal, gatherBytes, queuedBytes);
+        "HEAP: at=%s heapMax=%d heapUsed=%d heapFraction=%d heapChange=%d rss=%d rssChange=%d"
+            + " memAvailable=%d memChange=%d memTotal=%d memFraction=%d gatherBytes=%d"
+            + " gatherMsgs=%d queuedBytes=%d queuedMsgs=%d",
+        at,
+        heapMax,
+        heapUsed,
+        heapFraction,
+        heapChange,
+        rssBytes,
+        rssChange,
+        memAvailable,
+        memChange,
+        memTotal,
+        memFraction,
+        gatherBytes,
+        gatherMsgs,
+        queuedBytes,
+        queuedMsgs);
   }
 }

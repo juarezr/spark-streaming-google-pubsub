@@ -64,6 +64,10 @@ final class PubSubMicroBatchStream
   private volatile boolean cancelled;
   private volatile boolean availableNow;
   private volatile boolean limitReached;
+  private volatile boolean heapStartupLogged;
+  private long previousHeapUsed = Long.MIN_VALUE;
+  private long previousRss = Long.MIN_VALUE;
+  private long previousMemAvailable = Long.MIN_VALUE;
 
   PubSubMicroBatchStream(PubSubConfig config, int numPartitions) {
     this(config, numPartitions, PubSubSchema.tableSchema(config, null));
@@ -235,7 +239,7 @@ final class PubSubMicroBatchStream
 
     this.autoReceiveTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
     client.noteCycleBudget(autoReceiveTime.cycleTimeEst());
-    logDriverHeap("gather", PulledMessage.payloadBytes(pulled));
+    logDriverHeap("gather", PulledMessage.payloadBytes(pulled), pulled.size());
     noteIntakeLag(pulled);
     return pulled;
   }
@@ -590,10 +594,10 @@ final class PubSubMicroBatchStream
   public void commit(Offset end) {
     PubSubOffset endOffset = (PubSubOffset) end;
     String batchKey = Long.toString(endOffset.batchId());
-    long committedBytes =
-        PulledMessage.payloadBytes(messagesByBatch.getOrDefault(endOffset.batchId(), List.of()));
+    List<PulledMessage> committed = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
+    long committedBytes = PulledMessage.payloadBytes(committed);
     if (config.ackMode() == AckMode.AFTER_COMMIT) {
-      List<PulledMessage> messages = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
+      List<PulledMessage> messages = committed;
       List<String> ackIds = PulledMessage.ackIds(messages);
       try {
         if (!ackIds.isEmpty()) {
@@ -630,7 +634,7 @@ final class PubSubMicroBatchStream
       currentOffset = endOffset;
     }
     LOG.debug("BATCH: Committed offset batchId={}", endOffset.batchId());
-    logDriverHeap("commit", committedBytes);
+    logDriverHeap("commit", committedBytes, committed.size());
     autoReceiveTime.onCommit();
   }
 
@@ -689,20 +693,38 @@ final class PubSubMicroBatchStream
     }
   }
 
-  private void logDriverHeap(String at, long gatherBytes) {
+  private void logDriverHeap(String at, long gatherBytes, int gatherMsgs) {
     Runtime runtime = Runtime.getRuntime();
+    long heapMax = runtime.maxMemory();
     long heapUsed = DriverHeap.used(runtime.totalMemory(), runtime.freeMemory());
+    long rss = DriverHeap.residentBytes();
+    long memAvailable = DriverHeap.availableBytes();
+    long memTotal = DriverHeap.totalBytes();
     // TODO: drop this soak line to debug before a provider release.
+    if (!heapStartupLogged) {
+      heapStartupLogged = true;
+      LOG.info(DriverHeap.startup(heapMax, memTotal));
+    }
     LOG.info(
         DriverHeap.line(
             at,
-            runtime.maxMemory(),
+            heapMax,
             heapUsed,
-            DriverHeap.residentBytes(),
-            DriverHeap.availableBytes(),
-            DriverHeap.totalBytes(),
+            DriverHeap.percent(heapUsed, heapMax),
+            DriverHeap.change(previousHeapUsed, heapUsed),
+            rss,
+            DriverHeap.change(previousRss, rss),
+            memAvailable,
+            DriverHeap.change(previousMemAvailable, memAvailable),
+            memTotal,
+            DriverHeap.percent(memAvailable, memTotal),
             gatherBytes,
-            client.queuedBytes()));
+            gatherMsgs,
+            client.queuedBytes(),
+            client.queuedCount()));
+    previousHeapUsed = heapUsed;
+    previousRss = rss;
+    previousMemAvailable = memAvailable;
   }
 
   private void logStop(int uncommitted) {
