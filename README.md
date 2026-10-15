@@ -175,8 +175,8 @@ sequenceDiagram
   Spark->>Driver: next micro-batch
   Driver->>Queue: poll until receiveTime or batchSize
   Driver-->>Spark: this micro-batch
-  PubSub-->>Queue: still pushing messages\nfor next micro-batch
-  Spark->>Executor: write parquet\nfoward\repartition
+  PubSub-->>Queue: "still pushing messages\nfor next micro-batch"
+  Spark->>Executor: "write parquet\nfoward\nrepartition"
   Note over Executor: run application stages
   Spark->>Driver: commit
   Driver->>PubSub: acknowledge
