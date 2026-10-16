@@ -240,8 +240,9 @@ final class PubSubMicroBatchStream
 
     this.autoReceiveTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
     client.noteCycleBudget(autoReceiveTime.cycleBudget());
-    long heapFraction = logDriverHeap("gather", PulledMessage.payloadBytes(pulled), pulled.size());
-    client.shrinkBudget(heapFraction);
+    long payloadBytes = PulledMessage.payloadBytes(pulled);
+    long heapFraction = logDriverHeap("gather", payloadBytes, pulled.size());
+    client.noteGather(heapFraction, previousMemAvailable, payloadBytes);
     noteIntakeLag(pulled);
     return pulled;
   }
@@ -705,7 +706,7 @@ final class PubSubMicroBatchStream
     // TODO: drop this soak line to debug before a provider release.
     if (!heapStartupLogged) {
       heapStartupLogged = true;
-      LOG.info(DriverHeap.startup(heapMax, memTotal));
+      LOG.info(DriverHeap.startup(heapMax, memTotal, client.memoryCeiling()));
     }
     LOG.info(
         DriverHeap.line(

@@ -56,7 +56,9 @@ class DriverHeapTest {
 
   @Test
   void startupNamesTheTwoConstants() {
-    assertEquals("HEAP: startup heapMax=4096 memTotal=16384", DriverHeap.startup(4_096L, 16_384L));
+    assertEquals(
+        "HEAP: startup heapMax=4096 memTotal=16384 memoryCeiling=2048",
+        DriverHeap.startup(4_096L, 16_384L, 2_048L));
   }
 
   @Test
@@ -100,6 +102,72 @@ class DriverHeapTest {
     assertEquals(
         DriverHeap.BUDGET_FLOOR_BYTES, DriverHeap.nextBudget(DriverHeap.BUDGET_FLOOR_BYTES, 90L));
     assertEquals(current, DriverHeap.nextBudget(current, -1L));
+  }
+
+  @Test
+  void ceilingIsTwiceTheSeedUntilBatchSize() {
+    long heapMax = 4_096L * 1024L * 1024L;
+    long batch = 160L * 1024L * 1024L;
+
+    assertEquals(128L * 1024L * 1024L, DriverHeap.ceiling(batch, heapMax));
+    assertEquals(16L * 1024L * 1024L, DriverHeap.ceiling(16L * 1024L * 1024L, heapMax));
+    assertEquals(256L * 1024L * 1024L, DriverHeap.ceiling(0L, 8_192L * 1024L * 1024L));
+    assertEquals(batch, DriverHeap.ceiling(batch, 0L));
+  }
+
+  @Test
+  void growStepAddsOneEighthAndStopsAtTheCeiling() {
+    long current = 64L * 1024L * 1024L;
+    long ceiling = 128L * 1024L * 1024L;
+
+    assertEquals(current + current / 8L, DriverHeap.growStep(current, ceiling));
+    assertEquals(ceiling, DriverHeap.growStep(ceiling - 1L, ceiling));
+    assertEquals(ceiling, DriverHeap.growStep(ceiling, ceiling));
+  }
+
+  @Test
+  void budgetGrowsOnlyAfterEightCalmFullGathers() {
+    long current = 64L * 1024L * 1024L;
+    long ceiling = 128L * 1024L * 1024L;
+    long free = DriverHeap.GROW_MIN_AVAILABLE;
+    int streak = 0;
+
+    for (int i = 0; i < DriverHeap.GROW_STREAK - 1; i++) {
+      DriverHeap.BudgetStep step = DriverHeap.adjust(current, ceiling, streak, 20L, free, current);
+      assertEquals(current, step.budget);
+      streak = step.calmStreak;
+    }
+    assertEquals(7, streak);
+
+    DriverHeap.BudgetStep light =
+        DriverHeap.adjust(current, ceiling, streak, 20L, free, current / 2L);
+    assertEquals(current, light.budget);
+    assertEquals(8, light.calmStreak);
+
+    DriverHeap.BudgetStep grown =
+        DriverHeap.adjust(current, ceiling, light.calmStreak, 20L, free, current);
+    assertEquals(current + current / 8L, grown.budget);
+    assertEquals(0, grown.calmStreak);
+  }
+
+  @Test
+  void hotSampleHalvesAndClearsTheCalmStreak() {
+    long current = 64L * 1024L * 1024L;
+    long ceiling = 128L * 1024L * 1024L;
+    long free = DriverHeap.GROW_MIN_AVAILABLE;
+
+    DriverHeap.BudgetStep halved = DriverHeap.adjust(current, ceiling, 7, 50L, free, current);
+    assertEquals(current / 2L, halved.budget);
+    assertEquals(0, halved.calmStreak);
+
+    DriverHeap.BudgetStep warm =
+        DriverHeap.adjust(current, ceiling, 7, DriverHeap.GROW_PERCENT, free, current);
+    assertEquals(current, warm.budget);
+    assertEquals(0, warm.calmStreak);
+
+    DriverHeap.BudgetStep unread = DriverHeap.adjust(current, ceiling, 7, 20L, -1L, current);
+    assertEquals(current, unread.budget);
+    assertEquals(0, unread.calmStreak);
   }
 
   @Test

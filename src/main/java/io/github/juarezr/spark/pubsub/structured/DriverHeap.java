@@ -11,8 +11,12 @@ final class DriverHeap {
   static final long HOST_RESERVE_BYTES = 512L * 1024L * 1024L;
   static final long HOST_CACHE_MILLIS = 1_000L;
   static final int SHRINK_PERCENT = 50;
+  static final int GROW_PERCENT = 40;
+  static final int GROW_STREAK = 8;
   static final long BUDGET_FLOOR_BYTES = 4L * 1024L * 1024L;
+  static final long GROW_MIN_AVAILABLE = 2L * 1024L * 1024L * 1024L;
   static final int BUDGET_DIVISOR = 64;
+  static final int CEILING_DIVISOR = 32;
 
   private DriverHeap() {}
 
@@ -53,7 +57,16 @@ final class DriverHeap {
    * fraction of the driver heap so the first gather cannot commit the whole heap.
    */
   static long seed(long batchSize, long heapMax) {
-    long fromHeap = heapMax > 0L ? heapMax / BUDGET_DIVISOR : 0L;
+    return cap(batchSize, heapMax, BUDGET_DIVISOR);
+  }
+
+  /** Highest gather cap for this process. Outstanding bytes are twice this, set once. */
+  static long ceiling(long batchSize, long heapMax) {
+    return cap(batchSize, heapMax, CEILING_DIVISOR);
+  }
+
+  private static long cap(long batchSize, long heapMax, int divisor) {
+    long fromHeap = heapMax > 0L ? heapMax / divisor : 0L;
     if (batchSize > 0L && fromHeap > 0L) {
       return Math.min(batchSize, fromHeap);
     }
@@ -69,6 +82,57 @@ final class DriverHeap {
       return current;
     }
     return Math.max(current / 2L, BUDGET_FLOOR_BYTES);
+  }
+
+  /** One eighth more, and not past {@code ceiling}. */
+  static long growStep(long current, long ceiling) {
+    if (current <= 0L || current >= ceiling) {
+      return current;
+    }
+    long stepped = current + Math.max(current / 8L, 1L);
+    return Math.min(stepped, ceiling);
+  }
+
+  static boolean filled(long gatherBytes, long budget) {
+    return budget > 0L && gatherBytes * 10L >= budget * 9L;
+  }
+
+  /**
+   * Halve immediately at {@link #SHRINK_PERCENT}. Otherwise count a cool gather, and step up only
+   * after {@link #GROW_STREAK} of them when the latest gather filled the cap.
+   */
+  static BudgetStep adjust(
+      long current,
+      long ceiling,
+      int calmStreak,
+      long heapFraction,
+      long memAvailable,
+      long gatherBytes) {
+    long halved = nextBudget(current, heapFraction);
+    if (halved < current) {
+      return new BudgetStep(halved, 0);
+    }
+    int streak =
+        heapFraction >= 0L && heapFraction < GROW_PERCENT && memAvailable >= GROW_MIN_AVAILABLE
+            ? calmStreak + 1
+            : 0;
+    if (streak >= GROW_STREAK && filled(gatherBytes, current) && current < ceiling) {
+      long grown = growStep(current, ceiling);
+      if (grown > current) {
+        return new BudgetStep(grown, 0);
+      }
+    }
+    return new BudgetStep(current, streak);
+  }
+
+  static final class BudgetStep {
+    final long budget;
+    final int calmStreak;
+
+    BudgetStep(long budget, int calmStreak) {
+      this.budget = budget;
+      this.calmStreak = calmStreak;
+    }
   }
 
   static String pauseReason(boolean heap, boolean host) {
@@ -157,8 +221,13 @@ final class DriverHeap {
     return -1L;
   }
 
-  static String startup(long heapMax, long memTotal) {
-    return String.format("HEAP: startup heapMax=%d memTotal=%d", heapMax, memTotal);
+  static String startup(long heapMax, long memTotal, long memoryCeiling) {
+    return String.format(
+        "HEAP: startup heapMax=%d memTotal=%d memoryCeiling=%d", heapMax, memTotal, memoryCeiling);
+  }
+
+  static String budgetChange(long previous, long next) {
+    return String.format("HEAP: memoryBudget %d -> %d", previous, next);
   }
 
   static String readings(long heapUsed, long heapFraction, long rssBytes, long memAvailable) {

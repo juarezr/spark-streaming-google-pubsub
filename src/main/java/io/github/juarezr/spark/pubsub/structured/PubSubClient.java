@@ -62,6 +62,7 @@ final class PubSubClient implements Closeable, Serializable {
   private final AtomicBoolean intakePaused = new AtomicBoolean(false);
   private volatile long memoryBudget;
   private long flowSeedBytes;
+  private int calmStreak;
   private volatile String pauseReason;
   private final AtomicLong cachedAvailableBytes = new AtomicLong(Long.MIN_VALUE);
   private final AtomicLong cachedAvailableAtMillis = new AtomicLong(Long.MIN_VALUE);
@@ -171,12 +172,17 @@ final class PubSubClient implements Closeable, Serializable {
     this.consumers = new ConcurrentHashMap<>();
     this.stopped = new AtomicBoolean(false);
     this.connectionErrors = new PubSubConnectionErrors(this.config.subscriptionPath());
-    long seeded = DriverHeap.seed(config.batchSize(), Runtime.getRuntime().maxMemory());
+    long heapMax = Runtime.getRuntime().maxMemory();
+    long seeded = DriverHeap.seed(config.batchSize(), heapMax);
+    long capped = DriverHeap.ceiling(config.batchSize(), heapMax);
     if (seeded <= 0L) {
       seeded = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
     }
+    if (capped < seeded) {
+      capped = seeded;
+    }
     this.memoryBudget = seeded;
-    this.flowSeedBytes = seeded;
+    this.flowSeedBytes = capped;
 
     this.emulator = this.config.emulatorHost().map(PubSubEmulator::new).orElse(null);
     try {
@@ -475,12 +481,21 @@ final class PubSubClient implements Closeable, Serializable {
     return memoryBudget;
   }
 
-  void shrinkBudget(long heapFraction) {
-    long current = memoryBudget;
-    long next = DriverHeap.nextBudget(current, heapFraction);
-    if (next < current) {
-      memoryBudget = next;
+  long memoryCeiling() {
+    return flowSeedBytes;
+  }
+
+  void noteGather(long heapFraction, long memAvailable, long gatherBytes) {
+    long ceiling = flowSeedBytes > 0L ? flowSeedBytes : memoryBudget;
+    DriverHeap.BudgetStep step =
+        DriverHeap.adjust(
+            memoryBudget, ceiling, calmStreak, heapFraction, memAvailable, gatherBytes);
+    if (step.budget != memoryBudget) {
+      // TODO: drop this soak line to debug before a provider release.
+      LOG.info(DriverHeap.budgetChange(memoryBudget, step.budget));
+      memoryBudget = step.budget;
     }
+    calmStreak = step.calmStreak;
   }
 
   private long queueCap() {
