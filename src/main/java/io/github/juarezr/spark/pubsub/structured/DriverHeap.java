@@ -12,7 +12,7 @@ final class DriverHeap {
   static final long HOST_CACHE_MILLIS = 1_000L;
   static final int SHRINK_PERCENT = 50;
   static final long BUDGET_FLOOR_BYTES = 4L * 1024L * 1024L;
-  static final int BUDGET_DIVISOR = 128;
+  static final int BUDGET_DIVISOR = 64;
 
   private DriverHeap() {}
 

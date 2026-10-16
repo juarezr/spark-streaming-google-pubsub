@@ -84,9 +84,9 @@ class DriverHeapTest {
     long heapMax = 4_096L * 1024L * 1024L;
     long batch = 160L * 1024L * 1024L;
 
-    assertEquals(32L * 1024L * 1024L, DriverHeap.seed(batch, heapMax));
+    assertEquals(64L * 1024L * 1024L, DriverHeap.seed(batch, heapMax));
     assertEquals(16L * 1024L * 1024L, DriverHeap.seed(16L * 1024L * 1024L, heapMax));
-    assertEquals(32L * 1024L * 1024L, DriverHeap.seed(0L, heapMax));
+    assertEquals(64L * 1024L * 1024L, DriverHeap.seed(0L, heapMax));
     assertEquals(batch, DriverHeap.seed(batch, 0L));
   }
 
