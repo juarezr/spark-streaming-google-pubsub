@@ -193,8 +193,8 @@ final class DriverHeap {
       long memoryBudget) {
     return String.format(
         "HEAP: at=%s heapMax=%d heapUsed=%d heapFraction=%d heapChange=%d rss=%d rssChange=%d"
-            + " memAvailable=%d memChange=%d memTotal=%d memFraction=%d gatherBytes=%d"
-            + " gatherMsgs=%d queuedBytes=%d queuedMsgs=%d memoryBudget=%d",
+            + " memAvailable=%d memChange=%d memTotal=%d memFraction=%d memoryBudget=%d"
+            + " gatherBytes=%d gatherMsgs=%d queuedBytes=%d queuedMsgs=%d",
         at,
         heapMax,
         heapUsed,
@@ -206,10 +206,10 @@ final class DriverHeap {
         memChange,
         memTotal,
         memFraction,
+        memoryBudget,
         gatherBytes,
         gatherMsgs,
         queuedBytes,
-        queuedMsgs,
-        memoryBudget);
+        queuedMsgs);
   }
 }

@@ -221,7 +221,7 @@ final class PubSubMicroBatchStream
   }
 
   private List<PulledMessage> gatherMessages(AdmissionLimits gatherLimits) {
-    client.noteCycleBudget(autoReceiveTime.cycleTimeEst());
+    client.noteCycleBudget(autoReceiveTime.cycleBudget());
     AdmissionLimits limits =
         availableNow
             ? gatherLimits.withDrainUntilIdle()
@@ -239,7 +239,7 @@ final class PubSubMicroBatchStream
     long gatherFinished = System.nanoTime();
 
     this.autoReceiveTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
-    client.noteCycleBudget(autoReceiveTime.cycleTimeEst());
+    client.noteCycleBudget(autoReceiveTime.cycleBudget());
     long heapFraction = logDriverHeap("gather", PulledMessage.payloadBytes(pulled), pulled.size());
     client.shrinkBudget(heapFraction);
     noteIntakeLag(pulled);
@@ -687,7 +687,7 @@ final class PubSubMicroBatchStream
     if (ageMs == null) {
       return;
     }
-    Duration cycle = autoReceiveTime.cycleTimeEst();
+    Duration cycle = autoReceiveTime.cycleBudget();
     long triggerMs = cycle == null ? 0L : cycle.toMillis();
     String warning = intakePace.observe(System.currentTimeMillis(), ageMs, triggerMs);
     if (warning != null) {

@@ -14,15 +14,14 @@ import org.slf4j.LoggerFactory;
 /**
  * Fills {@code receiveTime} when the app omits it.
  *
- * <p>{@code cycleTimeEst} is Spark's trigger, stored as a whole second. {@code receiveBudget} for
- * the next cycle is {@code cycleTimeEst − writeBudget}. {@code writeBudget} walks down from the
+ * <p>{@code cycleBudget} is Spark's trigger, stored as a whole second. {@code receiveBudget} for
+ * the next cycle is {@code cycleBudget − writeBudget}. {@code writeBudget} walks down from the
  * probe seed, by a quarter of the idle below the top quarter of the trigger and then by 3% of
- * {@code cycleTimeEst}, while that idle is above an eighth of the trigger and the cycle finished on
+ * {@code cycleBudget}, while that idle is above an eighth of the trigger and the cycle finished on
  * time. In the top quarter a late cycle records its post-receive time. While fewer than eight
- * samples exist, {@code writeBudget} steps toward that reserve by at most 3% of {@code
- * cycleTimeEst} only on the cycle that recorded one. A quiet cycle does not step it up. Once the
- * budget is above the reserve, a quiet cycle may step down to it. Sleep and a quiet commit are not
- * samples.
+ * samples exist, {@code writeBudget} steps toward that reserve by at most 3% of {@code cycleBudget}
+ * only on the cycle that recorded one. A quiet cycle does not step it up. Once the budget is above
+ * the reserve, a quiet cycle may step down to it. Sleep and a quiet commit are not samples.
  */
 final class AutoReceiveTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoReceiveTime.class);
@@ -239,7 +238,7 @@ final class AutoReceiveTime {
     return phase;
   }
 
-  Duration cycleTimeEst() {
+  Duration cycleBudget() {
     return cycleBudgetNanos <= 0L ? null : Duration.ofNanos(cycleBudgetNanos);
   }
 
@@ -320,7 +319,7 @@ final class AutoReceiveTime {
     if (probeStartedNanos == null) {
       probeStartedNanos = now;
       LOG.info(
-          "AUTO phase=probe cycleTimeEst=unset receiveBudget=unset"
+          "AUTO phase=probe cycleBudget=unset receiveBudget=unset"
               + " (empty micro-batch until the trigger gap is consistent)");
       return true;
     }
@@ -419,7 +418,7 @@ final class AutoReceiveTime {
     writeBudgetNanos = cycleBudgetNanos - receiveBudgetNanos - MARGIN_NANOS;
     phase = Phase.WARMUP;
     LOG.info(
-        "AUTO phase=warmup cycleTimeEst={} receiveBudget={} writeBudget={} marginTimeEst=1s",
+        "AUTO phase=warmup cycleBudget={} receiveBudget={} writeBudget={} marginTimeEst=1s",
         Into.elapsed(cycleBudgetNanos),
         Into.elapsed(receiveBudgetNanos),
         Into.elapsed(writeBudgetNanos));
@@ -682,7 +681,7 @@ final class AutoReceiveTime {
   private void adoptEstimate(long next) {
     // TODO: soak-only: remove or lower it to debug level before a provider release
     LOG.info(
-        "AUTO phase={} cycleTimeEst set {} -> {}",
+        "AUTO phase={} cycleBudget set {} -> {}",
         phase.name().toLowerCase(),
         Into.elapsed(cycleBudgetNanos),
         Into.elapsed(next));
@@ -710,7 +709,7 @@ final class AutoReceiveTime {
       return false;
     }
     LOG.warn(
-        "AUTO phase=probe cycleTimeEst reset; cycleDuration={} exceeds short estimate {}",
+        "AUTO phase=probe cycleBudget reset; cycleDuration={} exceeds short estimate {}",
         Into.elapsed(cycleDurationNanos),
         Into.elapsed(cycleBudgetNanos));
     phase = Phase.PROBE;
