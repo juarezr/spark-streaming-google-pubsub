@@ -60,6 +60,9 @@ final class PubSubClient implements Closeable, Serializable {
   private final AtomicLong lastHeapCeilingWarnMillis = new AtomicLong(Long.MIN_VALUE);
   private final AtomicLong lastHostReserveWarnMillis = new AtomicLong(Long.MIN_VALUE);
   private final AtomicBoolean intakePaused = new AtomicBoolean(false);
+  private volatile long memoryBudget;
+  private long flowSeedBytes;
+  private volatile String pauseReason;
   private final AtomicLong cachedAvailableBytes = new AtomicLong(Long.MIN_VALUE);
   private final AtomicLong cachedAvailableAtMillis = new AtomicLong(Long.MIN_VALUE);
   private volatile long cycleBudgetMillis;
@@ -75,7 +78,7 @@ final class PubSubClient implements Closeable, Serializable {
         return;
       }
       PulledMessage pulled = toPulled(message);
-      long cap = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
+      long cap = queueCap();
       while (queuedBytes != null && queuedBytes.get() >= cap && stopped != null && !stopped.get()) {
         try {
           TimeUnit.MILLISECONDS.sleep(10);
@@ -168,6 +171,12 @@ final class PubSubClient implements Closeable, Serializable {
     this.consumers = new ConcurrentHashMap<>();
     this.stopped = new AtomicBoolean(false);
     this.connectionErrors = new PubSubConnectionErrors(this.config.subscriptionPath());
+    long seeded = DriverHeap.seed(config.batchSize(), Runtime.getRuntime().maxMemory());
+    if (seeded <= 0L) {
+      seeded = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
+    }
+    this.memoryBudget = seeded;
+    this.flowSeedBytes = seeded;
 
     this.emulator = this.config.emulatorHost().map(PubSubEmulator::new).orElse(null);
     try {
@@ -213,7 +222,7 @@ final class PubSubClient implements Closeable, Serializable {
   }
 
   private FlowControlSettings flowControl() {
-    long bytes = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
+    long bytes = flowSeedBytes > 0L ? flowSeedBytes : queueCap();
     long outstandingBytes = bytes > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : bytes * 2;
     FlowControlSettings.Builder flow =
         FlowControlSettings.newBuilder()
@@ -462,6 +471,36 @@ final class PubSubClient implements Closeable, Serializable {
     return queue == null ? 0 : queue.size();
   }
 
+  long memoryBudget() {
+    return memoryBudget;
+  }
+
+  void shrinkBudget(long heapFraction) {
+    long current = memoryBudget;
+    long next = DriverHeap.nextBudget(current, heapFraction);
+    if (next < current) {
+      memoryBudget = next;
+    }
+  }
+
+  private long queueCap() {
+    if (memoryBudget > 0L) {
+      return memoryBudget;
+    }
+    return config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
+  }
+
+  private String memoryReadings() {
+    Runtime runtime = Runtime.getRuntime();
+    long heapMax = runtime.maxMemory();
+    long heapUsed = DriverHeap.used(runtime.totalMemory(), runtime.freeMemory());
+    return DriverHeap.readings(
+        heapUsed,
+        DriverHeap.percent(heapUsed, heapMax),
+        DriverHeap.residentBytes(),
+        DriverHeap.availableBytes());
+  }
+
   void noteCycleBudget(Duration cycle) {
     cycleBudgetMillis = cycle == null ? 0L : cycle.toMillis();
   }
@@ -470,7 +509,10 @@ final class PubSubClient implements Closeable, Serializable {
     boolean heap = heapAboveCeiling();
     boolean host = DriverHeap.belowHostReserve(cachedAvailable(System.currentTimeMillis()));
     if (!heap && !host && intakePaused.compareAndSet(true, false)) {
-      LOG.info("HEAP: resumed taking messages");
+      LOG.info(
+          "HEAP: resumed taking messages reason={} {}",
+          pauseReason == null ? "unknown" : pauseReason,
+          memoryReadings());
     }
     return heap || host;
   }
@@ -508,8 +550,9 @@ final class PubSubClient implements Closeable, Serializable {
     if (DriverHeap.collectDue(hostPauseSinceMillis, now, cycleBudgetMillis, hostCollected)) {
       hostCollected = true;
       LOG.info(
-          "HEAP: collected once after cycleBudget while host MemAvailable is below {} bytes",
-          DriverHeap.HOST_RESERVE_BYTES);
+          "HEAP: collected once after cycleBudget while host MemAvailable is below {} bytes; {}",
+          DriverHeap.HOST_RESERVE_BYTES,
+          memoryReadings());
       System.gc();
     }
   }
@@ -524,17 +567,23 @@ final class PubSubClient implements Closeable, Serializable {
     boolean heap = heapAboveCeiling();
     boolean host = DriverHeap.belowHostReserve(cachedAvailable(now));
     if ((heap || host) && intakePaused.compareAndSet(false, true)) {
-      LOG.info("HEAP: paused intake reason={}", DriverHeap.pauseReason(heap, host));
+      pauseReason = DriverHeap.pauseReason(heap, host);
+      LOG.info("HEAP: paused intake reason={} {}", pauseReason, memoryReadings());
     }
     if (heap && claimHourly(lastHeapCeilingWarnMillis, now)) {
+      Runtime runtime = Runtime.getRuntime();
+      long heapMax = runtime.maxMemory();
+      long heapUsed = DriverHeap.used(runtime.totalMemory(), runtime.freeMemory());
       LOG.warn(
-          "HEAP: driver heap used is at or above {}% of max; stopped taking more messages",
-          DriverHeap.CEILING_PERCENT);
+          DriverHeap.heapStop(heapUsed, DriverHeap.percent(heapUsed, heapMax), memoryReadings()));
     }
     if (host && claimHourly(lastHostReserveWarnMillis, now)) {
       LOG.warn(
-          "HEAP: host MemAvailable is below {} bytes; stopped taking more messages",
-          DriverHeap.HOST_RESERVE_BYTES);
+          "HEAP: stopped taking more messages because host MemAvailable is {} bytes, below {}"
+              + " bytes; {}",
+          DriverHeap.availableBytes(),
+          DriverHeap.HOST_RESERVE_BYTES,
+          memoryReadings());
     }
   }
 

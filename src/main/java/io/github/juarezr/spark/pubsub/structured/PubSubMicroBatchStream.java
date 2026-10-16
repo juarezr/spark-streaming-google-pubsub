@@ -227,6 +227,7 @@ final class PubSubMicroBatchStream
             ? gatherLimits.withDrainUntilIdle()
             : gatherLimits.withWaitTime(
                 this.autoReceiveTime.receiveWindow(gatherLimits.waitTime()));
+    limits = limits.withMemoryBudget(client.memoryBudget());
 
     long gatherStarted = System.nanoTime();
     List<PulledMessage> pulled =
@@ -239,7 +240,8 @@ final class PubSubMicroBatchStream
 
     this.autoReceiveTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
     client.noteCycleBudget(autoReceiveTime.cycleTimeEst());
-    logDriverHeap("gather", PulledMessage.payloadBytes(pulled), pulled.size());
+    long heapFraction = logDriverHeap("gather", PulledMessage.payloadBytes(pulled), pulled.size());
+    client.shrinkBudget(heapFraction);
     noteIntakeLag(pulled);
     return pulled;
   }
@@ -693,7 +695,7 @@ final class PubSubMicroBatchStream
     }
   }
 
-  private void logDriverHeap(String at, long gatherBytes, int gatherMsgs) {
+  private long logDriverHeap(String at, long gatherBytes, int gatherMsgs) {
     Runtime runtime = Runtime.getRuntime();
     long heapMax = runtime.maxMemory();
     long heapUsed = DriverHeap.used(runtime.totalMemory(), runtime.freeMemory());
@@ -721,10 +723,12 @@ final class PubSubMicroBatchStream
             gatherBytes,
             gatherMsgs,
             client.queuedBytes(),
-            client.queuedCount()));
+            client.queuedCount(),
+            client.memoryBudget()));
     previousHeapUsed = heapUsed;
     previousRss = rss;
     previousMemAvailable = memAvailable;
+    return DriverHeap.percent(heapUsed, heapMax);
   }
 
   private void logStop(int uncommitted) {

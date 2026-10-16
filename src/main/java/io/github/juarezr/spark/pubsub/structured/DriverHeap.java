@@ -10,6 +10,9 @@ final class DriverHeap {
   static final long HOUR_MILLIS = 3_600_000L;
   static final long HOST_RESERVE_BYTES = 512L * 1024L * 1024L;
   static final long HOST_CACHE_MILLIS = 1_000L;
+  static final int SHRINK_PERCENT = 50;
+  static final long BUDGET_FLOOR_BYTES = 4L * 1024L * 1024L;
+  static final int BUDGET_DIVISOR = 128;
 
   private DriverHeap() {}
 
@@ -43,6 +46,29 @@ final class DriverHeap {
       return 0L;
     }
     return current - previous;
+  }
+
+  /**
+   * Startup cap. {@code batchSize} stays the user's maximum. When it is unset, the cap is a
+   * fraction of the driver heap so the first gather cannot commit the whole heap.
+   */
+  static long seed(long batchSize, long heapMax) {
+    long fromHeap = heapMax > 0L ? heapMax / BUDGET_DIVISOR : 0L;
+    if (batchSize > 0L && fromHeap > 0L) {
+      return Math.min(batchSize, fromHeap);
+    }
+    if (fromHeap > 0L) {
+      return fromHeap;
+    }
+    return batchSize > 0L ? batchSize : 0L;
+  }
+
+  /** Next gather cap. Shrinks one step at {@link #SHRINK_PERCENT} and never grows. */
+  static long nextBudget(long current, long heapFraction) {
+    if (current <= BUDGET_FLOOR_BYTES || heapFraction < SHRINK_PERCENT) {
+      return current;
+    }
+    return Math.max(current / 2L, BUDGET_FLOOR_BYTES);
   }
 
   static String pauseReason(boolean heap, boolean host) {
@@ -135,6 +161,19 @@ final class DriverHeap {
     return String.format("HEAP: startup heapMax=%d memTotal=%d", heapMax, memTotal);
   }
 
+  static String readings(long heapUsed, long heapFraction, long rssBytes, long memAvailable) {
+    return String.format(
+        "heapUsed=%d heapFraction=%d rss=%d memAvailable=%d",
+        heapUsed, heapFraction, rssBytes, memAvailable);
+  }
+
+  static String heapStop(long heapUsed, long heapFraction, String readings) {
+    return String.format(
+        "HEAP: stopped taking more messages because driver heap used is %d bytes"
+            + " (heapFraction=%d), at or above the %d%% limit; %s",
+        heapUsed, heapFraction, CEILING_PERCENT, readings);
+  }
+
   static String line(
       String at,
       long heapMax,
@@ -150,11 +189,12 @@ final class DriverHeap {
       long gatherBytes,
       int gatherMsgs,
       long queuedBytes,
-      int queuedMsgs) {
+      int queuedMsgs,
+      long memoryBudget) {
     return String.format(
         "HEAP: at=%s heapMax=%d heapUsed=%d heapFraction=%d heapChange=%d rss=%d rssChange=%d"
             + " memAvailable=%d memChange=%d memTotal=%d memFraction=%d gatherBytes=%d"
-            + " gatherMsgs=%d queuedBytes=%d queuedMsgs=%d",
+            + " gatherMsgs=%d queuedBytes=%d queuedMsgs=%d memoryBudget=%d",
         at,
         heapMax,
         heapUsed,
@@ -169,6 +209,7 @@ final class DriverHeap {
         gatherBytes,
         gatherMsgs,
         queuedBytes,
-        queuedMsgs);
+        queuedMsgs,
+        memoryBudget);
   }
 }

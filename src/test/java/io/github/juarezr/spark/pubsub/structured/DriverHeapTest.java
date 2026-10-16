@@ -33,7 +33,8 @@ class DriverHeapTest {
             96L,
             4,
             8L,
-            2);
+            2,
+            32L);
 
     assertTrue(line.contains("heapMax=4096"));
     assertTrue(line.contains("heapUsed=600"));
@@ -50,6 +51,7 @@ class DriverHeapTest {
     assertTrue(line.contains("gatherMsgs=4"));
     assertTrue(line.contains("queuedBytes=8"));
     assertTrue(line.contains("queuedMsgs=2"));
+    assertTrue(line.contains("memoryBudget=32"));
   }
 
   @Test
@@ -75,6 +77,40 @@ class DriverHeapTest {
     assertEquals("host", DriverHeap.pauseReason(false, true));
     assertEquals("heap and host", DriverHeap.pauseReason(true, true));
     assertNull(DriverHeap.pauseReason(false, false));
+  }
+
+  @Test
+  void seedIsTheSmallerOfBatchSizeAndHeapFraction() {
+    long heapMax = 4_096L * 1024L * 1024L;
+    long batch = 160L * 1024L * 1024L;
+
+    assertEquals(32L * 1024L * 1024L, DriverHeap.seed(batch, heapMax));
+    assertEquals(16L * 1024L * 1024L, DriverHeap.seed(16L * 1024L * 1024L, heapMax));
+    assertEquals(32L * 1024L * 1024L, DriverHeap.seed(0L, heapMax));
+    assertEquals(batch, DriverHeap.seed(batch, 0L));
+  }
+
+  @Test
+  void budgetHalvesAtFiftyPercentAndDoesNotGrow() {
+    long current = 32L * 1024L * 1024L;
+
+    assertEquals(current, DriverHeap.nextBudget(current, 49L));
+    assertEquals(current / 2L, DriverHeap.nextBudget(current, 50L));
+    assertEquals(DriverHeap.BUDGET_FLOOR_BYTES, DriverHeap.nextBudget(6L * 1024L * 1024L, 80L));
+    assertEquals(
+        DriverHeap.BUDGET_FLOOR_BYTES, DriverHeap.nextBudget(DriverHeap.BUDGET_FLOOR_BYTES, 90L));
+    assertEquals(current, DriverHeap.nextBudget(current, -1L));
+  }
+
+  @Test
+  void heapStopNamesUsedBytesNextToTheSixtyPercentLimit() {
+    String line =
+        DriverHeap.heapStop(
+            2_500_000_000L, 61L, "heapUsed=2500000000 heapFraction=61 rss=1 memAvailable=2");
+
+    assertTrue(line.contains("heapFraction=61"));
+    assertTrue(line.contains("at or above the 60% limit"));
+    assertFalse(line.contains("% above"));
   }
 
   @Test
