@@ -210,6 +210,7 @@ class PubSubClientTest {
     long baseline = 64L * 1024L * 1024L;
     long limit = baseline * 2L;
     setField(client, "memoryBudget", baseline);
+    setField(client, "baselineBytes", baseline);
     setField(client, "flowSeedBytes", baseline);
     setField(client, "memoryLimitBytes", limit);
     setField(client, "calmStreak", DriverHeap.GROW_STREAK);
@@ -219,6 +220,74 @@ class PubSubClientTest {
     assertEquals(baseline + baseline / 8L, client.memoryBudget());
     assertEquals(baseline, client.memoryBaseline());
     assertEquals(limit, client.memoryLimit());
+  }
+
+  @Test
+  void retargetFollowsAHigherCapWhenNothingIsHeld() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long raised = baseline + baseline / 8L;
+    armFlow(client, baseline, baseline, raised, 0L, 0L);
+
+    client.retargetFlow();
+
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetWaitsWhileTheQueueHoldsBytes() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    Subscriber subscriber = mock(Subscriber.class);
+    setField(client, "subscriber", subscriber);
+    long baseline = 64L * 1024L * 1024L;
+    armFlow(client, baseline, baseline, baseline + baseline / 8L, 1L, 0L);
+
+    client.retargetFlow();
+
+    verify(subscriber, never()).stopAsync();
+    assertEquals(baseline * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetWaitsWhileBytesAreStillOutstanding() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    Subscriber subscriber = mock(Subscriber.class);
+    setField(client, "subscriber", subscriber);
+    long baseline = 64L * 1024L * 1024L;
+    armFlow(client, baseline, baseline, baseline + baseline / 8L, 0L, 1L);
+
+    client.retargetFlow();
+
+    verify(subscriber, never()).stopAsync();
+    assertEquals(baseline * 2L, client.flowOutstandingBytes());
+  }
+
+  @Test
+  void retargetFollowsAHalvedCap() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long live = baseline + baseline / 8L;
+    long halved = live / 2L;
+    armFlow(client, baseline, live, halved, 0L, 0L);
+
+    client.retargetFlow();
+
+    assertEquals(halved * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetSkipsWhenTheCapHasNotMoved() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    armFlow(client, baseline, baseline, baseline, 0L, 0L);
+
+    client.retargetFlow();
+
+    assertEquals(baseline * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
   }
 
   @Test
@@ -273,6 +342,16 @@ class PubSubClientTest {
     PulledMessage message =
         new PulledMessage(id, data, Collections.emptyMap(), publishMillis, "", id);
     return new PubSubClient.HeldMessage(message, consumer);
+  }
+
+  private static void armFlow(
+      PubSubClient client, long baseline, long flowSeed, long budget, long queued, long outstanding)
+      throws Exception {
+    setField(client, "baselineBytes", baseline);
+    setField(client, "flowSeedBytes", flowSeed);
+    setField(client, "memoryBudget", budget);
+    setField(client, "queuedBytes", new AtomicLong(queued));
+    setField(client, "outstandingBytes", new AtomicLong(outstanding));
   }
 
   private static PubSubConfig minimalConfig() {

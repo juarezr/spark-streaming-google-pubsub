@@ -61,6 +61,7 @@ final class PubSubClient implements Closeable, Serializable {
   private final AtomicLong lastHostReserveWarnMillis = new AtomicLong(Long.MIN_VALUE);
   private final AtomicBoolean intakePaused = new AtomicBoolean(false);
   private volatile long memoryBudget;
+  private long baselineBytes;
   private long flowSeedBytes;
   private long memoryLimitBytes;
   private int calmStreak;
@@ -180,7 +181,9 @@ final class PubSubClient implements Closeable, Serializable {
       limit = outstanding;
     }
     this.memoryBudget = seeded;
-    // Outstanding bytes are twice the baseline, set once. The climb stops at memoryLimitBytes.
+    // Baseline stays put. Outstanding starts at twice that seed. A later empty gather rebuilds
+    // the subscriber so outstanding follows memoryBudget. The climb stops at memoryLimitBytes.
+    this.baselineBytes = seeded;
     this.flowSeedBytes = seeded;
     this.memoryLimitBytes = limit;
 
@@ -204,7 +207,52 @@ final class PubSubClient implements Closeable, Serializable {
     }
   }
 
+  /**
+   * When the cap has moved, and this gather starts with an empty queue and nothing unacked, stop
+   * the subscriber and start another whose outstanding bytes are twice {@code memoryBudget}. A
+   * failed start leaves the running subscriber in place.
+   */
+  synchronized void retargetFlow() {
+    if (queuedBytes == null || outstandingBytes == null) {
+      return;
+    }
+    if (queuedBytes.get() != 0L || outstandingBytes.get() != 0L) {
+      return;
+    }
+    if (memoryBudget <= 0L || memoryBudget == flowSeedBytes) {
+      return;
+    }
+    long previousSeed = flowSeedBytes;
+    long nextSeed = memoryBudget;
+    if (this.subscriber == null) {
+      this.flowSeedBytes = nextSeed;
+      logSubscriberOutstanding(previousSeed, nextSeed);
+      return;
+    }
+    this.flowSeedBytes = nextSeed;
+    Subscriber replacement;
+    try {
+      CredentialsProvider authProvider = this.credentialsProvider.providerFor(this.config);
+      replacement = startSubscriber(authProvider);
+    } catch (Exception e) {
+      this.flowSeedBytes = previousSeed;
+      LOG.warn(
+          "HEAP: subscriber rebuild failed; outstanding stays {}",
+          outstandingLimit(previousSeed),
+          e);
+      return;
+    }
+    Subscriber previous = this.subscriber;
+    this.subscriber = replacement;
+    stopSubscriber(previous);
+    logSubscriberOutstanding(previousSeed, nextSeed);
+  }
+
   private void startSubscriberAsyncWith(CredentialsProvider authProvider) {
+    this.subscriber = startSubscriber(authProvider);
+  }
+
+  private Subscriber startSubscriber(CredentialsProvider authProvider) {
 
     Subscriber.Builder builder =
         Subscriber.newBuilder(this.config.subscriptionPath(), new PubSubMessageReceiver());
@@ -222,17 +270,43 @@ final class PubSubClient implements Closeable, Serializable {
     } else {
       builder.setCredentialsProvider(authProvider);
     }
-    this.subscriber = builder.build();
-    this.subscriber.addListener(connectionErrors, MoreExecutors.directExecutor());
-    this.subscriber.startAsync().awaitRunning();
+    Subscriber created = builder.build();
+    created.addListener(connectionErrors, MoreExecutors.directExecutor());
+    created.startAsync().awaitRunning();
+    return created;
+  }
+
+  private void stopSubscriber(Subscriber previous) {
+    if (previous == null) {
+      return;
+    }
+    try {
+      previous.stopAsync().awaitTerminated(5, TimeUnit.SECONDS);
+    } catch (Exception e) {
+      LOG.warn("CONNECTION: Error shutting down subscriber", e);
+    }
+  }
+
+  private void logSubscriberOutstanding(long previousSeed, long nextSeed) {
+    // TODO: drop this soak line to debug before a provider release.
+    LOG.info(
+        "HEAP: subscriber outstanding {} -> {}",
+        outstandingLimit(previousSeed),
+        outstandingLimit(nextSeed));
+  }
+
+  private static long outstandingLimit(long seed) {
+    if (seed <= 0L) {
+      return 0L;
+    }
+    return seed > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : seed * 2L;
   }
 
   private FlowControlSettings flowControl() {
     long bytes = flowSeedBytes > 0L ? flowSeedBytes : queueCap();
-    long outstandingBytes = bytes > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : bytes * 2;
     FlowControlSettings.Builder flow =
         FlowControlSettings.newBuilder()
-            .setMaxOutstandingRequestBytes(outstandingBytes)
+            .setMaxOutstandingRequestBytes(outstandingLimit(bytes))
             .setLimitExceededBehavior(FlowController.LimitExceededBehavior.Block);
     if (config.batchCount() > 0) {
       long count = config.batchCount();
@@ -482,7 +556,12 @@ final class PubSubClient implements Closeable, Serializable {
   }
 
   long memoryBaseline() {
-    return flowSeedBytes;
+    return baselineBytes;
+  }
+
+  long flowOutstandingBytes() {
+    long bytes = flowSeedBytes > 0L ? flowSeedBytes : queueCap();
+    return outstandingLimit(bytes);
   }
 
   long memoryLimit() {

@@ -221,6 +221,7 @@ final class PubSubMicroBatchStream
   }
 
   private List<PulledMessage> gatherMessages(AdmissionLimits gatherLimits) {
+    client.retargetFlow();
     client.noteCycleBudget(autoReceiveTime.cycleBudget());
     AdmissionLimits limits =
         availableNow
