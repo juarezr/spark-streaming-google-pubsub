@@ -105,47 +105,47 @@ class DriverHeapTest {
   }
 
   @Test
-  void ceilingIsTwiceTheSeedUntilBatchSize() {
-    long heapMax = 4_096L * 1024L * 1024L;
-    long batch = 160L * 1024L * 1024L;
+  void climbStopsAtTheSeed() {
+    long seed = 64L * 1024L * 1024L;
+    long free = DriverHeap.GROW_MIN_AVAILABLE;
 
-    assertEquals(128L * 1024L * 1024L, DriverHeap.ceiling(batch, heapMax));
-    assertEquals(16L * 1024L * 1024L, DriverHeap.ceiling(16L * 1024L * 1024L, heapMax));
-    assertEquals(256L * 1024L * 1024L, DriverHeap.ceiling(0L, 8_192L * 1024L * 1024L));
-    assertEquals(batch, DriverHeap.ceiling(batch, 0L));
+    assertEquals(seed, DriverHeap.growStep(seed, seed));
+    assertEquals(seed, DriverHeap.growStep(seed - 1L, seed));
+    DriverHeap.BudgetStep stayed =
+        DriverHeap.adjust(seed, seed, DriverHeap.GROW_STREAK, 20L, free, seed);
+    assertEquals(seed, stayed.budget);
   }
 
   @Test
-  void growStepAddsOneEighthAndStopsAtTheCeiling() {
-    long current = 64L * 1024L * 1024L;
-    long ceiling = 128L * 1024L * 1024L;
+  void growStepAddsOneEighthAndStopsAtTheSeed() {
+    long current = 32L * 1024L * 1024L;
+    long seed = 64L * 1024L * 1024L;
 
-    assertEquals(current + current / 8L, DriverHeap.growStep(current, ceiling));
-    assertEquals(ceiling, DriverHeap.growStep(ceiling - 1L, ceiling));
-    assertEquals(ceiling, DriverHeap.growStep(ceiling, ceiling));
+    assertEquals(current + current / 8L, DriverHeap.growStep(current, seed));
+    assertEquals(seed, DriverHeap.growStep(seed - 1L, seed));
+    assertEquals(seed, DriverHeap.growStep(seed, seed));
   }
 
   @Test
   void budgetGrowsOnlyAfterEightCalmFullGathers() {
-    long current = 64L * 1024L * 1024L;
-    long ceiling = 128L * 1024L * 1024L;
+    long current = 32L * 1024L * 1024L;
+    long seed = 64L * 1024L * 1024L;
     long free = DriverHeap.GROW_MIN_AVAILABLE;
     int streak = 0;
 
     for (int i = 0; i < DriverHeap.GROW_STREAK - 1; i++) {
-      DriverHeap.BudgetStep step = DriverHeap.adjust(current, ceiling, streak, 20L, free, current);
+      DriverHeap.BudgetStep step = DriverHeap.adjust(current, seed, streak, 20L, free, current);
       assertEquals(current, step.budget);
       streak = step.calmStreak;
     }
     assertEquals(7, streak);
 
-    DriverHeap.BudgetStep light =
-        DriverHeap.adjust(current, ceiling, streak, 20L, free, current / 2L);
+    DriverHeap.BudgetStep light = DriverHeap.adjust(current, seed, streak, 20L, free, current / 2L);
     assertEquals(current, light.budget);
     assertEquals(8, light.calmStreak);
 
     DriverHeap.BudgetStep grown =
-        DriverHeap.adjust(current, ceiling, light.calmStreak, 20L, free, current);
+        DriverHeap.adjust(current, seed, light.calmStreak, 20L, free, current);
     assertEquals(current + current / 8L, grown.budget);
     assertEquals(0, grown.calmStreak);
   }
@@ -153,19 +153,19 @@ class DriverHeapTest {
   @Test
   void hotSampleHalvesAndClearsTheCalmStreak() {
     long current = 64L * 1024L * 1024L;
-    long ceiling = 128L * 1024L * 1024L;
+    long seed = 64L * 1024L * 1024L;
     long free = DriverHeap.GROW_MIN_AVAILABLE;
 
-    DriverHeap.BudgetStep halved = DriverHeap.adjust(current, ceiling, 7, 50L, free, current);
+    DriverHeap.BudgetStep halved = DriverHeap.adjust(current, seed, 7, 50L, free, current);
     assertEquals(current / 2L, halved.budget);
     assertEquals(0, halved.calmStreak);
 
     DriverHeap.BudgetStep warm =
-        DriverHeap.adjust(current, ceiling, 7, DriverHeap.GROW_PERCENT, free, current);
+        DriverHeap.adjust(current, seed, 7, DriverHeap.GROW_PERCENT, free, current);
     assertEquals(current, warm.budget);
     assertEquals(0, warm.calmStreak);
 
-    DriverHeap.BudgetStep unread = DriverHeap.adjust(current, ceiling, 7, 20L, -1L, current);
+    DriverHeap.BudgetStep unread = DriverHeap.adjust(current, seed, 7, 20L, -1L, current);
     assertEquals(current, unread.budget);
     assertEquals(0, unread.calmStreak);
   }

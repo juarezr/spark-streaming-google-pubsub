@@ -71,7 +71,9 @@ final class AutoReceiveTime {
     final long tailMedianNanos;
     final long tailStdevNanos;
     final int messages;
-    final long ratePerSecond;
+    final long receiveRatePerSecond;
+    final long syncRatePerSecond;
+    final long cycleRatePerSecond;
     final int tailSamples;
 
     CycleSnapshot(
@@ -90,7 +92,9 @@ final class AutoReceiveTime {
         long tailMedianNanos,
         long tailStdevNanos,
         int messages,
-        long ratePerSecond,
+        long receiveRatePerSecond,
+        long syncRatePerSecond,
+        long cycleRatePerSecond,
         int tailSamples) {
       this.phase = phase;
       this.cycleBudgetNanos = cycleBudgetNanos;
@@ -107,7 +111,9 @@ final class AutoReceiveTime {
       this.tailMedianNanos = tailMedianNanos;
       this.tailStdevNanos = tailStdevNanos;
       this.messages = messages;
-      this.ratePerSecond = ratePerSecond;
+      this.receiveRatePerSecond = receiveRatePerSecond;
+      this.syncRatePerSecond = syncRatePerSecond;
+      this.cycleRatePerSecond = cycleRatePerSecond;
       this.tailSamples = tailSamples;
     }
 
@@ -141,21 +147,23 @@ final class AutoReceiveTime {
           + tailMillis(tailStdevNanos)
           + " msgs="
           + messages
-          + " rate="
-          + ratePerSecond
+          + " receiveRate="
+          + receiveRatePerSecond
+          + "/s"
+          + " syncRate="
+          + syncRatePerSecond
+          + "/s"
+          + " cycleRate="
+          + cycleRatePerSecond
           + "/s";
     }
 
     private String phaseLabel() {
-      if (phase == Phase.CRUISE && cycleBudgetNanos > 0L) {
-        // Growth is only the climb, before any late sample. A receive under the top quarter with
-        // samples already in is still sample or cruise. The 15s floor used to hide that.
-        if (tailSamples == 0) {
-          return "growth";
-        }
-        if (tailSamples < TAIL_WINDOW) {
-          return "sample";
-        }
+      if (phase == Phase.CRUISE
+          && cycleBudgetNanos > 0L
+          && tailSamples > 0
+          && tailSamples < TAIL_WINDOW) {
+        return "sample";
       }
       return phase.name().toLowerCase();
     }
@@ -728,11 +736,17 @@ final class AutoReceiveTime {
     return true;
   }
 
+  /** Messages per second. A zero message count or a zero duration is 0. */
+  static long perSecond(int messages, long durationNanos) {
+    if (messages <= 0 || durationNanos <= 0L) {
+      return 0L;
+    }
+    return (messages * 1_000_000_000L) / durationNanos;
+  }
+
   private void logSnapshot() {
     long behind =
         Math.max(0L, cycleDurationNanos - (cycleBudgetNanos > 0L ? cycleBudgetNanos : 0L));
-    long rate =
-        receiveDurationNanos <= 0L ? 0L : (gatherCount * 1_000_000_000L) / receiveDurationNanos;
     lastSnapshot =
         new CycleSnapshot(
             phase,
@@ -750,10 +764,12 @@ final class AutoReceiveTime {
             tailMedianNanos(),
             tailStdevNanos(),
             gatherCount,
-            rate,
+            perSecond(gatherCount, receiveDurationNanos),
+            perSecond(gatherCount, writeDurationNanos),
+            perSecond(gatherCount, cycleDurationNanos),
             tailCount);
-    // TODO: soak-only: tailMedian, tailStdev, msgs, rate, and idleDuration — remove or lower this
-    // line to debug before a provider release
+    // TODO: soak-only: tailMedian, tailStdev, msgs, receiveRate, syncRate, cycleRate, and
+    // idleDuration — remove or lower this line to debug before a provider release
     LOG.info(lastSnapshot.toString());
   }
 

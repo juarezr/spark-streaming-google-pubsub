@@ -79,16 +79,6 @@ final class PubSubClient implements Closeable, Serializable {
         return;
       }
       PulledMessage pulled = toPulled(message);
-      long cap = queueCap();
-      while (queuedBytes != null && queuedBytes.get() >= cap && stopped != null && !stopped.get()) {
-        try {
-          TimeUnit.MILLISECONDS.sleep(10);
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          consumer.nack();
-          return;
-        }
-      }
       while (aboveHeapCeiling() && stopped != null && !stopped.get()) {
         noteHeapCeiling();
         collectHostReserveOnce();
@@ -107,8 +97,11 @@ final class PubSubClient implements Closeable, Serializable {
         consumer.nack();
         return;
       }
+      if (!awaitReserve(pulled.data().length)) {
+        consumer.nack();
+        return;
+      }
       consumers.put(pulled.ackId(), consumer);
-      queuedBytes.addAndGet(pulled.data().length);
       outstandingBytes.addAndGet(pulled.data().length);
       try {
         queue.put(new HeldMessage(pulled, consumer));
@@ -174,15 +167,12 @@ final class PubSubClient implements Closeable, Serializable {
     this.connectionErrors = new PubSubConnectionErrors(this.config.subscriptionPath());
     long heapMax = Runtime.getRuntime().maxMemory();
     long seeded = DriverHeap.seed(config.batchSize(), heapMax);
-    long capped = DriverHeap.ceiling(config.batchSize(), heapMax);
     if (seeded <= 0L) {
       seeded = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
     }
-    if (capped < seeded) {
-      capped = seeded;
-    }
     this.memoryBudget = seeded;
-    this.flowSeedBytes = capped;
+    // Outstanding bytes are twice this, and the climb cannot pass it.
+    this.flowSeedBytes = seeded;
 
     this.emulator = this.config.emulatorHost().map(PubSubEmulator::new).orElse(null);
     try {
@@ -496,6 +486,56 @@ final class PubSubClient implements Closeable, Serializable {
       memoryBudget = step.budget;
     }
     calmStreak = step.calmStreak;
+  }
+
+  /**
+   * Takes {@code size} bytes only when they fit under the cap. An empty queue takes one message
+   * that is larger than the cap, because waiting cannot make that message fit. A failed
+   * compare-and-set retries. Bytes already above the cap are left for a gather.
+   */
+  boolean tryReserve(int size) {
+    if (queuedBytes == null || size < 0) {
+      return false;
+    }
+    long cap = queueCap();
+    while (true) {
+      long held = queuedBytes.get();
+      if (!fits(held, size, cap)) {
+        return false;
+      }
+      if (queuedBytes.compareAndSet(held, held + size)) {
+        return true;
+      }
+    }
+  }
+
+  static boolean fits(long held, int size, long cap) {
+    if (held < 0L || size < 0) {
+      return false;
+    }
+    if (held == 0L) {
+      return true;
+    }
+    if (held >= cap) {
+      return false;
+    }
+    long room = cap - held;
+    return size <= room;
+  }
+
+  private boolean awaitReserve(int size) {
+    while (stopped != null && !stopped.get()) {
+      if (tryReserve(size)) {
+        return true;
+      }
+      try {
+        TimeUnit.MILLISECONDS.sleep(10);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        return false;
+      }
+    }
+    return false;
   }
 
   private long queueCap() {

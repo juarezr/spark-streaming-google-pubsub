@@ -1,6 +1,7 @@
 package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -201,6 +202,35 @@ class PubSubClientTest {
     assertEquals(1, next.size());
     assertEquals("b", next.get(0).messageId());
     assertEquals(0L, client.queuedBytes());
+  }
+
+  @Test
+  void reserveDoesNotPassTheCap() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    setField(client, "queuedBytes", new AtomicLong(0));
+    setField(client, "memoryBudget", 1000L);
+
+    assertTrue(client.tryReserve(400));
+    assertTrue(client.tryReserve(400));
+    assertEquals(800L, client.queuedBytes());
+    assertFalse(client.tryReserve(300));
+    assertEquals(800L, client.queuedBytes());
+    assertTrue(client.tryReserve(200));
+    assertEquals(1000L, client.queuedBytes());
+    assertFalse(client.tryReserve(1));
+    assertEquals(1000L, client.queuedBytes());
+  }
+
+  @Test
+  void emptyQueueTakesOneMessageLargerThanTheCap() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    setField(client, "queuedBytes", new AtomicLong(0));
+    setField(client, "memoryBudget", 1000L);
+
+    assertTrue(client.tryReserve(1500));
+    assertEquals(1500L, client.queuedBytes());
+    assertFalse(client.tryReserve(1));
+    assertEquals(1500L, client.queuedBytes());
   }
 
   private static PubSubClient newPubSubClientReadyForPoll() throws Exception {

@@ -16,7 +16,6 @@ final class DriverHeap {
   static final long BUDGET_FLOOR_BYTES = 4L * 1024L * 1024L;
   static final long GROW_MIN_AVAILABLE = 2L * 1024L * 1024L * 1024L;
   static final int BUDGET_DIVISOR = 64;
-  static final int CEILING_DIVISOR = 32;
 
   private DriverHeap() {}
 
@@ -54,15 +53,11 @@ final class DriverHeap {
 
   /**
    * Startup cap. {@code batchSize} stays the user's maximum. When it is unset, the cap is a
-   * fraction of the driver heap so the first gather cannot commit the whole heap.
+   * fraction of the driver heap so the first gather cannot commit the whole heap. Outstanding bytes
+   * are twice this, set once. The climb may return here and must not pass it.
    */
   static long seed(long batchSize, long heapMax) {
     return cap(batchSize, heapMax, BUDGET_DIVISOR);
-  }
-
-  /** Highest gather cap for this process. Outstanding bytes are twice this, set once. */
-  static long ceiling(long batchSize, long heapMax) {
-    return cap(batchSize, heapMax, CEILING_DIVISOR);
   }
 
   private static long cap(long batchSize, long heapMax, int divisor) {
@@ -84,7 +79,7 @@ final class DriverHeap {
     return Math.max(current / 2L, BUDGET_FLOOR_BYTES);
   }
 
-  /** One eighth more, and not past {@code ceiling}. */
+  /** One eighth more, and not past {@code ceiling}. The caller passes the seed. */
   static long growStep(long current, long ceiling) {
     if (current <= 0L || current >= ceiling) {
       return current;

@@ -179,7 +179,35 @@ class AutoReceiveTimeTest {
     assertTrue(line.contains("tailMedian="));
     assertTrue(line.contains("tailStdev="));
     assertTrue(line.contains("msgs=10000"));
-    assertTrue(line.contains("rate="));
+    assertTrue(line.contains("receiveRate="));
+    assertTrue(line.contains("syncRate="));
+    assertTrue(line.contains("cycleRate="));
+    assertFalse(line.contains(" rate="));
+  }
+
+  @Test
+  void ratesUseReceiveWriteAndCycle() {
+    assertEquals(0L, AutoReceiveTime.perSecond(10, 0L));
+    assertEquals(0L, AutoReceiveTime.perSecond(0, Duration.ofSeconds(1).toNanos()));
+    long receiveNanos = Duration.ofMillis(234).toNanos();
+    assertEquals(
+        28_817L * 1_000_000_000L / receiveNanos, AutoReceiveTime.perSecond(28_817, receiveNanos));
+    long writeNanos = Duration.ofMillis(57).toNanos();
+    assertEquals(
+        28_817L * 1_000_000_000L / writeNanos, AutoReceiveTime.perSecond(28_817, writeNanos));
+    assertEquals(480L, AutoReceiveTime.perSecond(28_817, Duration.ofSeconds(60).toNanos()));
+  }
+
+  @Test
+  void cruiseWithAnEmptyTailStaysCruise() {
+    AtomicLong now = new AtomicLong(0);
+    AutoReceiveTime auto = new AutoReceiveTime(null, now::get);
+    finishProbe(auto, now, 60);
+    assertFalse(auto.shouldProbe());
+    batch(auto, now, 38, 1_000, 60_100, 10_000);
+    String line = auto.lastSnapshot().toString();
+    assertTrue(line.contains("phase=cruise"));
+    assertTrue(line.contains("tailMedian=unset"));
   }
 
   @Test
@@ -401,17 +429,17 @@ class AutoReceiveTimeTest {
       batch(auto, now, 30, 1_000, 60_000, 1_000);
     }
     String crossed = auto.lastSnapshot().toString();
-    assertTrue(crossed.contains("phase=growth"));
+    assertTrue(crossed.contains("phase=cruise"));
     assertTrue(crossed.contains("tailMedian=unset"));
     batch(auto, now, 30, 1_000, 45_000, 1_000);
     String idle = auto.lastSnapshot().toString();
-    assertTrue(idle.contains("phase=growth"));
+    assertTrue(idle.contains("phase=cruise"));
     assertTrue(idle.contains("idleDuration=14000ms"));
     assertTrue(idle.contains("tailMedian=unset"));
     long climbed = auto.writeBudgetNanos();
     for (int i = 0; i < 7; i++) {
       batch(auto, now, 52, 1_000, 60_000, 1_000);
-      assertTrue(auto.lastSnapshot().toString().contains("phase=growth"));
+      assertTrue(auto.lastSnapshot().toString().contains("phase=cruise"));
       assertTrue(auto.lastSnapshot().toString().contains("tailMedian=unset"));
     }
     assertEquals(climbed, auto.writeBudgetNanos());
@@ -483,7 +511,7 @@ class AutoReceiveTimeTest {
     assertEquals(Duration.ofSeconds(25).toNanos(), auto.writeBudgetNanos());
     String line = auto.lastSnapshot().toString();
     assertTrue(line.contains("idleDuration=16000ms"));
-    assertTrue(line.contains("phase=growth"));
+    assertTrue(line.contains("phase=cruise"));
   }
 
   @Test
@@ -510,7 +538,7 @@ class AutoReceiveTimeTest {
     batch(auto, now, 30, 1_000, 60_000, 1_000);
     long careful = Duration.ofSeconds(60).toNanos() * 3L / 100L;
     assertEquals(before - careful, auto.writeBudgetNanos());
-    assertTrue(auto.lastSnapshot().toString().contains("phase=growth"));
+    assertTrue(auto.lastSnapshot().toString().contains("phase=cruise"));
     while (auto.currentReceive().compareTo(Duration.ofSeconds(52)) < 0) {
       batch(auto, now, 30, 1_000, 60_000, 1_000);
     }
@@ -546,7 +574,7 @@ class AutoReceiveTimeTest {
     batch(auto, now, 30, 1_000, 55_000, 1_000);
     long idle = Duration.ofSeconds(24).toNanos();
     assertEquals(afterLate - idle / 4L, auto.writeBudgetNanos());
-    assertTrue(auto.lastSnapshot().toString().contains("phase=growth"));
+    assertTrue(auto.lastSnapshot().toString().contains("phase=cruise"));
   }
 
   @Test
