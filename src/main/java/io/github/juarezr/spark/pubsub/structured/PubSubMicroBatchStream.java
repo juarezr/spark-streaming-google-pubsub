@@ -706,7 +706,8 @@ final class PubSubMicroBatchStream
     // TODO: drop this soak line to debug before a provider release.
     if (!heapStartupLogged) {
       heapStartupLogged = true;
-      LOG.info(DriverHeap.startup(heapMax, memTotal, client.memoryCeiling()));
+      LOG.info(
+          DriverHeap.startup(heapMax, memTotal, client.memoryBaseline(), client.memoryLimit()));
     }
     LOG.info(
         DriverHeap.line(

@@ -16,6 +16,7 @@ final class DriverHeap {
   static final long BUDGET_FLOOR_BYTES = 4L * 1024L * 1024L;
   static final long GROW_MIN_AVAILABLE = 2L * 1024L * 1024L * 1024L;
   static final int BUDGET_DIVISOR = 64;
+  static final int LIMIT_DIVISOR = 32;
 
   private DriverHeap() {}
 
@@ -54,10 +55,17 @@ final class DriverHeap {
   /**
    * Startup cap. {@code batchSize} stays the user's maximum. When it is unset, the cap is a
    * fraction of the driver heap so the first gather cannot commit the whole heap. Outstanding bytes
-   * are twice this, set once. The climb may return here and must not pass it.
+   * are twice this, set once. The climb may pass this and stops at {@link #memoryLimit}.
    */
   static long seed(long batchSize, long heapMax) {
     return cap(batchSize, heapMax, BUDGET_DIVISOR);
+  }
+
+  /**
+   * Top of the walk. {@code batchSize} still caps it. The caller also keeps it within outstanding.
+   */
+  static long memoryLimit(long batchSize, long heapMax) {
+    return cap(batchSize, heapMax, LIMIT_DIVISOR);
   }
 
   private static long cap(long batchSize, long heapMax, int divisor) {
@@ -79,7 +87,7 @@ final class DriverHeap {
     return Math.max(current / 2L, BUDGET_FLOOR_BYTES);
   }
 
-  /** One eighth more, and not past {@code ceiling}. The caller passes the seed. */
+  /** One eighth more, and not past {@code ceiling}. The caller passes {@code memoryLimit}. */
   static long growStep(long current, long ceiling) {
     if (current <= 0L || current >= ceiling) {
       return current;
@@ -216,9 +224,10 @@ final class DriverHeap {
     return -1L;
   }
 
-  static String startup(long heapMax, long memTotal, long memoryCeiling) {
+  static String startup(long heapMax, long memTotal, long memoryBaseline, long memoryLimit) {
     return String.format(
-        "HEAP: startup heapMax=%d memTotal=%d memoryCeiling=%d", heapMax, memTotal, memoryCeiling);
+        "HEAP: startup heapMax=%d memTotal=%d memoryBaseline=%d memoryLimit=%d",
+        heapMax, memTotal, memoryBaseline, memoryLimit);
   }
 
   static String budgetChange(long previous, long next) {

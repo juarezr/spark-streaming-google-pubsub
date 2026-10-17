@@ -205,6 +205,23 @@ class PubSubClientTest {
   }
 
   @Test
+  void climbPassesTheBaselineAndLeavesOutstandingAtTwiceTheBaseline() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long limit = baseline * 2L;
+    setField(client, "memoryBudget", baseline);
+    setField(client, "flowSeedBytes", baseline);
+    setField(client, "memoryLimitBytes", limit);
+    setField(client, "calmStreak", DriverHeap.GROW_STREAK);
+
+    client.noteGather(20L, DriverHeap.GROW_MIN_AVAILABLE, baseline);
+
+    assertEquals(baseline + baseline / 8L, client.memoryBudget());
+    assertEquals(baseline, client.memoryBaseline());
+    assertEquals(limit, client.memoryLimit());
+  }
+
+  @Test
   void reserveDoesNotPassTheCap() throws Exception {
     PubSubClient client = new PubSubClient(minimalConfig());
     setField(client, "queuedBytes", new AtomicLong(0));

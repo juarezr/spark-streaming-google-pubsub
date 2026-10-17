@@ -57,8 +57,8 @@ class DriverHeapTest {
   @Test
   void startupNamesTheTwoConstants() {
     assertEquals(
-        "HEAP: startup heapMax=4096 memTotal=16384 memoryCeiling=2048",
-        DriverHeap.startup(4_096L, 16_384L, 2_048L));
+        "HEAP: startup heapMax=4096 memTotal=16384 memoryBaseline=2048 memoryLimit=4096",
+        DriverHeap.startup(4_096L, 16_384L, 2_048L, 4_096L));
   }
 
   @Test
@@ -102,6 +102,37 @@ class DriverHeapTest {
     assertEquals(
         DriverHeap.BUDGET_FLOOR_BYTES, DriverHeap.nextBudget(DriverHeap.BUDGET_FLOOR_BYTES, 90L));
     assertEquals(current, DriverHeap.nextBudget(current, -1L));
+  }
+
+  @Test
+  void limitFollowsTheDriverHeapAndStopsAtBatchSize() {
+    long heapMax = 4_096L * 1024L * 1024L;
+    long batch = 160L * 1024L * 1024L;
+
+    assertEquals(64L * 1024L * 1024L, DriverHeap.seed(batch, heapMax));
+    assertEquals(128L * 1024L * 1024L, DriverHeap.memoryLimit(batch, heapMax));
+    assertEquals(128L * 1024L * 1024L, DriverHeap.seed(batch, 8_192L * 1024L * 1024L));
+    assertEquals(batch, DriverHeap.memoryLimit(batch, 8_192L * 1024L * 1024L));
+    assertEquals(16L * 1024L * 1024L, DriverHeap.seed(16L * 1024L * 1024L, heapMax));
+    assertEquals(16L * 1024L * 1024L, DriverHeap.memoryLimit(16L * 1024L * 1024L, heapMax));
+  }
+
+  @Test
+  void climbPassesTheBaselineAndStopsAtTheLimit() {
+    long baseline = 64L * 1024L * 1024L;
+    long limit = 128L * 1024L * 1024L;
+    long free = DriverHeap.GROW_MIN_AVAILABLE;
+
+    DriverHeap.BudgetStep grown =
+        DriverHeap.adjust(baseline, limit, DriverHeap.GROW_STREAK, 20L, free, baseline);
+    assertEquals(baseline + baseline / 8L, grown.budget);
+    assertTrue(grown.budget > baseline);
+    assertTrue(grown.budget < limit);
+
+    DriverHeap.BudgetStep stayed =
+        DriverHeap.adjust(limit, limit, DriverHeap.GROW_STREAK, 20L, free, limit);
+    assertEquals(limit, stayed.budget);
+    assertEquals(limit, DriverHeap.growStep(limit - 1L, limit));
   }
 
   @Test

@@ -62,6 +62,7 @@ final class PubSubClient implements Closeable, Serializable {
   private final AtomicBoolean intakePaused = new AtomicBoolean(false);
   private volatile long memoryBudget;
   private long flowSeedBytes;
+  private long memoryLimitBytes;
   private int calmStreak;
   private volatile String pauseReason;
   private final AtomicLong cachedAvailableBytes = new AtomicLong(Long.MIN_VALUE);
@@ -170,9 +171,18 @@ final class PubSubClient implements Closeable, Serializable {
     if (seeded <= 0L) {
       seeded = config.batchSize() > 0 ? config.batchSize() : PubSubConfig.DEFAULT_BATCH_SIZE;
     }
+    long limit = DriverHeap.memoryLimit(config.batchSize(), heapMax);
+    long outstanding = seeded > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : seeded * 2L;
+    if (limit < seeded) {
+      limit = seeded;
+    }
+    if (limit > outstanding) {
+      limit = outstanding;
+    }
     this.memoryBudget = seeded;
-    // Outstanding bytes are twice this, and the climb cannot pass it.
+    // Outstanding bytes are twice the baseline, set once. The climb stops at memoryLimitBytes.
     this.flowSeedBytes = seeded;
+    this.memoryLimitBytes = limit;
 
     this.emulator = this.config.emulatorHost().map(PubSubEmulator::new).orElse(null);
     try {
@@ -471,12 +481,16 @@ final class PubSubClient implements Closeable, Serializable {
     return memoryBudget;
   }
 
-  long memoryCeiling() {
+  long memoryBaseline() {
     return flowSeedBytes;
   }
 
+  long memoryLimit() {
+    return memoryLimitBytes;
+  }
+
   void noteGather(long heapFraction, long memAvailable, long gatherBytes) {
-    long ceiling = flowSeedBytes > 0L ? flowSeedBytes : memoryBudget;
+    long ceiling = memoryLimitBytes > 0L ? memoryLimitBytes : memoryBudget;
     DriverHeap.BudgetStep step =
         DriverHeap.adjust(
             memoryBudget, ceiling, calmStreak, heapFraction, memAvailable, gatherBytes);
