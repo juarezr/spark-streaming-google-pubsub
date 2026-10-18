@@ -110,7 +110,7 @@ final class PubSubClient implements Closeable, Serializable {
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         consumers.remove(pulled.ackId());
-        queuedBytes.addAndGet(-pulled.data().length);
+        subtractQueued(pulled.data().length);
         outstandingBytes.addAndGet(-pulled.data().length);
         consumer.nack();
       }
@@ -219,10 +219,9 @@ final class PubSubClient implements Closeable, Serializable {
     if (!capMoved()) {
       return;
     }
-    long queued = queuedBytes.get();
-    if (queued > 0L) {
-      nackQueued();
-      long remainder = outstandingBytes.get() - queued;
+    long nacked = nackQueued();
+    if (nacked > 0L) {
+      long remainder = outstandingBytes.get() - nacked;
       outstandingBytes.set(remainder > 0L ? remainder : 0L);
     }
     long previousSeed = flowSeedBytes;
@@ -402,29 +401,65 @@ final class PubSubClient implements Closeable, Serializable {
       }
     }
     nackQueued();
+    nackRemainingConsumers();
     if (this.emulator != null) {
       this.emulator.close();
       this.emulator = null;
     }
   }
 
-  private void nackQueued() {
+  /**
+   * Nacks messages sitting in the queue. A reservation that has not been queued yet stays in {@code
+   * queuedBytes}; zeroing the counter there made the next {@code take} go negative and {@code fits}
+   * then refused every later message.
+   *
+   * @return bytes removed from the queue
+   */
+  private long nackQueued() {
     if (queue == null) {
-      return;
+      return 0L;
     }
+    long nacked = 0L;
     HeldMessage held;
     while ((held = queue.poll()) != null) {
+      nacked += held.message.data().length;
+      if (consumers != null) {
+        consumers.remove(held.message.ackId());
+      }
       try {
         held.consumer.nack();
       } catch (RuntimeException e) {
         LOG.warn("CONNECTION: Failed to nack queued message on close: {}", e.getMessage());
       }
     }
-    if (consumers != null) {
-      consumers.clear();
+    subtractQueued(nacked);
+    return nacked;
+  }
+
+  private void nackRemainingConsumers() {
+    if (consumers == null || consumers.isEmpty()) {
+      return;
     }
-    if (queuedBytes != null) {
-      queuedBytes.set(0);
+    for (AckReplyConsumer consumer : consumers.values()) {
+      try {
+        consumer.nack();
+      } catch (RuntimeException e) {
+        LOG.warn("CONNECTION: Failed to nack consumer on close: {}", e.getMessage());
+      }
+    }
+    consumers.clear();
+  }
+
+  private void subtractQueued(long bytes) {
+    if (queuedBytes == null || bytes <= 0L) {
+      return;
+    }
+    while (true) {
+      long held = queuedBytes.get();
+      long next = held > bytes ? held - bytes : 0L;
+      if (queuedBytes.compareAndSet(held, next)) {
+        return;
+      }
     }
   }
 
@@ -490,9 +525,7 @@ final class PubSubClient implements Closeable, Serializable {
 
   private void take(HeldMessage held, List<PulledMessage> messages) {
     messages.add(held.message);
-    if (queuedBytes != null) {
-      queuedBytes.addAndGet(-held.message.data().length);
-    }
+    subtractQueued(held.message.data().length);
   }
 
   void acknowledge(List<String> ackIds) {
@@ -786,9 +819,7 @@ final class PubSubClient implements Closeable, Serializable {
       return true;
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      if (queuedBytes != null) {
-        queuedBytes.addAndGet(-bytes);
-      }
+      subtractQueued(bytes);
       return false;
     }
   }

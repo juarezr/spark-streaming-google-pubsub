@@ -2,6 +2,7 @@ package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -307,6 +308,45 @@ class PubSubClientTest {
     assertEquals(1, client.queuedCount());
     assertEquals(1000L, client.queuedBytes());
     assertEquals(baseline * 2L, client.flowOutstandingBytes());
+  }
+
+  @Test
+  void retargetKeepsAReservationThatIsNotInTheQueue() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long raised = baseline + baseline / 8L;
+    long reserved = 22416L;
+    AckReplyConsumer queued = mock(AckReplyConsumer.class);
+    AckReplyConsumer inFlight = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, baseline, raised, 1000L + reserved, 5000L);
+    enqueue(client, queued, 1000);
+    getConsumers(client).put("in-flight", inFlight);
+
+    client.retargetFlow();
+
+    verify(queued).nack();
+    verify(inFlight, never()).nack();
+    assertEquals(reserved, client.queuedBytes());
+    assertEquals(4000L, client.outstandingBytes());
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+    assertSame(inFlight, getConsumers(client).get("in-flight"));
+  }
+
+  @Test
+  void takeDoesNotLeaveQueuedBytesBelowZero() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    setField(client, "subscriber", mock(Subscriber.class));
+    setField(client, "stopped", new AtomicBoolean(false));
+    setField(client, "queuedBytes", new AtomicLong(100));
+    LinkedBlockingQueue<PubSubClient.HeldMessage> queue = new LinkedBlockingQueue<>();
+    queue.put(heldBytes("wide", 1L, mock(AckReplyConsumer.class), new byte[500]));
+    setField(client, "queue", queue);
+
+    List<PulledMessage> pulled = client.poll(Duration.ofMillis(50));
+
+    assertEquals(1, pulled.size());
+    assertEquals(0L, client.queuedBytes());
   }
 
   @Test
