@@ -532,6 +532,58 @@ class PubSubGatherTest {
     assertEquals("google-pubsub:projects/p/subscriptions/s", stream.toString());
   }
 
+  @Test
+  void movedCapAcksTheWrittenBatchAndCommitDoesNotReleaseAgain() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.capMoved()).thenReturn(true);
+    when(client.poll(any(Duration.class))).thenReturn(messages(0, 1)).thenReturn(messages(1, 1));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.AFTER_COMMIT)
+            .receiveTime(Duration.ofMillis(200))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset();
+    verify(client, never()).acknowledge(anyList());
+    verify(client, never()).releaseMessages(anyList());
+
+    stream.latestOffset(first, ReadLimit.allAvailable());
+    verify(client, times(1)).acknowledge(anyList());
+    verify(client, times(1)).releaseMessages(anyList());
+
+    stream.commit(first);
+    verify(client, times(2)).acknowledge(anyList());
+    verify(client, times(1)).releaseMessages(anyList());
+  }
+
+  @Test
+  void unchangedCapDoesNotAckEarly() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.capMoved()).thenReturn(false);
+    when(client.poll(any(Duration.class))).thenReturn(messages(0, 1)).thenReturn(messages(1, 1));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.AFTER_COMMIT)
+            .receiveTime(Duration.ofMillis(200))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset();
+    stream.latestOffset(first, ReadLimit.allAvailable());
+
+    verify(client, never()).acknowledge(anyList());
+    verify(client, never()).releaseMessages(anyList());
+
+    stream.commit(first);
+    verify(client, times(1)).acknowledge(anyList());
+    verify(client, times(1)).releaseMessages(anyList());
+  }
+
   private static List<PulledMessage> messages(int start, int count) {
     List<PulledMessage> messages = new ArrayList<>(count);
     for (int i = start; i < start + count; i++) {

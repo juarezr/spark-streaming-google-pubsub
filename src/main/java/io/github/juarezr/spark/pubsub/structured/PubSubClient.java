@@ -208,19 +208,22 @@ final class PubSubClient implements Closeable, Serializable {
   }
 
   /**
-   * When the cap has moved, and this gather starts with an empty queue and nothing unacked, stop
-   * the subscriber and start another whose outstanding bytes are twice {@code memoryBudget}. A
-   * failed start leaves the running subscriber in place.
+   * When the cap has moved, stop the subscriber and start another whose outstanding bytes are twice
+   * {@code memoryBudget}. A prefetch still in the queue is nacked first. Bytes above that prefetch
+   * stay outstanding. A failed start leaves the running subscriber in place.
    */
   synchronized void retargetFlow() {
     if (queuedBytes == null || outstandingBytes == null) {
       return;
     }
-    if (queuedBytes.get() != 0L || outstandingBytes.get() != 0L) {
+    if (!capMoved()) {
       return;
     }
-    if (memoryBudget <= 0L || memoryBudget == flowSeedBytes) {
-      return;
+    long queued = queuedBytes.get();
+    if (queued > 0L) {
+      nackQueued();
+      long remainder = outstandingBytes.get() - queued;
+      outstandingBytes.set(remainder > 0L ? remainder : 0L);
     }
     long previousSeed = flowSeedBytes;
     long nextSeed = memoryBudget;
@@ -553,6 +556,10 @@ final class PubSubClient implements Closeable, Serializable {
 
   long memoryBudget() {
     return memoryBudget;
+  }
+
+  boolean capMoved() {
+    return memoryBudget > 0L && memoryBudget != flowSeedBytes;
   }
 
   long memoryBaseline() {

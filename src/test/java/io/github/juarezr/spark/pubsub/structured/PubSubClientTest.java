@@ -236,32 +236,35 @@ class PubSubClientTest {
   }
 
   @Test
-  void retargetWaitsWhileTheQueueHoldsBytes() throws Exception {
+  void retargetNacksAPrefetchAndLeavesTheRemainder() throws Exception {
     PubSubClient client = new PubSubClient(minimalConfig());
-    Subscriber subscriber = mock(Subscriber.class);
-    setField(client, "subscriber", subscriber);
     long baseline = 64L * 1024L * 1024L;
-    armFlow(client, baseline, baseline, baseline + baseline / 8L, 1L, 0L);
+    long raised = baseline + baseline / 8L;
+    AckReplyConsumer consumer = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, baseline, raised, 1000L, 5000L);
+    enqueue(client, consumer, 1000);
 
     client.retargetFlow();
 
-    verify(subscriber, never()).stopAsync();
-    assertEquals(baseline * 2L, client.flowOutstandingBytes());
+    verify(consumer).nack();
+    assertEquals(0L, client.queuedBytes());
+    assertEquals(4000L, client.outstandingBytes());
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
     assertEquals(baseline, client.memoryBaseline());
   }
 
   @Test
-  void retargetWaitsWhileBytesAreStillOutstanding() throws Exception {
+  void retargetKeepsOutstandingBytesWhenTheQueueIsEmpty() throws Exception {
     PubSubClient client = new PubSubClient(minimalConfig());
-    Subscriber subscriber = mock(Subscriber.class);
-    setField(client, "subscriber", subscriber);
     long baseline = 64L * 1024L * 1024L;
-    armFlow(client, baseline, baseline, baseline + baseline / 8L, 0L, 1L);
+    long raised = baseline + baseline / 8L;
+    armFlow(client, baseline, baseline, raised, 0L, 1000L);
 
     client.retargetFlow();
 
-    verify(subscriber, never()).stopAsync();
-    assertEquals(baseline * 2L, client.flowOutstandingBytes());
+    assertEquals(1000L, client.outstandingBytes());
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
   }
 
   @Test
@@ -287,6 +290,78 @@ class PubSubClientTest {
     client.retargetFlow();
 
     assertEquals(baseline * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetLeavesAPrefetchWhenTheCapHasNotMoved() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    AckReplyConsumer consumer = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, baseline, baseline, 1000L, 1000L);
+    enqueue(client, consumer, 1000);
+
+    client.retargetFlow();
+
+    verify(consumer, never()).nack();
+    assertEquals(1, client.queuedCount());
+    assertEquals(1000L, client.queuedBytes());
+    assertEquals(baseline * 2L, client.flowOutstandingBytes());
+  }
+
+  @Test
+  void retargetNacksAPrefetchAndFollowsAHigherCap() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long raised = baseline + baseline / 8L;
+    AckReplyConsumer consumer = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, baseline, raised, 1000L, 1000L);
+    enqueue(client, consumer, 1000);
+
+    client.retargetFlow();
+
+    verify(consumer).nack();
+    assertEquals(0, client.queuedCount());
+    assertEquals(0L, client.queuedBytes());
+    assertEquals(0L, client.outstandingBytes());
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetNacksOnlyThePrefetchWhenABatchIsStillHeld() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long raised = baseline + baseline / 8L;
+    AckReplyConsumer consumer = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, baseline, raised, 1000L, 2000L);
+    enqueue(client, consumer, 1000);
+
+    client.retargetFlow();
+
+    verify(consumer).nack();
+    assertEquals(0, client.queuedCount());
+    assertEquals(1000L, client.outstandingBytes());
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetNacksAPrefetchAndFollowsAHalvedCap() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long live = baseline + baseline / 8L;
+    long halved = live / 2L;
+    AckReplyConsumer consumer = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, live, halved, 1000L, 1000L);
+    enqueue(client, consumer, 1000);
+
+    client.retargetFlow();
+
+    verify(consumer).nack();
+    assertEquals(0L, client.queuedBytes());
+    assertEquals(0L, client.outstandingBytes());
+    assertEquals(halved * 2L, client.flowOutstandingBytes());
     assertEquals(baseline, client.memoryBaseline());
   }
 
@@ -342,6 +417,14 @@ class PubSubClientTest {
     PulledMessage message =
         new PulledMessage(id, data, Collections.emptyMap(), publishMillis, "", id);
     return new PubSubClient.HeldMessage(message, consumer);
+  }
+
+  private static void enqueue(PubSubClient client, AckReplyConsumer consumer, int bytes)
+      throws Exception {
+    LinkedBlockingQueue<PubSubClient.HeldMessage> queue = new LinkedBlockingQueue<>();
+    queue.put(heldBytes("prefetch", 1_000L, consumer, new byte[bytes]));
+    setField(client, "queue", queue);
+    setField(client, "consumers", new ConcurrentHashMap<String, AckReplyConsumer>());
   }
 
   private static void armFlow(

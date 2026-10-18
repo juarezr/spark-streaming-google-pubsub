@@ -65,6 +65,7 @@ final class PubSubMicroBatchStream
   private volatile boolean availableNow;
   private volatile boolean limitReached;
   private volatile boolean heapStartupLogged;
+  private long releasedBatchId = Long.MIN_VALUE;
   private long previousHeapUsed = Long.MIN_VALUE;
   private long previousRss = Long.MIN_VALUE;
   private long previousMemAvailable = Long.MIN_VALUE;
@@ -220,8 +221,41 @@ final class PubSubMicroBatchStream
     }
   }
 
+  /**
+   * The previous batch is already written when the next gather starts. Spark commits it only after
+   * {@code latestOffset} returns. Ack it before the subscriber is stopped, and remember the id so
+   * {@link #commit} does not release those bytes again.
+   *
+   * @return false when the ack fails and the subscriber must stay
+   */
+  private boolean releaseWrittenBatch() {
+    if (config.ackMode() != AckMode.AFTER_COMMIT || lastProduced == null) {
+      return true;
+    }
+    long batchId = lastProduced.batchId();
+    if (batchId == releasedBatchId) {
+      return true;
+    }
+    List<PulledMessage> pending = messagesByBatch.get(batchId);
+    if (pending == null || pending.isEmpty()) {
+      return true;
+    }
+    List<String> ackIds = PulledMessage.ackIds(pending);
+    try {
+      client.acknowledge(ackIds);
+    } catch (RuntimeException e) {
+      LOG.warn("BATCH: Failed to ack written batch {} before subscriber rebuild", batchId, e);
+      return false;
+    }
+    client.releaseMessages(pending);
+    releasedBatchId = batchId;
+    return true;
+  }
+
   private List<PulledMessage> gatherMessages(AdmissionLimits gatherLimits) {
-    client.retargetFlow();
+    if (!client.capMoved() || releaseWrittenBatch()) {
+      client.retargetFlow();
+    }
     client.noteCycleBudget(autoReceiveTime.cycleBudget());
     AdmissionLimits limits =
         availableNow
@@ -600,6 +634,7 @@ final class PubSubMicroBatchStream
     String batchKey = Long.toString(endOffset.batchId());
     List<PulledMessage> committed = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
     long committedBytes = PulledMessage.payloadBytes(committed);
+    boolean alreadyReleased = endOffset.batchId() == releasedBatchId;
     if (config.ackMode() == AckMode.AFTER_COMMIT) {
       List<PulledMessage> messages = committed;
       List<String> ackIds = PulledMessage.ackIds(messages);
@@ -625,7 +660,7 @@ final class PubSubMicroBatchStream
           }
         }
       } finally {
-        if (!ackIds.isEmpty()) {
+        if (!ackIds.isEmpty() && !alreadyReleased) {
           client.releaseMessages(messages);
         }
         ackCoordinator.discard(batchKey);
