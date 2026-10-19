@@ -320,6 +320,13 @@ final class PubSubMicroBatchStream
           if (!messages.isEmpty()) {
             break;
           }
+          // One millisecond reads the local queue and does not wait on the subscriber.
+          List<PulledMessage> waiting = poll(limits, messages.size(), Duration.ofMillis(1));
+          if (waiting != null && !waiting.isEmpty()) {
+            RetainResult retained = retainPolled(messages, waiting, limits, payloadBytes);
+            messages = retained.messages;
+            break;
+          }
           try {
             Thread.sleep(10);
           } catch (InterruptedException interrupted) {

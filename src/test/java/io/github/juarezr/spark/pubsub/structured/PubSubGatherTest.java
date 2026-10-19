@@ -486,6 +486,48 @@ class PubSubGatherTest {
   void gatherPollsAfterTheHeapCeilingCools() {
     PubSubClient client = mock(PubSubClient.class);
     when(client.aboveHeapCeiling()).thenReturn(true, false, true);
+    when(client.poll(any(Duration.class))).thenReturn(List.of()).thenReturn(messages(0, 2));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .receiveTime(Duration.ofSeconds(5))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset latest = stream.latestOffset();
+    InputPartition[] partitions = stream.planInputPartitions(stream.initialOffset(), latest);
+
+    assertEquals(2, ((PubSubInputPartition) partitions[0]).messages().size());
+    verify(client, times(2)).poll(any(Duration.class));
+    verify(client, times(2)).noteHeapCeiling();
+    verify(client, never()).nack(anyList());
+  }
+
+  @Test
+  void gatherReturnsEmptyWhenTheHeapCeilingStaysHot() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.aboveHeapCeiling()).thenReturn(true);
+    when(client.poll(any(Duration.class))).thenReturn(List.of());
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .receiveTime(Duration.ofMillis(80))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    stream.latestOffset();
+
+    verify(client, atLeast(1)).poll(argThat(timeout -> timeout.toMillis() <= 1));
+    verify(client, atLeast(1)).noteHeapCeiling();
+    verify(client, never()).nack(anyList());
+  }
+
+  @Test
+  void gatherKeepsMessagesAlreadyQueuedWhenTheHeapCeilingIsHot() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.aboveHeapCeiling()).thenReturn(true);
     when(client.poll(any(Duration.class))).thenReturn(messages(0, 2));
     PubSubConfig config =
         PubSubConfig.builder()
@@ -499,27 +541,7 @@ class PubSubGatherTest {
     InputPartition[] partitions = stream.planInputPartitions(stream.initialOffset(), latest);
 
     assertEquals(2, ((PubSubInputPartition) partitions[0]).messages().size());
-    verify(client, times(1)).poll(any(Duration.class));
-    verify(client, times(2)).noteHeapCeiling();
-    verify(client, never()).nack(anyList());
-  }
-
-  @Test
-  void gatherReturnsEmptyWhenTheHeapCeilingStaysHot() {
-    PubSubClient client = mock(PubSubClient.class);
-    when(client.aboveHeapCeiling()).thenReturn(true);
-    PubSubConfig config =
-        PubSubConfig.builder()
-            .projectId("p")
-            .subscription("s")
-            .receiveTime(Duration.ofMillis(80))
-            .build();
-    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
-
-    stream.latestOffset();
-
-    verify(client, never()).poll(any(Duration.class));
-    verify(client, atLeast(1)).noteHeapCeiling();
+    verify(client, times(1)).poll(argThat(timeout -> timeout.toMillis() <= 1));
     verify(client, never()).nack(anyList());
   }
 

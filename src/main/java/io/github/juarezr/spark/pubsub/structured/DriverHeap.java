@@ -111,6 +111,15 @@ final class DriverHeap {
       long heapFraction,
       long memAvailable,
       long gatherBytes) {
+    // An empty gather is the pause, not a batch that was too big. Halving it walked the cap to
+    // the floor while the queue still held the previous bytes.
+    if (gatherBytes <= 0L) {
+      int idleStreak =
+          heapFraction >= 0L && heapFraction < GROW_PERCENT && memAvailable >= GROW_MIN_AVAILABLE
+              ? calmStreak + 1
+              : 0;
+      return new BudgetStep(current, idleStreak);
+    }
     long halved = nextBudget(current, heapFraction);
     if (halved < current) {
       return new BudgetStep(halved, 0);

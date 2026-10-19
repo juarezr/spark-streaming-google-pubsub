@@ -191,6 +191,10 @@ class DriverHeapTest {
     assertEquals(current / 2L, halved.budget);
     assertEquals(0, halved.calmStreak);
 
+    DriverHeap.BudgetStep empty = DriverHeap.adjust(current, seed, 7, 51L, free, 0L);
+    assertEquals(current, empty.budget);
+    assertEquals(0, empty.calmStreak);
+
     DriverHeap.BudgetStep warm =
         DriverHeap.adjust(current, seed, 7, DriverHeap.GROW_PERCENT, free, current);
     assertEquals(current, warm.budget);
