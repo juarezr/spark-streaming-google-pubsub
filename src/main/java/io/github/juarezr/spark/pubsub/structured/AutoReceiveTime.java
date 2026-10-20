@@ -20,8 +20,9 @@ import org.slf4j.LoggerFactory;
  * {@code cycleBudget}, while that idle is above an eighth of the trigger and the cycle finished on
  * time. In the top quarter a late cycle records its post-receive time. While fewer than eight
  * samples exist, {@code writeBudget} steps toward that reserve by at most 3% of {@code cycleBudget}
- * only on the cycle that recorded one. A quiet cycle does not step it up. Once the budget is above
- * the reserve, a quiet cycle may step down to it. Sleep and a quiet commit are not samples.
+ * only on the cycle that recorded one. A quiet cycle does not step it up. An on-time cycle whose
+ * idle is spare steps below that reserve, one careful step, and not below the commit. A quiet cycle
+ * that is not spare still stops at the reserve. Sleep and a quiet commit are not samples.
  */
 final class AutoReceiveTime {
   private static final Logger LOG = LoggerFactory.getLogger(AutoReceiveTime.class);
@@ -501,10 +502,14 @@ final class AutoReceiveTime {
     }
     boolean windowFull = tailCount >= TAIL_WINDOW;
     // Idle minutes must not chase the reserve up while the window is still filling. Once it is
-    // full, every cycle tracks it. A quiet cycle may only step down, and not below the reserve.
+    // full, a late cycle still tracks it. An on-time cycle with spare idle is not that late write,
+    // so it may step below the reserve. A quiet cycle that is not spare still stops there.
     boolean reserveOpen = tailCount > 0 && (windowFull || record);
     long step = carefulStep(estimate);
-    if (reserveOpen) {
+    if (tailCount > 0 && quiet && spare) {
+      long stepped = writeBudgetNanos - step;
+      writeBudgetNanos = Math.max(commitDurationNanos, stepped);
+    } else if (reserveOpen) {
       long reserve = tailReserve();
       if (reserve > writeBudgetNanos) {
         writeBudgetNanos = Math.min(writeBudgetNanos + step, reserve);
