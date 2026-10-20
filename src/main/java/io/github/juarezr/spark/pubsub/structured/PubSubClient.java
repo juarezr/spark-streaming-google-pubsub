@@ -65,6 +65,7 @@ final class PubSubClient implements Closeable, Serializable {
   private long flowSeedBytes;
   private long memoryLimitBytes;
   private int calmStreak;
+  private int hotStreak;
   private volatile String pauseReason;
   private final AtomicLong cachedAvailableBytes = new AtomicLong(Long.MIN_VALUE);
   private final AtomicLong cachedAvailableAtMillis = new AtomicLong(Long.MIN_VALUE);
@@ -612,13 +613,14 @@ final class PubSubClient implements Closeable, Serializable {
     long ceiling = memoryLimitBytes > 0L ? memoryLimitBytes : memoryBudget;
     DriverHeap.BudgetStep step =
         DriverHeap.adjust(
-            memoryBudget, ceiling, calmStreak, heapFraction, memAvailable, gatherBytes);
+            memoryBudget, ceiling, calmStreak, hotStreak, heapFraction, memAvailable, gatherBytes);
     if (step.budget != memoryBudget) {
       // TODO: drop this soak line to debug before a provider release.
       LOG.info(DriverHeap.budgetChange(memoryBudget, step.budget));
       memoryBudget = step.budget;
     }
     calmStreak = step.calmStreak;
+    hotStreak = step.hotStreak;
   }
 
   /**

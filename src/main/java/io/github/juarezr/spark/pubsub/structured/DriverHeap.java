@@ -13,6 +13,7 @@ final class DriverHeap {
   static final int SHRINK_PERCENT = 50;
   static final int GROW_PERCENT = 40;
   static final int GROW_STREAK = 8;
+  static final int SHRINK_STREAK = 2;
   static final long BUDGET_FLOOR_BYTES = 4L * 1024L * 1024L;
   static final long GROW_MIN_AVAILABLE = 2L * 1024L * 1024L * 1024L;
   static final int BUDGET_DIVISOR = 64;
@@ -101,28 +102,33 @@ final class DriverHeap {
   }
 
   /**
-   * Halve immediately at {@link #SHRINK_PERCENT}. Otherwise count a cool gather, and step up only
-   * after {@link #GROW_STREAK} of them when the latest gather filled the cap.
+   * Halve after {@link #SHRINK_STREAK} gathers in a row at {@link #SHRINK_PERCENT}. Otherwise count
+   * a cool gather, and step up only after {@link #GROW_STREAK} of them when the latest gather
+   * filled the cap.
    */
   static BudgetStep adjust(
       long current,
       long ceiling,
       int calmStreak,
+      int hotStreak,
       long heapFraction,
       long memAvailable,
       long gatherBytes) {
-    // An empty gather is the pause, not a batch that was too big. Halving it walked the cap to
-    // the floor while the queue still held the previous bytes.
+    // An empty gather is the pause, not a batch that was too big. It does not count as hot, and it
+    // does not forget a hot gather that came before it.
     if (gatherBytes <= 0L) {
       int idleStreak =
           heapFraction >= 0L && heapFraction < GROW_PERCENT && memAvailable >= GROW_MIN_AVAILABLE
               ? calmStreak + 1
               : 0;
-      return new BudgetStep(current, idleStreak);
+      return new BudgetStep(current, idleStreak, hotStreak);
     }
-    long halved = nextBudget(current, heapFraction);
-    if (halved < current) {
-      return new BudgetStep(halved, 0);
+    if (heapFraction >= SHRINK_PERCENT) {
+      int hot = hotStreak + 1;
+      if (hot >= SHRINK_STREAK) {
+        return new BudgetStep(nextBudget(current, heapFraction), 0, 0);
+      }
+      return new BudgetStep(current, 0, hot);
     }
     int streak =
         heapFraction >= 0L && heapFraction < GROW_PERCENT && memAvailable >= GROW_MIN_AVAILABLE
@@ -131,19 +137,21 @@ final class DriverHeap {
     if (streak >= GROW_STREAK && filled(gatherBytes, current) && current < ceiling) {
       long grown = growStep(current, ceiling);
       if (grown > current) {
-        return new BudgetStep(grown, 0);
+        return new BudgetStep(grown, 0, 0);
       }
     }
-    return new BudgetStep(current, streak);
+    return new BudgetStep(current, streak, 0);
   }
 
   static final class BudgetStep {
     final long budget;
     final int calmStreak;
+    final int hotStreak;
 
-    BudgetStep(long budget, int calmStreak) {
+    BudgetStep(long budget, int calmStreak, int hotStreak) {
       this.budget = budget;
       this.calmStreak = calmStreak;
+      this.hotStreak = hotStreak;
     }
   }
 

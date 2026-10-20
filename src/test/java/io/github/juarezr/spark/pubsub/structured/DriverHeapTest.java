@@ -124,13 +124,13 @@ class DriverHeapTest {
     long free = DriverHeap.GROW_MIN_AVAILABLE;
 
     DriverHeap.BudgetStep grown =
-        DriverHeap.adjust(baseline, limit, DriverHeap.GROW_STREAK, 20L, free, baseline);
+        DriverHeap.adjust(baseline, limit, DriverHeap.GROW_STREAK, 0, 20L, free, baseline);
     assertEquals(baseline + baseline / 8L, grown.budget);
     assertTrue(grown.budget > baseline);
     assertTrue(grown.budget < limit);
 
     DriverHeap.BudgetStep stayed =
-        DriverHeap.adjust(limit, limit, DriverHeap.GROW_STREAK, 20L, free, limit);
+        DriverHeap.adjust(limit, limit, DriverHeap.GROW_STREAK, 0, 20L, free, limit);
     assertEquals(limit, stayed.budget);
     assertEquals(limit, DriverHeap.growStep(limit - 1L, limit));
   }
@@ -143,7 +143,7 @@ class DriverHeapTest {
     assertEquals(seed, DriverHeap.growStep(seed, seed));
     assertEquals(seed, DriverHeap.growStep(seed - 1L, seed));
     DriverHeap.BudgetStep stayed =
-        DriverHeap.adjust(seed, seed, DriverHeap.GROW_STREAK, 20L, free, seed);
+        DriverHeap.adjust(seed, seed, DriverHeap.GROW_STREAK, 0, 20L, free, seed);
     assertEquals(seed, stayed.budget);
   }
 
@@ -165,42 +165,56 @@ class DriverHeapTest {
     int streak = 0;
 
     for (int i = 0; i < DriverHeap.GROW_STREAK - 1; i++) {
-      DriverHeap.BudgetStep step = DriverHeap.adjust(current, seed, streak, 20L, free, current);
+      DriverHeap.BudgetStep step = DriverHeap.adjust(current, seed, streak, 0, 20L, free, current);
       assertEquals(current, step.budget);
       streak = step.calmStreak;
     }
     assertEquals(7, streak);
 
-    DriverHeap.BudgetStep light = DriverHeap.adjust(current, seed, streak, 20L, free, current / 2L);
+    DriverHeap.BudgetStep light =
+        DriverHeap.adjust(current, seed, streak, 0, 20L, free, current / 2L);
     assertEquals(current, light.budget);
     assertEquals(8, light.calmStreak);
 
     DriverHeap.BudgetStep grown =
-        DriverHeap.adjust(current, seed, light.calmStreak, 20L, free, current);
+        DriverHeap.adjust(current, seed, light.calmStreak, 0, 20L, free, current);
     assertEquals(current + current / 8L, grown.budget);
     assertEquals(0, grown.calmStreak);
   }
 
   @Test
-  void hotSampleHalvesAndClearsTheCalmStreak() {
+  void twoHotGathersHalveAndOneDoesNot() {
     long current = 64L * 1024L * 1024L;
     long seed = 64L * 1024L * 1024L;
     long free = DriverHeap.GROW_MIN_AVAILABLE;
 
-    DriverHeap.BudgetStep halved = DriverHeap.adjust(current, seed, 7, 50L, free, current);
-    assertEquals(current / 2L, halved.budget);
-    assertEquals(0, halved.calmStreak);
+    DriverHeap.BudgetStep first = DriverHeap.adjust(current, seed, 7, 0, 50L, free, current);
+    assertEquals(current, first.budget);
+    assertEquals(0, first.calmStreak);
+    assertEquals(1, first.hotStreak);
 
-    DriverHeap.BudgetStep empty = DriverHeap.adjust(current, seed, 7, 51L, free, 0L);
+    DriverHeap.BudgetStep empty =
+        DriverHeap.adjust(current, seed, 7, first.hotStreak, 51L, free, 0L);
     assertEquals(current, empty.budget);
     assertEquals(0, empty.calmStreak);
+    assertEquals(1, empty.hotStreak);
+
+    DriverHeap.BudgetStep halved =
+        DriverHeap.adjust(current, seed, 0, empty.hotStreak, 50L, free, current);
+    assertEquals(current / 2L, halved.budget);
+    assertEquals(0, halved.calmStreak);
+    assertEquals(0, halved.hotStreak);
+
+    DriverHeap.BudgetStep cooled = DriverHeap.adjust(current, seed, 0, 1, 20L, free, current);
+    assertEquals(current, cooled.budget);
+    assertEquals(0, cooled.hotStreak);
 
     DriverHeap.BudgetStep warm =
-        DriverHeap.adjust(current, seed, 7, DriverHeap.GROW_PERCENT, free, current);
+        DriverHeap.adjust(current, seed, 7, 0, DriverHeap.GROW_PERCENT, free, current);
     assertEquals(current, warm.budget);
     assertEquals(0, warm.calmStreak);
 
-    DriverHeap.BudgetStep unread = DriverHeap.adjust(current, seed, 7, 20L, -1L, current);
+    DriverHeap.BudgetStep unread = DriverHeap.adjust(current, seed, 7, 0, 20L, -1L, current);
     assertEquals(current, unread.budget);
     assertEquals(0, unread.calmStreak);
   }
