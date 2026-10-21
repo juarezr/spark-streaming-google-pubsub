@@ -211,6 +211,8 @@ class PubSubConfigTest {
   void ackModeFromString() {
     assertEquals(AckMode.AFTER_COMMIT, AckMode.fromString("afterCommit"));
     assertEquals(AckMode.AFTER_COMMIT, AckMode.fromString("after_commit"));
+    assertEquals(AckMode.AFTER_CHECKPOINT, AckMode.fromString("afterCheckpoint"));
+    assertEquals(AckMode.AFTER_CHECKPOINT, AckMode.fromString("after_checkpoint"));
     assertEquals(AckMode.EARLY, AckMode.fromString("early"));
     assertThrows(IllegalArgumentException.class, () -> AckMode.fromString("never"));
   }

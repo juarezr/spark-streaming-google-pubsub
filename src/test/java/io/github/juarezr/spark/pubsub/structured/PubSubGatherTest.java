@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -604,6 +605,66 @@ class PubSubGatherTest {
     stream.commit(first);
     verify(client, times(1)).acknowledge(anyList());
     verify(client, times(1)).releaseMessages(anyList());
+  }
+
+  @Test
+  void afterCheckpointAcksWhenTheCapDidNotMoveAndDropsThePayload() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.capMoved()).thenReturn(false);
+    when(client.poll(any(Duration.class))).thenReturn(messages(0, 1)).thenReturn(messages(1, 1));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.AFTER_CHECKPOINT)
+            .gatherMode(GatherMode.IMMEDIATE)
+            .receiveTime(Duration.ofMillis(200))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset();
+    verify(client, never()).acknowledge(anyList());
+
+    stream.latestOffset(first, ReadLimit.allAvailable());
+    verify(client, times(1)).acknowledge(anyList());
+    verify(client, times(1)).releaseMessages(anyList());
+
+    long batchId = ((PubSubOffset) first).batchId();
+    List<PulledMessage> retained = stream.retainedMessages(batchId);
+    assertEquals(1, retained.size());
+    assertEquals("ack-0", retained.get(0).ackId());
+    assertEquals(0, retained.get(0).data().length);
+
+    stream.commit(first);
+    verify(client, times(2)).acknowledge(anyList());
+    verify(client, times(1)).releaseMessages(anyList());
+  }
+
+  @Test
+  void afterCheckpointKeepsThePayloadWhenTheAckFails() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.capMoved()).thenReturn(false);
+    doThrow(new RuntimeException("ack failed")).when(client).acknowledge(anyList());
+    when(client.poll(any(Duration.class))).thenReturn(messages(0, 1)).thenReturn(messages(1, 1));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.AFTER_CHECKPOINT)
+            .gatherMode(GatherMode.IMMEDIATE)
+            .receiveTime(Duration.ofMillis(200))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset();
+    stream.latestOffset(first, ReadLimit.allAvailable());
+
+    verify(client, never()).releaseMessages(anyList());
+    long batchId = ((PubSubOffset) first).batchId();
+    List<PulledMessage> retained = stream.retainedMessages(batchId);
+    assertEquals(1, retained.size());
+    assertEquals("ack-0", retained.get(0).ackId());
+    assertEquals(1, retained.get(0).data().length);
   }
 
   private static List<PulledMessage> messages(int start, int count) {

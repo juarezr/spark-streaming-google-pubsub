@@ -186,7 +186,7 @@ final class PubSubMicroBatchStream
     String batchKey = Long.toString(batchId);
     messagesByBatch.put(batchId, pulled);
     try {
-      if (config.ackMode() == AckMode.AFTER_COMMIT) {
+      if (holdsUntilCheckpoint()) {
         ackCoordinator.registerBatch(batchKey, pulled);
       } else if (config.gatherMode() == GatherMode.IMMEDIATE) {
         ackCoordinator.registerBatch(batchKey, pulled);
@@ -229,7 +229,7 @@ final class PubSubMicroBatchStream
    * @return false when the ack fails and the subscriber must stay
    */
   private boolean releaseWrittenBatch() {
-    if (config.ackMode() != AckMode.AFTER_COMMIT || lastProduced == null) {
+    if (!holdsUntilCheckpoint() || lastProduced == null) {
       return true;
     }
     long batchId = lastProduced.batchId();
@@ -244,16 +244,24 @@ final class PubSubMicroBatchStream
     try {
       client.acknowledge(ackIds);
     } catch (RuntimeException e) {
-      LOG.warn("BATCH: Failed to ack written batch {} before subscriber rebuild", batchId, e);
+      LOG.warn("BATCH: Failed to ack written batch {}", batchId, e);
       return false;
     }
     client.releaseMessages(pending);
     releasedBatchId = batchId;
+    List<PulledMessage> stripped = PulledMessage.withoutPayloads(pending);
+    messagesByBatch.put(batchId, stripped);
+    ackCoordinator.replaceBatch(Long.toString(batchId), stripped);
     return true;
   }
 
+  private boolean holdsUntilCheckpoint() {
+    return config.ackMode() == AckMode.AFTER_COMMIT || config.ackMode() == AckMode.AFTER_CHECKPOINT;
+  }
+
   private List<PulledMessage> gatherMessages(AdmissionLimits gatherLimits) {
-    if (!client.capMoved() || releaseWrittenBatch()) {
+    boolean release = config.ackMode() == AckMode.AFTER_CHECKPOINT || client.capMoved();
+    if (!release || releaseWrittenBatch()) {
       client.retargetFlow();
     }
     client.noteCycleBudget(autoReceiveTime.cycleBudget());
@@ -541,7 +549,7 @@ final class PubSubMicroBatchStream
     if (pulled != null) {
       messages.addAll(pulled);
     }
-    if (config.ackMode() == AckMode.AFTER_COMMIT && !messages.isEmpty()) {
+    if (holdsUntilCheckpoint() && !messages.isEmpty()) {
       try {
         client.nack(PulledMessage.ackIds(messages));
       } catch (RuntimeException nackError) {
@@ -642,7 +650,7 @@ final class PubSubMicroBatchStream
     List<PulledMessage> committed = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
     long committedBytes = PulledMessage.payloadBytes(committed);
     boolean alreadyReleased = endOffset.batchId() == releasedBatchId;
-    if (config.ackMode() == AckMode.AFTER_COMMIT) {
+    if (holdsUntilCheckpoint()) {
       List<PulledMessage> messages = committed;
       List<String> ackIds = PulledMessage.ackIds(messages);
       try {
@@ -689,7 +697,9 @@ final class PubSubMicroBatchStream
     cancelled = true;
     try {
       int uncommitted = 0;
-      if (lastProduced != null && config.ackMode() == AckMode.AFTER_COMMIT) {
+      if (lastProduced != null
+          && holdsUntilCheckpoint()
+          && lastProduced.batchId() != releasedBatchId) {
         String batchKey = Long.toString(lastProduced.batchId());
         List<PulledMessage> messages = ackCoordinator.messagesForBatch(batchKey);
         if (!messages.isEmpty()) {
@@ -795,6 +805,10 @@ final class PubSubMicroBatchStream
 
   PublishTimeWindow lastGatheredWindow() {
     return lastGatheredWindow;
+  }
+
+  List<PulledMessage> retainedMessages(long batchId) {
+    return messagesByBatch.getOrDefault(batchId, List.of());
   }
 
   boolean firstBatchLogged() {
