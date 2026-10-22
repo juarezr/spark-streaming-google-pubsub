@@ -93,12 +93,13 @@ class DriverHeapTest {
   }
 
   @Test
-  void budgetHalvesAtFiftyPercentAndDoesNotGrow() {
+  void budgetStepsDownOneEighthAtFiftyPercentAndDoesNotGrow() {
     long current = 32L * 1024L * 1024L;
+    long aboveFloor = DriverHeap.BUDGET_FLOOR_BYTES + DriverHeap.BUDGET_FLOOR_BYTES / 8L;
 
     assertEquals(current, DriverHeap.nextBudget(current, 49L));
-    assertEquals(current / 2L, DriverHeap.nextBudget(current, 50L));
-    assertEquals(DriverHeap.BUDGET_FLOOR_BYTES, DriverHeap.nextBudget(6L * 1024L * 1024L, 80L));
+    assertEquals(current - current / 8L, DriverHeap.nextBudget(current, 50L));
+    assertEquals(DriverHeap.BUDGET_FLOOR_BYTES, DriverHeap.nextBudget(aboveFloor, 80L));
     assertEquals(
         DriverHeap.BUDGET_FLOOR_BYTES, DriverHeap.nextBudget(DriverHeap.BUDGET_FLOOR_BYTES, 90L));
     assertEquals(current, DriverHeap.nextBudget(current, -1L));
@@ -183,7 +184,7 @@ class DriverHeapTest {
   }
 
   @Test
-  void twoHotGathersHalveAndOneDoesNot() {
+  void twoHotGathersStepDownOneEighthAndOneDoesNot() {
     long current = 64L * 1024L * 1024L;
     long seed = 64L * 1024L * 1024L;
     long free = DriverHeap.GROW_MIN_AVAILABLE;
@@ -199,11 +200,11 @@ class DriverHeapTest {
     assertEquals(0, empty.calmStreak);
     assertEquals(1, empty.hotStreak);
 
-    DriverHeap.BudgetStep halved =
+    DriverHeap.BudgetStep stepped =
         DriverHeap.adjust(current, seed, 0, empty.hotStreak, 50L, free, current);
-    assertEquals(current / 2L, halved.budget);
-    assertEquals(0, halved.calmStreak);
-    assertEquals(0, halved.hotStreak);
+    assertEquals(current - current / 8L, stepped.budget);
+    assertEquals(0, stepped.calmStreak);
+    assertEquals(0, stepped.hotStreak);
 
     DriverHeap.BudgetStep cooled = DriverHeap.adjust(current, seed, 0, 1, 20L, free, current);
     assertEquals(current, cooled.budget);

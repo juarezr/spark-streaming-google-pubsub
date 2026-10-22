@@ -80,12 +80,13 @@ final class DriverHeap {
     return batchSize > 0L ? batchSize : 0L;
   }
 
-  /** Next gather cap. Shrinks one step at {@link #SHRINK_PERCENT} and never grows. */
+  /** One eighth less, and not under the floor. Fraction under 50 does not move. */
   static long nextBudget(long current, long heapFraction) {
     if (current <= BUDGET_FLOOR_BYTES || heapFraction < SHRINK_PERCENT) {
       return current;
     }
-    return Math.max(current / 2L, BUDGET_FLOOR_BYTES);
+    long stepped = current - Math.max(current / 8L, 1L);
+    return Math.max(stepped, BUDGET_FLOOR_BYTES);
   }
 
   /** One eighth more, and not past {@code ceiling}. The caller passes {@code memoryLimit}. */
@@ -102,9 +103,9 @@ final class DriverHeap {
   }
 
   /**
-   * Halve after {@link #SHRINK_STREAK} gathers in a row at {@link #SHRINK_PERCENT}. Otherwise count
-   * a cool gather, and step up only after {@link #GROW_STREAK} of them when the latest gather
-   * filled the cap.
+   * Step down one eighth after {@link #SHRINK_STREAK} gathers in a row at {@link #SHRINK_PERCENT}.
+   * Otherwise count a cool gather, and step up only after {@link #GROW_STREAK} of them when the
+   * latest gather filled the cap.
    */
   static BudgetStep adjust(
       long current,
