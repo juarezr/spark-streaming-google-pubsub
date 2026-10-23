@@ -66,6 +66,8 @@ final class PubSubClient implements Closeable, Serializable {
   private long memoryLimitBytes;
   private int calmStreak;
   private int hotStreak;
+  private long lastMove;
+  private boolean lastShrank;
   private volatile String pauseReason;
   private final AtomicLong cachedAvailableBytes = new AtomicLong(Long.MIN_VALUE);
   private final AtomicLong cachedAvailableAtMillis = new AtomicLong(Long.MIN_VALUE);
@@ -187,6 +189,8 @@ final class PubSubClient implements Closeable, Serializable {
     this.baselineBytes = seeded;
     this.flowSeedBytes = seeded;
     this.memoryLimitBytes = limit;
+    this.lastMove = DriverHeap.openingMove(seeded);
+    this.lastShrank = false;
 
     this.emulator = this.config.emulatorHost().map(PubSubEmulator::new).orElse(null);
     try {
@@ -611,13 +615,28 @@ final class PubSubClient implements Closeable, Serializable {
 
   void noteGather(long heapFraction, long memAvailable, long gatherBytes) {
     long ceiling = memoryLimitBytes > 0L ? memoryLimitBytes : memoryBudget;
+    long move = lastMove;
+    if (move <= 0L) {
+      long seed = baselineBytes > 0L ? baselineBytes : memoryBudget;
+      move = DriverHeap.openingMove(seed);
+    }
     DriverHeap.BudgetStep step =
         DriverHeap.adjust(
-            memoryBudget, ceiling, calmStreak, hotStreak, heapFraction, memAvailable, gatherBytes);
+            memoryBudget,
+            ceiling,
+            calmStreak,
+            hotStreak,
+            heapFraction,
+            memAvailable,
+            gatherBytes,
+            move,
+            lastShrank);
     if (step.budget != memoryBudget) {
       // TODO: drop this soak line to debug before a provider release.
       LOG.info(DriverHeap.budgetChange(memoryBudget, step.budget));
       memoryBudget = step.budget;
+      lastMove = step.lastMove;
+      lastShrank = step.lastShrank;
     }
     calmStreak = step.calmStreak;
     hotStreak = step.hotStreak;

@@ -15,7 +15,9 @@ final class DriverHeap {
   static final int GROW_STREAK = 8;
   static final int SHRINK_STREAK = 2;
   static final long BUDGET_FLOOR_BYTES = 4L * 1024L * 1024L;
-  static final long GROW_MIN_AVAILABLE = 2L * 1024L * 1024L * 1024L;
+  static final long STEP_FLOOR_BYTES = 1024L * 1024L;
+  static final long GROW_MIN_AVAILABLE = 1024L * 1024L * 1024L;
+  static final int APPROACH_PERCENT = 35;
   static final int BUDGET_DIVISOR = 64;
   static final int LIMIT_DIVISOR = 32;
 
@@ -80,22 +82,61 @@ final class DriverHeap {
     return batchSize > 0L ? batchSize : 0L;
   }
 
-  /** One eighth less, and not under the floor. Fraction under 50 does not move. */
-  static long nextBudget(long current, long heapFraction) {
+  /** First step. One eighth of the seed, and not under one mebibyte. */
+  static long openingMove(long seed) {
+    if (seed <= 0L) {
+      return STEP_FLOOR_BYTES;
+    }
+    return Math.max(seed / 8L, STEP_FLOOR_BYTES);
+  }
+
+  /** Half of {@code lastMove}, and not under one mebibyte. */
+  static long halfMove(long lastMove) {
+    long move = lastMove > 0L ? lastMove : STEP_FLOOR_BYTES;
+    return Math.max(move / 2L, STEP_FLOOR_BYTES);
+  }
+
+  /**
+   * The fraction is in the top of the calm band, or the limit is within two steps. Available is not
+   * a second line. The grow gate is {@link #GROW_MIN_AVAILABLE}.
+   */
+  static boolean approaching(long current, long ceiling, long lastMove, long heapFraction) {
+    if (heapFraction >= APPROACH_PERCENT) {
+      return true;
+    }
+    long move = lastMove > 0L ? lastMove : STEP_FLOOR_BYTES;
+    return ceiling > current && ceiling - current <= move * 2L;
+  }
+
+  /**
+   * Repeats {@code lastMove} while the minute is calm. Halves it near the band, near the limit, or
+   * on the grow that follows a shrink.
+   */
+  static long growDelta(
+      long current, long ceiling, long lastMove, long heapFraction, boolean lastShrank) {
+    long move = lastMove > 0L ? lastMove : STEP_FLOOR_BYTES;
+    if (lastShrank || approaching(current, ceiling, move, heapFraction)) {
+      return halfMove(move);
+    }
+    return move;
+  }
+
+  /** Half the last move, and not under the floor. Fraction under 50 does not move. */
+  static long nextBudget(long current, long heapFraction, long lastMove) {
     if (current <= BUDGET_FLOOR_BYTES || heapFraction < SHRINK_PERCENT) {
       return current;
     }
-    long stepped = current - Math.max(current / 8L, 1L);
-    return Math.max(stepped, BUDGET_FLOOR_BYTES);
+    return Math.max(current - halfMove(lastMove), BUDGET_FLOOR_BYTES);
   }
 
-  /** One eighth more, and not past {@code ceiling}. The caller passes {@code memoryLimit}. */
-  static long growStep(long current, long ceiling) {
+  /** Adds the remembered step, and not past {@code ceiling}. */
+  static long growStep(
+      long current, long ceiling, long lastMove, long heapFraction, boolean lastShrank) {
     if (current <= 0L || current >= ceiling) {
       return current;
     }
-    long stepped = current + Math.max(current / 8L, 1L);
-    return Math.min(stepped, ceiling);
+    long add = growDelta(current, ceiling, lastMove, heapFraction, lastShrank);
+    return Math.min(current + add, ceiling);
   }
 
   static boolean filled(long gatherBytes, long budget) {
@@ -103,9 +144,9 @@ final class DriverHeap {
   }
 
   /**
-   * Step down one eighth after {@link #SHRINK_STREAK} gathers in a row at {@link #SHRINK_PERCENT}.
-   * Otherwise count a cool gather, and step up only after {@link #GROW_STREAK} of them when the
-   * latest gather filled the cap.
+   * Step down by half the last move after {@link #SHRINK_STREAK} gathers in a row at {@link
+   * #SHRINK_PERCENT}. Otherwise count a cool gather, and step up by the remembered move only after
+   * {@link #GROW_STREAK} of them when the latest gather filled the cap.
    */
   static BudgetStep adjust(
       long current,
@@ -114,7 +155,10 @@ final class DriverHeap {
       int hotStreak,
       long heapFraction,
       long memAvailable,
-      long gatherBytes) {
+      long gatherBytes,
+      long lastMove,
+      boolean lastShrank) {
+    long move = lastMove > 0L ? lastMove : STEP_FLOOR_BYTES;
     // An empty gather is the pause, not a batch that was too big. It does not count as hot, and it
     // does not forget a hot gather that came before it.
     if (gatherBytes <= 0L) {
@@ -122,37 +166,47 @@ final class DriverHeap {
           heapFraction >= 0L && heapFraction < GROW_PERCENT && memAvailable >= GROW_MIN_AVAILABLE
               ? calmStreak + 1
               : 0;
-      return new BudgetStep(current, idleStreak, hotStreak);
+      return new BudgetStep(current, idleStreak, hotStreak, move, lastShrank);
     }
     if (heapFraction >= SHRINK_PERCENT) {
       int hot = hotStreak + 1;
       if (hot >= SHRINK_STREAK) {
-        return new BudgetStep(nextBudget(current, heapFraction), 0, 0);
+        long next = nextBudget(current, heapFraction, move);
+        long applied = current - next;
+        if (applied <= 0L) {
+          return new BudgetStep(current, 0, 0, move, lastShrank);
+        }
+        return new BudgetStep(next, 0, 0, Math.max(applied, STEP_FLOOR_BYTES), true);
       }
-      return new BudgetStep(current, 0, hot);
+      return new BudgetStep(current, 0, hot, move, lastShrank);
     }
     int streak =
         heapFraction >= 0L && heapFraction < GROW_PERCENT && memAvailable >= GROW_MIN_AVAILABLE
             ? calmStreak + 1
             : 0;
     if (streak >= GROW_STREAK && filled(gatherBytes, current) && current < ceiling) {
-      long grown = growStep(current, ceiling);
+      long grown = growStep(current, ceiling, move, heapFraction, lastShrank);
       if (grown > current) {
-        return new BudgetStep(grown, 0, 0);
+        long applied = grown - current;
+        return new BudgetStep(grown, 0, 0, Math.max(applied, STEP_FLOOR_BYTES), false);
       }
     }
-    return new BudgetStep(current, streak, 0);
+    return new BudgetStep(current, streak, 0, move, lastShrank);
   }
 
   static final class BudgetStep {
     final long budget;
     final int calmStreak;
     final int hotStreak;
+    final long lastMove;
+    final boolean lastShrank;
 
-    BudgetStep(long budget, int calmStreak, int hotStreak) {
+    BudgetStep(long budget, int calmStreak, int hotStreak, long lastMove, boolean lastShrank) {
       this.budget = budget;
       this.calmStreak = calmStreak;
       this.hotStreak = hotStreak;
+      this.lastMove = lastMove;
+      this.lastShrank = lastShrank;
     }
   }
 
