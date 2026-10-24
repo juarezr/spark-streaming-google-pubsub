@@ -1,6 +1,8 @@
 package io.github.juarezr.spark.pubsub.structured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -165,6 +167,273 @@ class PubSubClientTest {
     assertTrue(queue.isEmpty());
   }
 
+  @Test
+  void requeueReturnsOverflowOnTheNextPollWithinOneBatch() throws Exception {
+    int oneMib = 1024 * 1024;
+    PubSubConfig config =
+        PubSubConfig.builder().projectId("p").subscription("s").batchSize(oneMib).build();
+    PubSubClient client = new PubSubClient(config);
+    setField(client, "subscriber", mock(Subscriber.class));
+    setField(client, "stopped", new AtomicBoolean(false));
+    ConcurrentHashMap<String, AckReplyConsumer> consumers = new ConcurrentHashMap<>();
+    AckReplyConsumer firstConsumer = mock(AckReplyConsumer.class);
+    AckReplyConsumer secondConsumer = mock(AckReplyConsumer.class);
+    consumers.put("a", firstConsumer);
+    consumers.put("b", secondConsumer);
+    setField(client, "consumers", consumers);
+    LinkedBlockingQueue<PubSubClient.HeldMessage> queue = new LinkedBlockingQueue<>();
+    queue.put(heldBytes("a", 1_000L, firstConsumer, new byte[oneMib]));
+    queue.put(heldBytes("b", 2_000L, secondConsumer, new byte[oneMib]));
+    setField(client, "queue", queue);
+    setField(client, "queuedBytes", new AtomicLong(2L * oneMib));
+
+    List<PulledMessage> polled = client.poll(Duration.ofSeconds(1));
+
+    assertEquals(2, polled.size());
+    assertEquals(0L, client.queuedBytes());
+    client.requeue(List.of(polled.get(1)));
+
+    assertEquals(oneMib, client.queuedBytes());
+    assertTrue(client.queuedBytes() <= config.batchSize());
+    verify(firstConsumer, never()).nack();
+    verify(secondConsumer, never()).nack();
+
+    List<PulledMessage> next = client.poll(Duration.ofMillis(200));
+
+    assertEquals(1, next.size());
+    assertEquals("b", next.get(0).messageId());
+    assertEquals(0L, client.queuedBytes());
+  }
+
+  @Test
+  void climbPassesTheBaselineAndLeavesOutstandingAtTwiceTheBaseline() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long limit = baseline * 2L;
+    setField(client, "memoryBudget", baseline);
+    setField(client, "baselineBytes", baseline);
+    setField(client, "flowSeedBytes", baseline);
+    setField(client, "memoryLimitBytes", limit);
+    setField(client, "calmStreak", DriverHeap.GROW_STREAK);
+
+    client.noteGather(20L, DriverHeap.GROW_MIN_AVAILABLE, baseline);
+
+    assertEquals(baseline + baseline / 8L, client.memoryBudget());
+    assertEquals(baseline, client.memoryBaseline());
+    assertEquals(limit, client.memoryLimit());
+  }
+
+  @Test
+  void retargetFollowsAHigherCapWhenNothingIsHeld() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long raised = baseline + baseline / 8L;
+    armFlow(client, baseline, baseline, raised, 0L, 0L);
+
+    client.retargetFlow();
+
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetNacksAPrefetchAndLeavesTheRemainder() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long raised = baseline + baseline / 8L;
+    AckReplyConsumer consumer = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, baseline, raised, 1000L, 5000L);
+    enqueue(client, consumer, 1000);
+
+    client.retargetFlow();
+
+    verify(consumer).nack();
+    assertEquals(0L, client.queuedBytes());
+    assertEquals(4000L, client.outstandingBytes());
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetKeepsOutstandingBytesWhenTheQueueIsEmpty() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long raised = baseline + baseline / 8L;
+    armFlow(client, baseline, baseline, raised, 0L, 1000L);
+
+    client.retargetFlow();
+
+    assertEquals(1000L, client.outstandingBytes());
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetFollowsAHalvedCap() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long live = baseline + baseline / 8L;
+    long halved = live / 2L;
+    armFlow(client, baseline, live, halved, 0L, 0L);
+
+    client.retargetFlow();
+
+    assertEquals(halved * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetSkipsWhenTheCapHasNotMoved() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    armFlow(client, baseline, baseline, baseline, 0L, 0L);
+
+    client.retargetFlow();
+
+    assertEquals(baseline * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetLeavesAPrefetchWhenTheCapHasNotMoved() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    AckReplyConsumer consumer = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, baseline, baseline, 1000L, 1000L);
+    enqueue(client, consumer, 1000);
+
+    client.retargetFlow();
+
+    verify(consumer, never()).nack();
+    assertEquals(1, client.queuedCount());
+    assertEquals(1000L, client.queuedBytes());
+    assertEquals(baseline * 2L, client.flowOutstandingBytes());
+  }
+
+  @Test
+  void retargetKeepsAReservationThatIsNotInTheQueue() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long raised = baseline + baseline / 8L;
+    long reserved = 22416L;
+    AckReplyConsumer queued = mock(AckReplyConsumer.class);
+    AckReplyConsumer inFlight = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, baseline, raised, 1000L + reserved, 5000L);
+    enqueue(client, queued, 1000);
+    getConsumers(client).put("in-flight", inFlight);
+
+    client.retargetFlow();
+
+    verify(queued).nack();
+    verify(inFlight, never()).nack();
+    assertEquals(reserved, client.queuedBytes());
+    assertEquals(4000L, client.outstandingBytes());
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+    assertSame(inFlight, getConsumers(client).get("in-flight"));
+  }
+
+  @Test
+  void takeDoesNotLeaveQueuedBytesBelowZero() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    setField(client, "subscriber", mock(Subscriber.class));
+    setField(client, "stopped", new AtomicBoolean(false));
+    setField(client, "queuedBytes", new AtomicLong(100));
+    LinkedBlockingQueue<PubSubClient.HeldMessage> queue = new LinkedBlockingQueue<>();
+    queue.put(heldBytes("wide", 1L, mock(AckReplyConsumer.class), new byte[500]));
+    setField(client, "queue", queue);
+
+    List<PulledMessage> pulled = client.poll(Duration.ofMillis(50));
+
+    assertEquals(1, pulled.size());
+    assertEquals(0L, client.queuedBytes());
+  }
+
+  @Test
+  void retargetNacksAPrefetchAndFollowsAHigherCap() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long raised = baseline + baseline / 8L;
+    AckReplyConsumer consumer = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, baseline, raised, 1000L, 1000L);
+    enqueue(client, consumer, 1000);
+
+    client.retargetFlow();
+
+    verify(consumer).nack();
+    assertEquals(0, client.queuedCount());
+    assertEquals(0L, client.queuedBytes());
+    assertEquals(0L, client.outstandingBytes());
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetNacksOnlyThePrefetchWhenABatchIsStillHeld() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long raised = baseline + baseline / 8L;
+    AckReplyConsumer consumer = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, baseline, raised, 1000L, 2000L);
+    enqueue(client, consumer, 1000);
+
+    client.retargetFlow();
+
+    verify(consumer).nack();
+    assertEquals(0, client.queuedCount());
+    assertEquals(1000L, client.outstandingBytes());
+    assertEquals(raised * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void retargetNacksAPrefetchAndFollowsAHalvedCap() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    long baseline = 64L * 1024L * 1024L;
+    long live = baseline + baseline / 8L;
+    long halved = live / 2L;
+    AckReplyConsumer consumer = mock(AckReplyConsumer.class);
+    armFlow(client, baseline, live, halved, 1000L, 1000L);
+    enqueue(client, consumer, 1000);
+
+    client.retargetFlow();
+
+    verify(consumer).nack();
+    assertEquals(0L, client.queuedBytes());
+    assertEquals(0L, client.outstandingBytes());
+    assertEquals(halved * 2L, client.flowOutstandingBytes());
+    assertEquals(baseline, client.memoryBaseline());
+  }
+
+  @Test
+  void reserveDoesNotPassTheCap() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    setField(client, "queuedBytes", new AtomicLong(0));
+    setField(client, "memoryBudget", 1000L);
+
+    assertTrue(client.tryReserve(400));
+    assertTrue(client.tryReserve(400));
+    assertEquals(800L, client.queuedBytes());
+    assertFalse(client.tryReserve(300));
+    assertEquals(800L, client.queuedBytes());
+    assertTrue(client.tryReserve(200));
+    assertEquals(1000L, client.queuedBytes());
+    assertFalse(client.tryReserve(1));
+    assertEquals(1000L, client.queuedBytes());
+  }
+
+  @Test
+  void emptyQueueTakesOneMessageLargerThanTheCap() throws Exception {
+    PubSubClient client = new PubSubClient(minimalConfig());
+    setField(client, "queuedBytes", new AtomicLong(0));
+    setField(client, "memoryBudget", 1000L);
+
+    assertTrue(client.tryReserve(1500));
+    assertEquals(1500L, client.queuedBytes());
+    assertFalse(client.tryReserve(1));
+    assertEquals(1500L, client.queuedBytes());
+  }
+
   private static PubSubClient newPubSubClientReadyForPoll() throws Exception {
     PubSubClient client = new PubSubClient(minimalConfig());
     setField(client, "subscriber", mock(Subscriber.class));
@@ -180,9 +449,32 @@ class PubSubClientTest {
 
   private static PubSubClient.HeldMessage held(
       String id, long publishMillis, AckReplyConsumer consumer) {
+    return heldBytes(id, publishMillis, consumer, new byte[] {1});
+  }
+
+  private static PubSubClient.HeldMessage heldBytes(
+      String id, long publishMillis, AckReplyConsumer consumer, byte[] data) {
     PulledMessage message =
-        new PulledMessage(id, new byte[] {1}, Collections.emptyMap(), publishMillis, "", id);
+        new PulledMessage(id, data, Collections.emptyMap(), publishMillis, "", id);
     return new PubSubClient.HeldMessage(message, consumer);
+  }
+
+  private static void enqueue(PubSubClient client, AckReplyConsumer consumer, int bytes)
+      throws Exception {
+    LinkedBlockingQueue<PubSubClient.HeldMessage> queue = new LinkedBlockingQueue<>();
+    queue.put(heldBytes("prefetch", 1_000L, consumer, new byte[bytes]));
+    setField(client, "queue", queue);
+    setField(client, "consumers", new ConcurrentHashMap<String, AckReplyConsumer>());
+  }
+
+  private static void armFlow(
+      PubSubClient client, long baseline, long flowSeed, long budget, long queued, long outstanding)
+      throws Exception {
+    setField(client, "baselineBytes", baseline);
+    setField(client, "flowSeedBytes", flowSeed);
+    setField(client, "memoryBudget", budget);
+    setField(client, "queuedBytes", new AtomicLong(queued));
+    setField(client, "outstandingBytes", new AtomicLong(outstanding));
   }
 
   private static PubSubConfig minimalConfig() {

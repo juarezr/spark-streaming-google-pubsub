@@ -77,6 +77,15 @@ final class AdmissionLimits {
     return new AdmissionLimits(maxRows, maxBytes, minRows, waitTime, singlePoll, drainUntilIdle);
   }
 
+  /** A positive budget tightens {@code maxBytes}. Zero leaves the configured cap alone. */
+  AdmissionLimits withMemoryBudget(long budget) {
+    if (budget <= 0L) {
+      return this;
+    }
+    long capped = maxBytes == UNLIMITED ? budget : Math.min(maxBytes, budget);
+    return new AdmissionLimits(maxRows, capped, minRows, waitTime, singlePoll, drainUntilIdle);
+  }
+
   /**
    * AvailableNow drain: ignore {@code receiveTime} / single-receive early exit; stop at caps or
    * consecutive empty polls.

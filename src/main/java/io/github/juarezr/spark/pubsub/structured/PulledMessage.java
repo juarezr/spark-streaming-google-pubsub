@@ -68,6 +68,20 @@ final class PulledMessage implements Serializable {
     return ackId;
   }
 
+  /** Ack id kept, payload dropped. The written batch no longer needs the bytes. */
+  PulledMessage withoutPayload() {
+    return new PulledMessage(
+        messageId, new byte[0], Map.of(), publishTimeMillis, orderingKey, ackId);
+  }
+
+  static List<PulledMessage> withoutPayloads(List<PulledMessage> messages) {
+    List<PulledMessage> stripped = new ArrayList<>(messages.size());
+    for (PulledMessage message : messages) {
+      stripped.add(message.withoutPayload());
+    }
+    return stripped;
+  }
+
   static List<String> ackIds(List<PulledMessage> messages) {
     if (messages == null || messages.isEmpty()) {
       return List.of();

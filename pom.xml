@@ -441,7 +441,7 @@
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-failsafe-plugin</artifactId>
             <configuration>
-              <argLine>@{argLine} ${spark.jvm.args}</argLine>
+              <argLine>@{jacoco.agent.it.argLine} ${spark.jvm.args}</argLine>
             </configuration>
           </plugin>
           <plugin>
@@ -460,6 +460,28 @@
                 <goals>
                   <goal>prepare-agent-integration</goal>
                 </goals>
+                <configuration>
+                  <propertyName>jacoco.agent.it.argLine</propertyName>
+                </configuration>
+              </execution>
+              <execution>
+                <id>merge</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>merge</goal>
+                </goals>
+                <configuration>
+                  <fileSets>
+                    <fileSet>
+                      <directory>${project.build.directory}</directory>
+                      <includes>
+                        <include>jacoco.exec</include>
+                        <include>jacoco-it.exec</include>
+                      </includes>
+                    </fileSet>
+                  </fileSets>
+                  <destFile>${project.build.directory}/jacoco-merged.exec</destFile>
+                </configuration>
               </execution>
               <execution>
                 <id>report</id>
@@ -467,6 +489,9 @@
                 <goals>
                   <goal>report</goal>
                 </goals>
+                <configuration>
+                  <dataFile>${project.build.directory}/jacoco-merged.exec</dataFile>
+                </configuration>
               </execution>
             </executions>
           </plugin>

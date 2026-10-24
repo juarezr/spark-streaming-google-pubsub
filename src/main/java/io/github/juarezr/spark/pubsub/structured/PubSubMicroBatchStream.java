@@ -59,10 +59,16 @@ final class PubSubMicroBatchStream
   private volatile PublishTimeWindow lastGatheredWindow;
   private final ConcurrentMap<Long, List<PulledMessage>> messagesByBatch =
       new ConcurrentHashMap<>();
-  private final AutoBatchTime autoBatchTime;
+  private final AutoReceiveTime autoReceiveTime;
+  private final IntakePace intakePace = new IntakePace();
   private volatile boolean cancelled;
   private volatile boolean availableNow;
   private volatile boolean limitReached;
+  private volatile boolean heapStartupLogged;
+  private long releasedBatchId = Long.MIN_VALUE;
+  private long previousHeapUsed = Long.MIN_VALUE;
+  private long previousRss = Long.MIN_VALUE;
+  private long previousMemAvailable = Long.MIN_VALUE;
 
   PubSubMicroBatchStream(PubSubConfig config, int numPartitions) {
     this(config, numPartitions, PubSubSchema.tableSchema(config, null));
@@ -87,7 +93,7 @@ final class PubSubMicroBatchStream
     this.readSchema = readSchema == null ? PubSubSchema.tableSchema(config, null) : readSchema;
     this.client = client;
     this.ackCoordinator = new AckCoordinator(config.ackMode());
-    this.autoBatchTime = AutoBatchTime.create(config);
+    this.autoReceiveTime = AutoReceiveTime.create(config);
     this.numPartitions = Math.max(1, numPartitions);
     if (!startClient) {
       return;
@@ -158,7 +164,7 @@ final class PubSubMicroBatchStream
       resetMetrics();
       return nullIfEmpty ? null : this.currentOffset;
     }
-    if (!availableNow && autoBatchTime.shouldProbe()) {
+    if (!availableNow && autoReceiveTime.shouldProbe()) {
       resetMetrics();
       return nullIfEmpty ? null : currentOffset;
     }
@@ -180,7 +186,7 @@ final class PubSubMicroBatchStream
     String batchKey = Long.toString(batchId);
     messagesByBatch.put(batchId, pulled);
     try {
-      if (config.ackMode() == AckMode.AFTER_COMMIT) {
+      if (holdsUntilCheckpoint()) {
         ackCoordinator.registerBatch(batchKey, pulled);
       } else if (config.gatherMode() == GatherMode.IMMEDIATE) {
         ackCoordinator.registerBatch(batchKey, pulled);
@@ -215,11 +221,56 @@ final class PubSubMicroBatchStream
     }
   }
 
+  /**
+   * The previous batch is already written when the next gather starts. Spark commits it only after
+   * {@code latestOffset} returns. Ack it before the subscriber is stopped, and remember the id so
+   * {@link #commit} does not release those bytes again.
+   *
+   * @return false when the ack fails and the subscriber must stay
+   */
+  private boolean releaseWrittenBatch() {
+    if (!holdsUntilCheckpoint() || lastProduced == null) {
+      return true;
+    }
+    long batchId = lastProduced.batchId();
+    if (batchId == releasedBatchId) {
+      return true;
+    }
+    List<PulledMessage> pending = messagesByBatch.get(batchId);
+    if (pending == null || pending.isEmpty()) {
+      return true;
+    }
+    List<String> ackIds = PulledMessage.ackIds(pending);
+    try {
+      client.acknowledge(ackIds);
+    } catch (RuntimeException e) {
+      LOG.warn("BATCH: Failed to ack written batch {}", batchId, e);
+      return false;
+    }
+    client.releaseMessages(pending);
+    releasedBatchId = batchId;
+    List<PulledMessage> stripped = PulledMessage.withoutPayloads(pending);
+    messagesByBatch.put(batchId, stripped);
+    ackCoordinator.replaceBatch(Long.toString(batchId), stripped);
+    return true;
+  }
+
+  private boolean holdsUntilCheckpoint() {
+    return config.ackMode() == AckMode.AFTER_COMMIT || config.ackMode() == AckMode.AFTER_CHECKPOINT;
+  }
+
   private List<PulledMessage> gatherMessages(AdmissionLimits gatherLimits) {
+    boolean release = config.ackMode() == AckMode.AFTER_CHECKPOINT || client.capMoved();
+    if (!release || releaseWrittenBatch()) {
+      client.retargetFlow();
+    }
+    client.noteCycleBudget(autoReceiveTime.cycleBudget());
     AdmissionLimits limits =
         availableNow
             ? gatherLimits.withDrainUntilIdle()
-            : gatherLimits.withWaitTime(this.autoBatchTime.receiveWindow(gatherLimits.waitTime()));
+            : gatherLimits.withWaitTime(
+                this.autoReceiveTime.receiveWindow(gatherLimits.waitTime()));
+    limits = limits.withMemoryBudget(client.memoryBudget());
 
     long gatherStarted = System.nanoTime();
     List<PulledMessage> pulled =
@@ -230,7 +281,12 @@ final class PubSubMicroBatchStream
                 : gatherMessagesUntilDeadline(limits);
     long gatherFinished = System.nanoTime();
 
-    this.autoBatchTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
+    this.autoReceiveTime.onGatherFinished(gatherFinished - gatherStarted, pulled.size());
+    client.noteCycleBudget(autoReceiveTime.cycleBudget());
+    long payloadBytes = PulledMessage.payloadBytes(pulled);
+    long heapFraction = logDriverHeap("gather", payloadBytes, pulled.size());
+    client.noteGather(heapFraction, previousMemAvailable, payloadBytes);
+    noteIntakeLag(pulled);
     return pulled;
   }
 
@@ -241,6 +297,9 @@ final class PubSubMicroBatchStream
       return messages;
     }
     if (limits.remainingRows(0) <= 0) {
+      return messages;
+    }
+    if (stopForHeapCeiling()) {
       return messages;
     }
     List<PulledMessage> pulled = poll(limits, messages.size(), RECEIVE_IDLE);
@@ -263,6 +322,26 @@ final class PubSubMicroBatchStream
         if (limits.reachedMax(messages.size(), payloadBytes)
             || limits.remainingRows(messages.size()) <= 0) {
           break;
+        }
+        if (client.aboveHeapCeiling()) {
+          client.noteHeapCeiling();
+          if (!messages.isEmpty()) {
+            break;
+          }
+          // One millisecond reads the local queue and does not wait on the subscriber.
+          List<PulledMessage> waiting = poll(limits, messages.size(), Duration.ofMillis(1));
+          if (waiting != null && !waiting.isEmpty()) {
+            RetainResult retained = retainPolled(messages, waiting, limits, payloadBytes);
+            messages = retained.messages;
+            break;
+          }
+          try {
+            Thread.sleep(10);
+          } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return abortGatherNackAndRelease(messages, null);
+          }
+          continue;
         }
         Duration slice = remainingWait(deadlineNanos);
         List<PulledMessage> pulled = poll(limits, messages.size(), slice);
@@ -339,14 +418,10 @@ final class PubSubMicroBatchStream
       payloadBytes += message.data().length;
     }
     if (!overflow.isEmpty()) {
-      if (config.ackMode() == AckMode.AFTER_COMMIT) {
-        try {
-          client.nack(PulledMessage.ackIds(overflow));
-        } catch (RuntimeException e) {
-          LOG.warn("BATCH: Failed to nack overflow messages: {}", e.getMessage());
-        } finally {
-          client.releaseMessages(overflow);
-        }
+      try {
+        client.requeue(overflow);
+      } catch (RuntimeException e) {
+        LOG.warn("BATCH: Failed to requeue overflow messages: {}", e.getMessage());
       }
     }
     List<PulledMessage> kept =
@@ -373,6 +448,9 @@ final class PubSubMicroBatchStream
         }
         if (limits.reachedMax(messages.size(), payloadBytes)
             || limits.remainingRows(messages.size()) <= 0) {
+          break;
+        }
+        if (stopForHeapCeiling()) {
           break;
         }
         List<PulledMessage> pulled = poll(limits, messages.size(), RECEIVE_IDLE);
@@ -471,7 +549,7 @@ final class PubSubMicroBatchStream
     if (pulled != null) {
       messages.addAll(pulled);
     }
-    if (config.ackMode() == AckMode.AFTER_COMMIT && !messages.isEmpty()) {
+    if (holdsUntilCheckpoint() && !messages.isEmpty()) {
       try {
         client.nack(PulledMessage.ackIds(messages));
       } catch (RuntimeException nackError) {
@@ -569,8 +647,11 @@ final class PubSubMicroBatchStream
   public void commit(Offset end) {
     PubSubOffset endOffset = (PubSubOffset) end;
     String batchKey = Long.toString(endOffset.batchId());
-    if (config.ackMode() == AckMode.AFTER_COMMIT) {
-      List<PulledMessage> messages = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
+    List<PulledMessage> committed = messagesByBatch.getOrDefault(endOffset.batchId(), List.of());
+    long committedBytes = PulledMessage.payloadBytes(committed);
+    boolean alreadyReleased = endOffset.batchId() == releasedBatchId;
+    if (holdsUntilCheckpoint()) {
+      List<PulledMessage> messages = committed;
       List<String> ackIds = PulledMessage.ackIds(messages);
       try {
         if (!ackIds.isEmpty()) {
@@ -594,7 +675,7 @@ final class PubSubMicroBatchStream
           }
         }
       } finally {
-        if (!ackIds.isEmpty()) {
+        if (!ackIds.isEmpty() && !alreadyReleased) {
           client.releaseMessages(messages);
         }
         ackCoordinator.discard(batchKey);
@@ -607,7 +688,8 @@ final class PubSubMicroBatchStream
       currentOffset = endOffset;
     }
     LOG.debug("BATCH: Committed offset batchId={}", endOffset.batchId());
-    autoBatchTime.onCommit();
+    logDriverHeap("commit", committedBytes, committed.size());
+    autoReceiveTime.onCommit();
   }
 
   @Override
@@ -615,7 +697,9 @@ final class PubSubMicroBatchStream
     cancelled = true;
     try {
       int uncommitted = 0;
-      if (lastProduced != null && config.ackMode() == AckMode.AFTER_COMMIT) {
+      if (lastProduced != null
+          && holdsUntilCheckpoint()
+          && lastProduced.batchId() != releasedBatchId) {
         String batchKey = Long.toString(lastProduced.batchId());
         List<PulledMessage> messages = ackCoordinator.messagesForBatch(batchKey);
         if (!messages.isEmpty()) {
@@ -644,6 +728,64 @@ final class PubSubMicroBatchStream
     LOG.info(window.formatStats(batchId, "BATCH: First batch:"));
   }
 
+  private boolean stopForHeapCeiling() {
+    if (!client.aboveHeapCeiling()) {
+      return false;
+    }
+    client.noteHeapCeiling();
+    return true;
+  }
+
+  private void noteIntakeLag(List<PulledMessage> pulled) {
+    Long ageMs = PubSubSourceMetrics.newestMessageAgeMs(pulled, System.currentTimeMillis());
+    if (ageMs == null) {
+      return;
+    }
+    Duration cycle = autoReceiveTime.cycleBudget();
+    long triggerMs = cycle == null ? 0L : cycle.toMillis();
+    String warning = intakePace.observe(System.currentTimeMillis(), ageMs, triggerMs);
+    if (warning != null) {
+      LOG.warn(warning);
+    }
+  }
+
+  private long logDriverHeap(String at, long gatherBytes, int gatherMsgs) {
+    Runtime runtime = Runtime.getRuntime();
+    long heapMax = runtime.maxMemory();
+    long heapUsed = DriverHeap.used(runtime.totalMemory(), runtime.freeMemory());
+    long rss = DriverHeap.residentBytes();
+    long memAvailable = DriverHeap.availableBytes();
+    long memTotal = DriverHeap.totalBytes();
+    // TODO: drop this soak line to debug before a provider release.
+    if (!heapStartupLogged) {
+      heapStartupLogged = true;
+      LOG.info(
+          DriverHeap.startup(heapMax, memTotal, client.memoryBaseline(), client.memoryLimit()));
+    }
+    LOG.info(
+        DriverHeap.line(
+            at,
+            heapMax,
+            heapUsed,
+            DriverHeap.percent(heapUsed, heapMax),
+            DriverHeap.change(previousHeapUsed, heapUsed),
+            rss,
+            DriverHeap.change(previousRss, rss),
+            memAvailable,
+            DriverHeap.change(previousMemAvailable, memAvailable),
+            memTotal,
+            DriverHeap.percent(memAvailable, memTotal),
+            gatherBytes,
+            gatherMsgs,
+            client.queuedBytes(),
+            client.queuedCount(),
+            client.memoryBudget()));
+    previousHeapUsed = heapUsed;
+    previousRss = rss;
+    previousMemAvailable = memAvailable;
+    return DriverHeap.percent(heapUsed, heapMax);
+  }
+
   private void logStop(int uncommitted) {
     PublishTimeWindow window = lastGatheredWindow;
     if (window == null) {
@@ -663,6 +805,10 @@ final class PubSubMicroBatchStream
 
   PublishTimeWindow lastGatheredWindow() {
     return lastGatheredWindow;
+  }
+
+  List<PulledMessage> retainedMessages(long batchId) {
+    return messagesByBatch.getOrDefault(batchId, List.of());
   }
 
   boolean firstBatchLogged() {

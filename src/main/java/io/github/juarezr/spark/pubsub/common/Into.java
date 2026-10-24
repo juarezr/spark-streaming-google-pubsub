@@ -40,13 +40,11 @@ public final class Into {
   }
 
   private static String elapsedMs(long millis) {
-    if (millis % 60000L == 0L) {
-      if (millis > 600000L) {
-        return (millis / 60000L) + "min";
-      }
+    if (millis > 600000L) {
       return String.format("%d:%02d", millis / 60000L, (millis % 60000L) / 1000L);
-    } else if (millis % 1000L == 0L) {
-      return (millis / 1000L) + "s";
+    }
+    if (millis > 99999L) {
+      return String.format("%.1fm", millis / 60000f).replace(".0", "");
     }
     return millis + "ms";
   }
