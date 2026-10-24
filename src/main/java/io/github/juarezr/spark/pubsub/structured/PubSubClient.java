@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
@@ -68,6 +69,7 @@ final class PubSubClient implements Closeable, Serializable {
   private int hotStreak;
   private long lastMove;
   private boolean lastShrank;
+  private int approachStreak;
   private volatile String pauseReason;
   private final AtomicLong cachedAvailableBytes = new AtomicLong(Long.MIN_VALUE);
   private final AtomicLong cachedAvailableAtMillis = new AtomicLong(Long.MIN_VALUE);
@@ -191,6 +193,7 @@ final class PubSubClient implements Closeable, Serializable {
     this.memoryLimitBytes = limit;
     this.lastMove = DriverHeap.openingMove(seeded);
     this.lastShrank = false;
+    this.approachStreak = 0;
 
     this.emulator = this.config.emulatorHost().map(PubSubEmulator::new).orElse(null);
     try {
@@ -289,6 +292,10 @@ final class PubSubClient implements Closeable, Serializable {
     }
     try {
       previous.stopAsync().awaitTerminated(5, TimeUnit.SECONDS);
+    } catch (TimeoutException e) {
+      // The replacement is already serving. The old one can finish stopping after this gather.
+      LOG.info(
+          "CONNECTION: new subscriber is already serving; the previous one was still stopping");
     } catch (Exception e) {
       LOG.warn("CONNECTION: Error shutting down subscriber", e);
     }
@@ -620,6 +627,7 @@ final class PubSubClient implements Closeable, Serializable {
       long seed = baselineBytes > 0L ? baselineBytes : memoryBudget;
       move = DriverHeap.openingMove(seed);
     }
+    long opening = DriverHeap.openingMove(baselineBytes > 0L ? baselineBytes : memoryBudget);
     DriverHeap.BudgetStep step =
         DriverHeap.adjust(
             memoryBudget,
@@ -630,7 +638,9 @@ final class PubSubClient implements Closeable, Serializable {
             memAvailable,
             gatherBytes,
             move,
-            lastShrank);
+            lastShrank,
+            approachStreak,
+            opening);
     if (step.budget != memoryBudget) {
       // TODO: drop this soak line to debug before a provider release.
       LOG.info(DriverHeap.budgetChange(memoryBudget, step.budget));
@@ -640,6 +650,7 @@ final class PubSubClient implements Closeable, Serializable {
     }
     calmStreak = step.calmStreak;
     hotStreak = step.hotStreak;
+    approachStreak = step.approachStreak;
   }
 
   /**

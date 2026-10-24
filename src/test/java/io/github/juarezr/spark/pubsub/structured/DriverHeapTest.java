@@ -164,8 +164,7 @@ class DriverHeapTest {
     long near = ceiling - lastMove;
 
     assertEquals(current + lastMove, DriverHeap.growStep(current, ceiling, lastMove, 20L, false));
-    assertEquals(
-        current + lastMove / 2L, DriverHeap.growStep(current, ceiling, lastMove, 35L, false));
+    assertEquals(current + lastMove, DriverHeap.growStep(current, ceiling, lastMove, 36L, false));
     assertEquals(
         current + lastMove / 2L, DriverHeap.growStep(current, ceiling, lastMove, 20L, true));
     assertEquals(near + lastMove / 2L, DriverHeap.growStep(near, ceiling, lastMove, 20L, false));
@@ -304,8 +303,8 @@ class DriverHeapTest {
             second.budget,
             second.lastMove,
             false);
-    assertEquals(second.budget + lastMove / 2L, nearBand.budget);
-    assertEquals(lastMove / 2L, nearBand.lastMove);
+    assertEquals(second.budget + lastMove, nearBand.budget);
+    assertEquals(lastMove, nearBand.lastMove);
 
     DriverHeap.BudgetStep tight =
         DriverHeap.adjust(
@@ -330,6 +329,139 @@ class DriverHeapTest {
             true);
     assertEquals(shrank.budget + shrank.lastMove / 2L, recovered.budget);
     assertFalse(recovered.lastShrank);
+  }
+
+  @Test
+  void oneHighGatherKeepsTheStepAndTwoHalveIt() {
+    long current = 72L * 1024L * 1024L;
+    long limit = 128L * 1024L * 1024L;
+    long free = 2L * 1024L * 1024L * 1024L;
+    long lastMove = 8L * 1024L * 1024L;
+
+    DriverHeap.BudgetStep alone =
+        DriverHeap.adjust(
+            current,
+            limit,
+            DriverHeap.GROW_STREAK,
+            0,
+            36L,
+            free,
+            current,
+            lastMove,
+            false,
+            0,
+            lastMove);
+    assertEquals(current + lastMove, alone.budget);
+    assertEquals(lastMove, alone.lastMove);
+
+    DriverHeap.BudgetStep marked =
+        DriverHeap.adjust(current, limit, 0, 0, 35L, free, current, lastMove, false, 0, lastMove);
+    assertEquals(current, marked.budget);
+    assertEquals(1, marked.approachStreak);
+
+    DriverHeap.BudgetStep halved =
+        DriverHeap.adjust(
+            current,
+            limit,
+            DriverHeap.GROW_STREAK,
+            0,
+            35L,
+            free,
+            current,
+            lastMove,
+            false,
+            marked.approachStreak,
+            lastMove);
+    assertEquals(current + lastMove / 2L, halved.budget);
+    assertEquals(lastMove / 2L, halved.lastMove);
+  }
+
+  @Test
+  void calmGrowDoublesUpToTheOpeningStep() {
+    long current = 80L * 1024L * 1024L;
+    long limit = 128L * 1024L * 1024L;
+    long free = DriverHeap.RESTORE_MIN_AVAILABLE;
+    long opening = 8L * 1024L * 1024L;
+    long step = DriverHeap.STEP_FLOOR_BYTES;
+
+    DriverHeap.BudgetStep once =
+        DriverHeap.adjust(
+            current, limit, DriverHeap.GROW_STREAK, 0, 20L, free, current, step, false, 0, opening);
+    assertEquals(current + step * 2L, once.budget);
+    assertEquals(step * 2L, once.lastMove);
+
+    DriverHeap.BudgetStep twice =
+        DriverHeap.adjust(
+            once.budget,
+            limit,
+            DriverHeap.GROW_STREAK,
+            0,
+            20L,
+            free,
+            once.budget,
+            once.lastMove,
+            false,
+            0,
+            opening);
+    assertEquals(once.budget + step * 4L, twice.budget);
+
+    DriverHeap.BudgetStep thrice =
+        DriverHeap.adjust(
+            twice.budget,
+            limit,
+            DriverHeap.GROW_STREAK,
+            0,
+            20L,
+            free,
+            twice.budget,
+            twice.lastMove,
+            false,
+            0,
+            opening);
+    assertEquals(twice.budget + opening, thrice.budget);
+    assertEquals(opening, thrice.lastMove);
+
+    DriverHeap.BudgetStep held =
+        DriverHeap.adjust(
+            thrice.budget,
+            limit,
+            DriverHeap.GROW_STREAK,
+            0,
+            20L,
+            free,
+            thrice.budget,
+            thrice.lastMove,
+            false,
+            0,
+            opening);
+    assertEquals(thrice.budget + opening, held.budget);
+    assertEquals(opening, held.lastMove);
+
+    DriverHeap.BudgetStep atThirty =
+        DriverHeap.adjust(
+            current, limit, DriverHeap.GROW_STREAK, 0, 30L, free, current, step, false, 0, opening);
+    assertEquals(current + step, atThirty.budget);
+
+    DriverHeap.BudgetStep below =
+        DriverHeap.adjust(
+            current,
+            limit,
+            DriverHeap.GROW_STREAK,
+            0,
+            20L,
+            free - 1L,
+            current,
+            step,
+            false,
+            0,
+            opening);
+    assertEquals(current + step, below.budget);
+
+    DriverHeap.BudgetStep afterShrink =
+        DriverHeap.adjust(
+            current, limit, DriverHeap.GROW_STREAK, 0, 20L, free, current, step, true, 0, opening);
+    assertEquals(current + step, afterShrink.budget);
+    assertFalse(afterShrink.lastShrank);
   }
 
   @Test
