@@ -95,6 +95,11 @@ Do not republish an already-released version without the fat JAR (or with a diff
 
 The published POM pins `google-cloud-pubsub`, `google-auth-library-oauth2-http`, and `gson` to versions that stay compatible with Spark 3.5 / Dataproc 2.3. Those pins are not version ranges: a range would float consumers onto newer GAX/gRPC/Guava. Override the Google clients in your own POM or BOM if you need a newer stack.
 
+**SLF4J** and **Log4j** are `provided`: at runtime Spark supplies them; they are excluded from the
+shaded `*-all.jar`. **Gson** is compile-scoped, pinned, and included in the fat JAR (not relocated).
+Local builds align test Log4j with each Spark profile (`spark35` → 2.20.0, `spark40`/`spark41` →
+2.24.3, `spark42` → 2.25.4) so tests exercise the same Log4j line as that Spark release.
+
 ### Snapshot builds
 
 Snapshots are useful internally (`0.8.2-SNAPSHOT`) but are **not** published to Maven Central.

@@ -26,12 +26,19 @@ Authentication uses **Application Default Credentials (ADC)** unless you set `cr
 
 | Spark   | Scala | Artifact                                                     |
 |---------|-------|--------------------------------------------------------------|
-| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.4` |
-| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.9.4` |
+
+### Classpath and bundled libraries
 
 Prefer `--packages` or a Maven/Gradle dependency so Google client libraries come in as transitives.
 Fat JARs (`*-all.jar`) are not on Maven Central; build with `mvn package` or download them from
 [GitHub Releases](https://github.com/juarezr/spark-streaming-google-pubsub/releases).
+
+On a Spark cluster, **SLF4J** and **Log4j** come from the Spark distribution (`provided` in this
+project’s POM—they are not packaged in the connector JAR). **Gson** is pinned for offset JSON and
+is **shaded into the `*-all.jar`** fat artifact together with the Google Pub/Sub client stack; the
+thin JAR on Maven Central declares the same pinned `gson` version for Maven/Gradle resolution.
+See [Thin JAR dependencies](docs/publishing-maven-central.md#thin-jar-dependencies) for override
+guidance.
 
 ## Quick start
 
