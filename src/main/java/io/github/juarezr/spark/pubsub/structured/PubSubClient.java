@@ -298,7 +298,7 @@ final class PubSubClient implements Closeable, Serializable {
       previous.stopAsync().awaitTerminated(5, TimeUnit.SECONDS);
     } catch (TimeoutException e) {
       // The replacement is already serving. The old one can finish stopping after this gather.
-      LOG.info(
+      LOG.debug(
           "CONNECTION: new subscriber is already serving; the previous one was still stopping");
     } catch (Exception e) {
       LOG.warn("CONNECTION: Error shutting down subscriber", e);
@@ -306,8 +306,7 @@ final class PubSubClient implements Closeable, Serializable {
   }
 
   private void logSubscriberOutstanding(long previousSeed, long nextSeed) {
-    // TODO: drop this soak line to debug before a provider release.
-    LOG.info(
+    LOG.debug(
         "HEAP: subscriber outstanding {} -> {}",
         outstandingLimit(previousSeed),
         outstandingLimit(nextSeed));
@@ -646,8 +645,7 @@ final class PubSubClient implements Closeable, Serializable {
             approachStreak,
             opening);
     if (step.budget != memoryBudget) {
-      // TODO: drop this soak line to debug before a provider release.
-      LOG.info(DriverHeap.budgetChange(memoryBudget, step.budget));
+      LOG.debug(DriverHeap.budgetChange(memoryBudget, step.budget));
       memoryBudget = step.budget;
       lastMove = step.lastMove;
       lastShrank = step.lastShrank;
@@ -733,7 +731,7 @@ final class PubSubClient implements Closeable, Serializable {
     boolean heap = heapAboveCeiling();
     boolean host = DriverHeap.belowHostReserve(cachedAvailable(System.currentTimeMillis()));
     if (!heap && !host && intakePaused.compareAndSet(true, false)) {
-      LOG.info(
+      LOG.debug(
           "HEAP: resumed taking messages reason={} {}",
           pauseReason == null ? "unknown" : pauseReason,
           memoryReadings());
@@ -773,7 +771,7 @@ final class PubSubClient implements Closeable, Serializable {
     }
     if (DriverHeap.collectDue(hostPauseSinceMillis, now, cycleBudgetMillis, hostCollected)) {
       hostCollected = true;
-      LOG.info(
+      LOG.debug(
           "HEAP: collected once after cycleBudget while host MemAvailable is below {} bytes; {}",
           DriverHeap.HOST_RESERVE_BYTES,
           memoryReadings());
@@ -792,7 +790,7 @@ final class PubSubClient implements Closeable, Serializable {
     boolean host = DriverHeap.belowHostReserve(cachedAvailable(now));
     if ((heap || host) && intakePaused.compareAndSet(false, true)) {
       pauseReason = DriverHeap.pauseReason(heap, host);
-      LOG.info("HEAP: paused intake reason={} {}", pauseReason, memoryReadings());
+      LOG.debug("HEAP: paused intake reason={} {}", pauseReason, memoryReadings());
     }
     if (heap && claimHourly(lastHeapCeilingWarnMillis, now)) {
       Runtime runtime = Runtime.getRuntime();

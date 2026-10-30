@@ -327,7 +327,7 @@ final class AutoReceiveTime {
     }
     if (probeStartedNanos == null) {
       probeStartedNanos = now;
-      LOG.info(
+      LOG.debug(
           "AUTO phase=probe cycleBudget=unset receiveBudget=unset"
               + " (empty micro-batch until the trigger gap is consistent)");
       return true;
@@ -347,8 +347,7 @@ final class AutoReceiveTime {
     }
     probeNoiseCount = 0;
     recordProbeGap(gap);
-    // TODO: soak-only: remove or lower it to debug level before a provider release
-    LOG.info("AUTO phase=probe gap={}ms", TimeUnit.NANOSECONDS.toMillis(gap));
+    LOG.debug("AUTO phase=probe gap={}ms", TimeUnit.NANOSECONDS.toMillis(gap));
     probeStartedNanos = now;
     if (processingTimeHint != null) {
       finishProbe(wholeSecondNanos(processingTimeHint.toNanos()));
@@ -426,7 +425,7 @@ final class AutoReceiveTime {
     receiveBudgetNanos = cycleBudgetNanos / 2;
     writeBudgetNanos = cycleBudgetNanos - receiveBudgetNanos - MARGIN_NANOS;
     phase = Phase.WARMUP;
-    LOG.info(
+    LOG.debug(
         "AUTO phase=warmup cycleBudget={} receiveBudget={} writeBudget={} marginTimeEst=1s",
         Into.elapsed(cycleBudgetNanos),
         Into.elapsed(receiveBudgetNanos),
@@ -655,8 +654,7 @@ final class AutoReceiveTime {
     }
     OptionalLong tight = tightSecond(cycleWindow);
     cycleCount = 0;
-    // TODO: soak-only: remove or lower it to debug level before a provider release
-    LOG.info(
+    LOG.debug(
         "AUTO phase={} cycleCheck round={} pending={}",
         phase.name().toLowerCase(),
         tight.isPresent() ? Into.elapsed(tight.getAsLong()) : "unset",
@@ -692,8 +690,7 @@ final class AutoReceiveTime {
   }
 
   private void adoptEstimate(long next) {
-    // TODO: soak-only: remove or lower it to debug level before a provider release
-    LOG.info(
+    LOG.debug(
         "AUTO phase={} cycleBudget set {} -> {}",
         phase.name().toLowerCase(),
         Into.elapsed(cycleBudgetNanos),
@@ -773,9 +770,7 @@ final class AutoReceiveTime {
             perSecond(gatherCount, writeDurationNanos),
             perSecond(gatherCount, cycleDurationNanos),
             tailCount);
-    // TODO: soak-only: tailMedian, tailStdev, msgs, receiveRate, syncRate, cycleRate, and
-    // idleDuration — remove or lower this line to debug before a provider release
-    LOG.info(lastSnapshot.toString());
+    LOG.debug(lastSnapshot.toString());
   }
 
   private void enterZeroTrigger() {

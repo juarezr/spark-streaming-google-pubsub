@@ -756,13 +756,12 @@ final class PubSubMicroBatchStream
     long rss = DriverHeap.residentBytes();
     long memAvailable = DriverHeap.availableBytes();
     long memTotal = DriverHeap.totalBytes();
-    // TODO: drop this soak line to debug before a provider release.
     if (!heapStartupLogged) {
       heapStartupLogged = true;
-      LOG.info(
+      LOG.debug(
           DriverHeap.startup(heapMax, memTotal, client.memoryBaseline(), client.memoryLimit()));
     }
-    LOG.info(
+    LOG.debug(
         DriverHeap.line(
             at,
             heapMax,
