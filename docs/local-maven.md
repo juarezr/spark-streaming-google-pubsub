@@ -13,6 +13,9 @@ mvn -Pspark35 clean verify
 ## Spark profiles and integration tests
 
 Integration tests are compiled against the active Spark profile (`spark35`, `spark40`, etc.).
+Each profile sets `${log4j.version}` to match Log4j on that Spark line (3.5 → 2.20.0, 4.0/4.1 →
+2.24.3, 4.2/4.3 → 2.25.4). SLF4J and Log4j stay `provided` like on a cluster; gson is bundled only in
+the `*-all.jar` from `mvn package`.
 
 After changing the active profile, run `mvn clean test-compile` or `mvn clean verify` if you see
 stale test classes or `NoSuchMethodError` on Spark APIs.

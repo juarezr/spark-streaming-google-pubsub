@@ -60,7 +60,7 @@ The workflow:
 1. Sets the Maven version from the tag (`v` prefix stripped).
 2. Deploys to **GitHub Packages** with `-Pgithub-packages` (no `-Prelease`): flattened POM, thin JAR, sources, javadoc, and `-all`. This runs before Central so Packages survive Central slowness or 502s.
 3. After the Packages matrix jobs finish, attaches `*-all.jar` to the GitHub Release for the tag. This job does not wait on Maven Central.
-4. A separate matrix job deploys thin artifacts for Spark 3.5 (`_2.12`) and Spark 4.1 (`_2.13`) to **Maven Central** (`-Prelease` skips the shade plugin and signs). The `_2.13` JAR is tested in CI against Spark 4.0, 4.1, and 4.2.
+4. A separate matrix job deploys thin artifacts for Spark 3.5 (`_2.12`) and Spark 4.1 (`_2.13`) to **Maven Central** (`-Prelease` skips the shade plugin and signs). The `_2.13` JAR is tested in CI against Spark 4.0, 4.1, 4.2, and 4.3.
 
 CI waits until Central **validates** the bundle (`waitUntil=validated`), then **auto-publishes**. The job does not block until the artifact is live on search.maven.org.
 
@@ -94,6 +94,11 @@ Do not republish an already-released version without the fat JAR (or with a diff
 ### Thin JAR dependencies
 
 The published POM pins `google-cloud-pubsub`, `google-auth-library-oauth2-http`, and `gson` to versions that stay compatible with Spark 3.5 / Dataproc 2.3. Those pins are not version ranges: a range would float consumers onto newer GAX/gRPC/Guava. Override the Google clients in your own POM or BOM if you need a newer stack.
+
+**SLF4J** and **Log4j** are `provided`: at runtime Spark supplies them; they are excluded from the
+shaded `*-all.jar`. **Gson** is compile-scoped, pinned, and included in the fat JAR (not relocated).
+Local builds align test Log4j with each Spark profile (`spark35` → 2.20.0, `spark40`/`spark41` →
+2.24.3, `spark42`/`spark43` → 2.25.4) so tests exercise the same Log4j line as that Spark release.
 
 ### Snapshot builds
 

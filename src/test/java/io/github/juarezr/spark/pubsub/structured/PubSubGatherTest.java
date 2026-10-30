@@ -6,7 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -429,12 +431,240 @@ class PubSubGatherTest {
   }
 
   @Test
+  void byteOverflowIsRequeuedInsteadOfNacked() {
+    PubSubClient client = mock(PubSubClient.class);
+    int oneMib = 1024 * 1024;
+    PulledMessage fits =
+        new PulledMessage("fit", new byte[oneMib], Collections.emptyMap(), 0L, "", "ack-fit");
+    PulledMessage extra =
+        new PulledMessage("extra", new byte[] {1}, Collections.emptyMap(), 0L, "", "ack-extra");
+    when(client.poll(any(Duration.class))).thenReturn(List.of(fits, extra));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .batchSize(oneMib)
+            .receiveTime(Duration.ofMillis(200))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset latest = stream.latestOffset();
+    InputPartition[] partitions = stream.planInputPartitions(stream.initialOffset(), latest);
+
+    assertEquals(1, ((PubSubInputPartition) partitions[0]).messages().size());
+    assertEquals("ack-fit", ((PubSubInputPartition) partitions[0]).messages().get(0).ackId());
+    verify(client)
+        .requeue(
+            argThat(
+                overflow -> overflow.size() == 1 && "ack-extra".equals(overflow.get(0).ackId())));
+    verify(client, never()).nack(anyList());
+    verify(client, never()).releaseMessages(anyList());
+  }
+
+  @Test
+  void gatherStopsPollingWhenHeapCeilingIsReached() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.aboveHeapCeiling()).thenReturn(false, true);
+    when(client.poll(any(Duration.class))).thenReturn(messages(0, 2));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .receiveTime(Duration.ofSeconds(5))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset latest = stream.latestOffset();
+    InputPartition[] partitions = stream.planInputPartitions(stream.initialOffset(), latest);
+
+    assertEquals(2, ((PubSubInputPartition) partitions[0]).messages().size());
+    verify(client, times(1)).poll(any(Duration.class));
+    verify(client).noteHeapCeiling();
+    verify(client, never()).nack(anyList());
+  }
+
+  @Test
+  void gatherPollsAfterTheHeapCeilingCools() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.aboveHeapCeiling()).thenReturn(true, false, true);
+    when(client.poll(any(Duration.class))).thenReturn(List.of()).thenReturn(messages(0, 2));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .receiveTime(Duration.ofSeconds(5))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset latest = stream.latestOffset();
+    InputPartition[] partitions = stream.planInputPartitions(stream.initialOffset(), latest);
+
+    assertEquals(2, ((PubSubInputPartition) partitions[0]).messages().size());
+    verify(client, times(2)).poll(any(Duration.class));
+    verify(client, times(2)).noteHeapCeiling();
+    verify(client, never()).nack(anyList());
+  }
+
+  @Test
+  void gatherReturnsEmptyWhenTheHeapCeilingStaysHot() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.aboveHeapCeiling()).thenReturn(true);
+    when(client.poll(any(Duration.class))).thenReturn(List.of());
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .receiveTime(Duration.ofMillis(80))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    stream.latestOffset();
+
+    verify(client, atLeast(1)).poll(argThat(timeout -> timeout.toMillis() <= 1));
+    verify(client, atLeast(1)).noteHeapCeiling();
+    verify(client, never()).nack(anyList());
+  }
+
+  @Test
+  void gatherKeepsMessagesAlreadyQueuedWhenTheHeapCeilingIsHot() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.aboveHeapCeiling()).thenReturn(true);
+    when(client.poll(any(Duration.class))).thenReturn(messages(0, 2));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .receiveTime(Duration.ofSeconds(5))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset latest = stream.latestOffset();
+    InputPartition[] partitions = stream.planInputPartitions(stream.initialOffset(), latest);
+
+    assertEquals(2, ((PubSubInputPartition) partitions[0]).messages().size());
+    verify(client, times(1)).poll(argThat(timeout -> timeout.toMillis() <= 1));
+    verify(client, never()).nack(anyList());
+  }
+
+  @Test
   void toStringUsesSubscriptionPath() {
     PubSubConfig config = PubSubConfig.builder().projectId("p").subscription("s").build();
     PubSubMicroBatchStream stream =
         new PubSubMicroBatchStream(config, 1, mock(PubSubClient.class), false);
 
     assertEquals("google-pubsub:projects/p/subscriptions/s", stream.toString());
+  }
+
+  @Test
+  void movedCapAcksTheWrittenBatchAndCommitDoesNotReleaseAgain() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.capMoved()).thenReturn(true);
+    when(client.poll(any(Duration.class))).thenReturn(messages(0, 1)).thenReturn(messages(1, 1));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.AFTER_COMMIT)
+            .receiveTime(Duration.ofMillis(200))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset();
+    verify(client, never()).acknowledge(anyList());
+    verify(client, never()).releaseMessages(anyList());
+
+    stream.latestOffset(first, ReadLimit.allAvailable());
+    verify(client, times(1)).acknowledge(anyList());
+    verify(client, times(1)).releaseMessages(anyList());
+
+    stream.commit(first);
+    verify(client, times(2)).acknowledge(anyList());
+    verify(client, times(1)).releaseMessages(anyList());
+  }
+
+  @Test
+  void unchangedCapDoesNotAckEarly() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.capMoved()).thenReturn(false);
+    when(client.poll(any(Duration.class))).thenReturn(messages(0, 1)).thenReturn(messages(1, 1));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.AFTER_COMMIT)
+            .receiveTime(Duration.ofMillis(200))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset();
+    stream.latestOffset(first, ReadLimit.allAvailable());
+
+    verify(client, never()).acknowledge(anyList());
+    verify(client, never()).releaseMessages(anyList());
+
+    stream.commit(first);
+    verify(client, times(1)).acknowledge(anyList());
+    verify(client, times(1)).releaseMessages(anyList());
+  }
+
+  @Test
+  void afterCheckpointAcksWhenTheCapDidNotMoveAndDropsThePayload() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.capMoved()).thenReturn(false);
+    when(client.poll(any(Duration.class))).thenReturn(messages(0, 1)).thenReturn(messages(1, 1));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.AFTER_CHECKPOINT)
+            .gatherMode(GatherMode.IMMEDIATE)
+            .receiveTime(Duration.ofMillis(200))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset();
+    verify(client, never()).acknowledge(anyList());
+
+    stream.latestOffset(first, ReadLimit.allAvailable());
+    verify(client, times(1)).acknowledge(anyList());
+    verify(client, times(1)).releaseMessages(anyList());
+
+    long batchId = ((PubSubOffset) first).batchId();
+    List<PulledMessage> retained = stream.retainedMessages(batchId);
+    assertEquals(1, retained.size());
+    assertEquals("ack-0", retained.get(0).ackId());
+    assertEquals(0, retained.get(0).data().length);
+
+    stream.commit(first);
+    verify(client, times(2)).acknowledge(anyList());
+    verify(client, times(1)).releaseMessages(anyList());
+  }
+
+  @Test
+  void afterCheckpointKeepsThePayloadWhenTheAckFails() {
+    PubSubClient client = mock(PubSubClient.class);
+    when(client.capMoved()).thenReturn(false);
+    doThrow(new RuntimeException("ack failed")).when(client).acknowledge(anyList());
+    when(client.poll(any(Duration.class))).thenReturn(messages(0, 1)).thenReturn(messages(1, 1));
+    PubSubConfig config =
+        PubSubConfig.builder()
+            .projectId("p")
+            .subscription("s")
+            .ackMode(AckMode.AFTER_CHECKPOINT)
+            .gatherMode(GatherMode.IMMEDIATE)
+            .receiveTime(Duration.ofMillis(200))
+            .build();
+    PubSubMicroBatchStream stream = new PubSubMicroBatchStream(config, 1, client, false);
+
+    Offset first = stream.latestOffset();
+    stream.latestOffset(first, ReadLimit.allAvailable());
+
+    verify(client, never()).releaseMessages(anyList());
+    long batchId = ((PubSubOffset) first).batchId();
+    List<PulledMessage> retained = stream.retainedMessages(batchId);
+    assertEquals(1, retained.size());
+    assertEquals("ack-0", retained.get(0).ackId());
+    assertEquals(1, retained.get(0).data().length);
   }
 
   private static List<PulledMessage> messages(int start, int count) {

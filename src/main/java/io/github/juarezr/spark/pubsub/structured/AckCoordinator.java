@@ -32,6 +32,13 @@ final class AckCoordinator implements Serializable {
     pendingByBatch.put(batchId, new ArrayList<>(messages));
   }
 
+  /** Swaps the stored list after the payloads have been acked and are no longer needed. */
+  void replaceBatch(String batchId, List<PulledMessage> messages) {
+    if (pendingByBatch.containsKey(batchId)) {
+      pendingByBatch.put(batchId, new ArrayList<>(messages));
+    }
+  }
+
   List<PulledMessage> messagesForBatch(String batchId) {
     return pendingByBatch.getOrDefault(batchId, Collections.emptyList());
   }
@@ -72,7 +79,7 @@ final class AckCoordinator implements Serializable {
     if (messages == null) {
       return;
     }
-    if (ackMode == AckMode.AFTER_COMMIT && !messages.isEmpty()) {
+    if (holdsUntilCheckpoint() && !messages.isEmpty()) {
       final List<String> ackIds = PulledMessage.ackIds(messages);
       try {
         client.nack(ackIds);
@@ -109,5 +116,9 @@ final class AckCoordinator implements Serializable {
 
   void clear() {
     pendingByBatch.clear();
+  }
+
+  private boolean holdsUntilCheckpoint() {
+    return ackMode == AckMode.AFTER_COMMIT || ackMode == AckMode.AFTER_CHECKPOINT;
   }
 }

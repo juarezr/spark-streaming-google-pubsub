@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>io.github.juarezr</groupId>
   <artifactId>spark-streaming-google-pubsub_${scala.binary.version}</artifactId>
-  <version>0.9.4-SNAPSHOT</version>
+  <version>1.0.0-SNAPSHOT</version>
   <packaging>jar</packaging>
 
   <name>spark-streaming-google-pubsub</name>
@@ -39,10 +39,12 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>11</maven.compiler.release>
     <scala.binary.version>2.12</scala.binary.version>
+    <!-- Defaults matches spark35; other Spark profiles override below. -->
     <spark.version>3.5.9</spark.version>
     <google-cloud-pubsub.version>1.137.1</google-cloud-pubsub.version>
     <google-auth.version>1.30.0</google-auth.version>
     <slf4j.version>2.0.17</slf4j.version>
+    <log4j.version>2.20.0</log4j.version>
     <junit.version>5.11.4</junit.version>
     <mockito.version>5.14.2</mockito.version>
     <mockito.agent.jar>${settings.localRepository}/org/mockito/mockito-core/${mockito.version}/mockito-core-${mockito.version}.jar</mockito.agent.jar>
@@ -84,6 +86,18 @@
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
       <version>${slf4j.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-api</artifactId>
+      <version>${log4j.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <version>${log4j.version}</version>
       <scope>provided</scope>
     </dependency>
 
@@ -242,7 +256,7 @@
               <version>1.22.0</version>
               <style>GOOGLE</style>
             </googleJavaFormat>
-            <removeUnusedImports/>
+            <removeUnusedImports />
           </java>
         </configuration>
         <executions>
@@ -327,8 +341,10 @@
                 </filter>
               </filters>
               <transformers>
-                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                <transformer
+                  implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
+                <transformer
+                  implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <manifestEntries>
                     <Automatic-Module-Name>io.github.juarezr.spark.pubsub</Automatic-Module-Name>
                     <Implementation-Title>${project.artifactId}</Implementation-Title>
@@ -360,30 +376,43 @@
       <properties>
         <scala.binary.version>2.12</scala.binary.version>
         <spark.version>3.5.9</spark.version>
+        <log4j.version>2.20.0</log4j.version>
       </properties>
     </profile>
     <profile>
       <id>spark40</id>
       <properties>
         <scala.binary.version>2.13</scala.binary.version>
-        <spark.version>4.0.4</spark.version>
+        <spark.version>4.0.5</spark.version>
         <maven.compiler.release>17</maven.compiler.release>
+        <log4j.version>2.24.3</log4j.version>
       </properties>
     </profile>
     <profile>
       <id>spark41</id>
       <properties>
         <scala.binary.version>2.13</scala.binary.version>
-        <spark.version>4.1.3</spark.version>
+        <spark.version>4.1.4</spark.version>
         <maven.compiler.release>17</maven.compiler.release>
+        <log4j.version>2.24.3</log4j.version>
       </properties>
     </profile>
     <profile>
       <id>spark42</id>
       <properties>
         <scala.binary.version>2.13</scala.binary.version>
-        <spark.version>4.2.0</spark.version>
+        <spark.version>4.2.1</spark.version>
         <maven.compiler.release>17</maven.compiler.release>
+        <log4j.version>2.25.4</log4j.version>
+      </properties>
+    </profile>
+    <profile>
+      <id>spark43</id>
+      <properties>
+        <scala.binary.version>2.13</scala.binary.version>
+        <spark.version>4.3.0</spark.version>
+        <maven.compiler.release>17</maven.compiler.release>
+        <log4j.version>2.25.4</log4j.version>
       </properties>
     </profile>
     <!-- Local development profiles -->
@@ -441,7 +470,7 @@
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-failsafe-plugin</artifactId>
             <configuration>
-              <argLine>@{argLine} ${spark.jvm.args}</argLine>
+              <argLine>@{jacoco.agent.it.argLine} ${spark.jvm.args}</argLine>
             </configuration>
           </plugin>
           <plugin>
@@ -460,6 +489,28 @@
                 <goals>
                   <goal>prepare-agent-integration</goal>
                 </goals>
+                <configuration>
+                  <propertyName>jacoco.agent.it.argLine</propertyName>
+                </configuration>
+              </execution>
+              <execution>
+                <id>merge</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>merge</goal>
+                </goals>
+                <configuration>
+                  <fileSets>
+                    <fileSet>
+                      <directory>${project.build.directory}</directory>
+                      <includes>
+                        <include>jacoco.exec</include>
+                        <include>jacoco-it.exec</include>
+                      </includes>
+                    </fileSet>
+                  </fileSets>
+                  <destFile>${project.build.directory}/jacoco-merged.exec</destFile>
+                </configuration>
               </execution>
               <execution>
                 <id>report</id>
@@ -467,6 +518,9 @@
                 <goals>
                   <goal>report</goal>
                 </goals>
+                <configuration>
+                  <dataFile>${project.build.directory}/jacoco-merged.exec</dataFile>
+                </configuration>
               </execution>
             </executions>
           </plugin>

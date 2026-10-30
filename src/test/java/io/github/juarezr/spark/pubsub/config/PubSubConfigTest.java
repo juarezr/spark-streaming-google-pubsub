@@ -58,7 +58,7 @@ class PubSubConfigTest {
     assertEquals(SeekMode.NONE, config.seekMode());
     assertEquals(GatherMode.BATCH, config.gatherMode());
     assertEquals(null, config.receiveTime());
-    assertEquals(64L * 1024 * 1024, config.batchSize());
+    assertEquals(512L * 1024 * 1024, config.batchSize());
     assertEquals(1, config.numWriters());
     assertEquals(SchemaMode.BASIC, config.schemaMode());
     assertEquals(MetadataMode.NONE, config.metadataMode());
@@ -211,6 +211,8 @@ class PubSubConfigTest {
   void ackModeFromString() {
     assertEquals(AckMode.AFTER_COMMIT, AckMode.fromString("afterCommit"));
     assertEquals(AckMode.AFTER_COMMIT, AckMode.fromString("after_commit"));
+    assertEquals(AckMode.AFTER_CHECKPOINT, AckMode.fromString("afterCheckpoint"));
+    assertEquals(AckMode.AFTER_CHECKPOINT, AckMode.fromString("after_checkpoint"));
     assertEquals(AckMode.EARLY, AckMode.fromString("early"));
     assertThrows(IllegalArgumentException.class, () -> AckMode.fromString("never"));
   }

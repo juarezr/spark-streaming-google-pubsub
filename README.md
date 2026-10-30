@@ -18,7 +18,7 @@ Read a subscription into Structured Streaming with `.format("google-pubsub")`.
 - No subscription rewind on restart unless you set `seek`
 - Streaming-pull subscriber on the driver, queue polling with `gatherMode=batch` or low-latency
   `gatherMode=immediate`, retries, and subscriber-side ack-lease renewal for long-running jobs
-- Spark **3.5** (Scala 2.12) and Spark **4.0–4.2** (Scala 2.13), including Dataproc **2.3** and **3.0**
+- Spark **3.5** (Scala 2.12) and Spark **4.0–4.3** (Scala 2.13), including Dataproc **2.3** and **3.0**
 
 Authentication uses **Application Default Credentials (ADC)** unless you set `credentialsFile`.
 
@@ -26,12 +26,21 @@ Authentication uses **Application Default Credentials (ADC)** unless you set `cr
 
 | Spark   | Scala | Artifact                                                     |
 |---------|-------|--------------------------------------------------------------|
-| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.4` |
-| 4.0–4.2 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.9.4` |
+| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:1.0.0` |
+| 4.0–4.3 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:1.0.0` |
+
+### Classpath and bundled libraries
 
 Prefer `--packages` or a Maven/Gradle dependency so Google client libraries come in as transitives.
 Fat JARs (`*-all.jar`) are not on Maven Central; build with `mvn package` or download them from
 [GitHub Releases](https://github.com/juarezr/spark-streaming-google-pubsub/releases).
+
+On a Spark cluster, **SLF4J** and **Log4j** come from the Spark distribution (`provided` in this
+project’s POM—they are not packaged in the connector JAR). **Gson** is pinned for offset JSON and
+is **shaded into the `*-all.jar`** fat artifact together with the Google Pub/Sub client stack; the
+thin JAR on Maven Central declares the same pinned `gson` version for Maven/Gradle resolution.
+See [Thin JAR dependencies](docs/publishing-maven-central.md#thin-jar-dependencies) for override
+guidance.
 
 ## Quick start
 
@@ -89,12 +98,12 @@ Full script: [`examples/python/structured_streaming_example.py`](examples/python
 | `seekSnapshot` | | Snapshot resource when `seek=snapshot` |
 | `limitTime` | | Exclusive `publishTime` upper bound. Requires `Trigger.AvailableNow()`. With `seek=timestamp` the window is `[seekTime, limitTime)` |
 | `maxRetryTime` | `min(90s, ackDeadline)` | Retry budget for ack and nack RPCs. Omit to clamp. |
-| `ackMode` | `afterCommit` | `afterCommit` or `early` |
+| `ackMode` | `afterCommit` | `afterCommit` (default), `afterCheckpoint`, or `early` |
 | `ackDeadline` | auto (`3 ×` batch interval, seed 180s) | Lease step; Subscriber renews until Spark commits. Omit to infer. |
-| `gatherMode` | `batch` | `batch` collects until `receiveTime` / caps; `immediate` returns a batch as soon as messages arrive (`pull` is a deprecated alias) |
+| `gatherMode` | `batch` | `batch` collects until `receiveTime` / caps; `immediate` returns a batch as soon as messages arrive |
 | `receiveTime` | auto | How long this batch may take from the queue. Omit with `Trigger.ProcessingTime` |
 | `processingTime` | | Spark `Trigger.ProcessingTime` duration (e.g. `60s`). When `receiveTime` is auto, sets the batch interval hint so startup probe gaps are not mistaken for the trigger |
-| `batchSize` | `64m` | Max payload bytes per batch and Subscriber outstanding bytes. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
+| `batchSize` | `512m` | Max payload bytes per batch and Subscriber outstanding bytes. Capped by Spark `maxBytesPerTrigger` (Spark 4+) |
 | `batchCount` | | Max messages per batch. Capped by Spark `maxRowsPerTrigger` |
 | `numWriters` | `1` | Spark tasks per micro-batch; integer ≥1 or `auto` (driver CPU count) |
 | `schemaMode` | `basic` | `raw`, `basic`, `slim`, `dynamic`, or `mixed` |
@@ -175,8 +184,8 @@ sequenceDiagram
   Spark->>Driver: next micro-batch
   Driver->>Queue: poll until receiveTime or batchSize
   Driver-->>Spark: this micro-batch
-  PubSub-->>Queue: still pushing messages\nfor next micro-batch
-  Spark->>Executor: write parquet\nfoward\repartition
+  PubSub-->>Queue: "still pushing messages\nfor next micro-batch"
+  Spark->>Executor: "write parquet\nfoward\nrepartition"
   Note over Executor: run application stages
   Spark->>Driver: commit
   Driver->>PubSub: acknowledge
@@ -281,8 +290,12 @@ flowchart LR
 
 ## Reliability
 
-- **`ackMode=afterCommit` (default):** ack after Spark commits. A failure before commit redelivers
-  (at-least-once). The streaming-pull subscriber renews ack leases until commit.
+- **`ackMode=afterCommit` (default):** ack when Spark calls `commit()`, after the next gather. A
+  failure before that redelivers (at-least-once). The streaming-pull subscriber renews ack leases
+  until then.
+- **`ackMode=afterCheckpoint`:** ack a batch that is already in the commit log, at the start of the
+  next gather, and drop that payload copy. A crash during the write is unchanged. Spark 3.5
+  micro-batch writes that commit log before the next gather.
 - **`ackMode=early`:** ack soon after receive. Faster release, higher loss risk on crash.
 - An uncommitted batch that is replaced or stopped is nacked so Pub/Sub can redeliver quickly.
 - Ack and nack RPCs retry for up to `maxRetryTime`.
@@ -354,8 +367,8 @@ recovered
 1. Prefer `--packages` so Google clients resolve from Maven Central. Or copy `*-all.jar` from a
    [GitHub Release](https://github.com/juarezr/spark-streaming-google-pubsub/releases) to GCS and
    pass `--jars`.
-2. Use Dataproc 2.3 (Spark 3.5 / Scala 2.12) or 3.0 (Spark 4.1 / Scala 2.13). Spark 4.2 uses the
-   same `_2.13` artifact on other platforms until Dataproc ships it.
+2. Use Dataproc 2.3 (Spark 3.5 / Scala 2.12) or 3.0 (Spark 4.1 / Scala 2.13). Spark 4.2 and 4.3 use the
+   same `_2.13` artifact on other platforms until Dataproc ships them.
 3. Grant the cluster service account `roles/pubsub.subscriber` (and publisher if needed).
 4. Use the metadata server for ADC — do not ship JSON keys.
 
@@ -363,7 +376,7 @@ recovered
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.4 \
+  --packages=io.github.juarezr:spark-streaming-google-pubsub_2.12:1.0.0 \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -372,7 +385,7 @@ gcloud dataproc jobs submit spark \
 gcloud dataproc jobs submit spark \
   --cluster=my-cluster \
   --region=us-east4 \
-  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-0.9.4-all.jar \
+  --jars=gs://my-bucket/jars/spark-streaming-google-pubsub_2.12-1.0.0-all.jar \
   --class=com.example.MyApp \
   -- gs://my-bucket/apps/my-app.jar
 ```
@@ -396,9 +409,10 @@ mvn -Pspark35 clean verify
 # Spark 4.1 / Scala 2.13 (published _2.13 baseline)
 mvn -Pspark41 clean verify
 
-# Spark 4.0 / 4.2 (same artifactId; CI-only profiles)
+# Spark 4.0 / 4.2 / 4.3 (same artifactId; CI-only profiles)
 mvn -Pspark40 clean verify
 mvn -Pspark42 clean verify
+mvn -Pspark43 clean verify
 
 mvn -Pspark35 spotless:check
 mvn -Pspark35 spotless:apply
@@ -435,7 +449,7 @@ mvn -Pspark35 -DskipTests package
 
 spark-submit \
   --class io.github.juarezr.spark.pubsub.examples.JavaStructuredStreamingExample \
-  --jars target/spark-streaming-google-pubsub_2.12-0.9.4-all.jar \
+  --jars target/spark-streaming-google-pubsub_2.12-1.0.0-all.jar \
   examples/java/JavaStructuredStreamingExample.java \
   YOUR_PROJECT YOUR_SUBSCRIPTION /tmp/pubsub-cp /tmp/pubsub-out
 ```
