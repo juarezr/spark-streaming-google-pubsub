@@ -40,6 +40,10 @@ final class PubSubClient implements Closeable, Serializable {
   private static final long serialVersionUID = -3861530486L;
   private static final Logger LOG = LoggerFactory.getLogger(PubSubClient.class);
 
+  static {
+    MessageDispatcherLog.install();
+  }
+
   private final RetryPolicy retryPolicy;
   private PubSubConnectionErrors connectionErrors;
   private transient PubSubEmulator emulator;
