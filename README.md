@@ -18,7 +18,7 @@ Read a subscription into Structured Streaming with `.format("google-pubsub")`.
 - No subscription rewind on restart unless you set `seek`
 - Streaming-pull subscriber on the driver, queue polling with `gatherMode=batch` or low-latency
   `gatherMode=immediate`, retries, and subscriber-side ack-lease renewal for long-running jobs
-- Spark **3.5** (Scala 2.12) and Spark **4.0–4.2** (Scala 2.13), including Dataproc **2.3** and **3.0**
+- Spark **3.5** (Scala 2.12) and Spark **4.0–4.3** (Scala 2.13), including Dataproc **2.3** and **3.0**
 
 Authentication uses **Application Default Credentials (ADC)** unless you set `credentialsFile`.
 
@@ -26,6 +26,8 @@ Authentication uses **Application Default Credentials (ADC)** unless you set `cr
 
 | Spark   | Scala | Artifact                                                     |
 |---------|-------|--------------------------------------------------------------|
+| 3.5.x   | 2.12  | `io.github.juarezr:spark-streaming-google-pubsub_2.12:0.9.5` |
+| 4.0–4.3 | 2.13  | `io.github.juarezr:spark-streaming-google-pubsub_2.13:0.9.5` |
 
 ### Classpath and bundled libraries
 
@@ -365,8 +367,8 @@ recovered
 1. Prefer `--packages` so Google clients resolve from Maven Central. Or copy `*-all.jar` from a
    [GitHub Release](https://github.com/juarezr/spark-streaming-google-pubsub/releases) to GCS and
    pass `--jars`.
-2. Use Dataproc 2.3 (Spark 3.5 / Scala 2.12) or 3.0 (Spark 4.1 / Scala 2.13). Spark 4.2 uses the
-   same `_2.13` artifact on other platforms until Dataproc ships it.
+2. Use Dataproc 2.3 (Spark 3.5 / Scala 2.12) or 3.0 (Spark 4.1 / Scala 2.13). Spark 4.2 and 4.3 use the
+   same `_2.13` artifact on other platforms until Dataproc ships them.
 3. Grant the cluster service account `roles/pubsub.subscriber` (and publisher if needed).
 4. Use the metadata server for ADC — do not ship JSON keys.
 
@@ -407,9 +409,10 @@ mvn -Pspark35 clean verify
 # Spark 4.1 / Scala 2.13 (published _2.13 baseline)
 mvn -Pspark41 clean verify
 
-# Spark 4.0 / 4.2 (same artifactId; CI-only profiles)
+# Spark 4.0 / 4.2 / 4.3 (same artifactId; CI-only profiles)
 mvn -Pspark40 clean verify
 mvn -Pspark42 clean verify
+mvn -Pspark43 clean verify
 
 mvn -Pspark35 spotless:check
 mvn -Pspark35 spotless:apply

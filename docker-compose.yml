@@ -5,6 +5,7 @@
 #$ docker compose up --detach
 #
 #$ PUBSUB_EMULATOR_HOST=localhost:8085 mvn -Pspark35 verify
+#$ PUBSUB_EMULATOR_HOST=localhost:8085 mvn -Pspark43 verify
 #
 #$ docker compose down --remove-orphans -v
 

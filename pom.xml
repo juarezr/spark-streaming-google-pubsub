@@ -383,7 +383,7 @@
       <id>spark40</id>
       <properties>
         <scala.binary.version>2.13</scala.binary.version>
-        <spark.version>4.0.4</spark.version>
+        <spark.version>4.0.5</spark.version>
         <maven.compiler.release>17</maven.compiler.release>
         <log4j.version>2.24.3</log4j.version>
       </properties>
@@ -392,7 +392,7 @@
       <id>spark41</id>
       <properties>
         <scala.binary.version>2.13</scala.binary.version>
-        <spark.version>4.1.3</spark.version>
+        <spark.version>4.1.4</spark.version>
         <maven.compiler.release>17</maven.compiler.release>
         <log4j.version>2.24.3</log4j.version>
       </properties>
@@ -401,7 +401,16 @@
       <id>spark42</id>
       <properties>
         <scala.binary.version>2.13</scala.binary.version>
-        <spark.version>4.2.0</spark.version>
+        <spark.version>4.2.1</spark.version>
+        <maven.compiler.release>17</maven.compiler.release>
+        <log4j.version>2.25.4</log4j.version>
+      </properties>
+    </profile>
+    <profile>
+      <id>spark43</id>
+      <properties>
+        <scala.binary.version>2.13</scala.binary.version>
+        <spark.version>4.3.0</spark.version>
         <maven.compiler.release>17</maven.compiler.release>
         <log4j.version>2.25.4</log4j.version>
       </properties>

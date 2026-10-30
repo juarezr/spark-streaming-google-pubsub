@@ -25,6 +25,9 @@ jobs:
           - spark: "4.2"
             profile: spark42
             java: "21"
+          - spark: "4.3"
+            profile: spark43
+            java: "21"
     steps:
       - name: Checkout source code at commit ${{ github.sha }}
         id: checkout-source-code
